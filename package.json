@@ -1,0 +1,61 @@
+{
+  "name": "neverland-hyperindex",
+  "version": "1.0.0",
+  "description": "Neverland Protocol Indexer - Envio HyperIndex",
+  "scripts": {
+    "codegen": "envio codegen",
+    "dev": "envio dev",
+    "start": "envio start",
+    "stop": "envio stop",
+    "local:docker:up": "envio local docker up",
+    "local:docker:down": "envio local docker down",
+    "format": "prettier --write \"src/**/*.ts\" \"abis/**/*.json\" \"*.json\" \"*.yaml\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"abis/**/*.json\" \"*.json\" \"*.yaml\"",
+    "lint": "eslint . --ext .ts",
+    "lint:fix": "eslint . --ext .ts --fix",
+    "test:build": "tsc -p tsconfig.json --outDir dist-test --sourceMap",
+    "test": "npm run test:build && node --test dist-test/src/__tests__/*.test.js",
+    "test:coverage": "npm run test:build && c8 --reporter=text --reporter=lcov --reporter=html node --test dist-test/src/__tests__/*.test.js",
+    "test:coverage:check": "npm run test:coverage -- --check-coverage --lines 100 --functions 100 --branches 100 --statements 100",
+    "type-check": "tsc --noEmit",
+    "prepare": "husky"
+  },
+  "c8": {
+    "all": true,
+    "include": [
+      "src/**/*.ts"
+    ],
+    "exclude": [
+      "src/**/__tests__/**",
+      "**/handlers/lp.ts",
+      "coverage/**",
+      "dist-test/**",
+      "generated/**",
+      ".prettierrc.js",
+      "eslint.config.js"
+    ],
+    "exclude-after-remap": true
+  },
+  "keywords": [
+    "envio",
+    "indexer",
+    "neverland",
+    "defi"
+  ],
+  "author": "",
+  "license": "BUSL-1.1",
+  "dependencies": {
+    "envio": "^2.32.3",
+    "viem": "^2.43.3"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.3",
+    "@typescript-eslint/eslint-plugin": "^8.50.1",
+    "@typescript-eslint/parser": "^8.50.1",
+    "c8": "^10.1.3",
+    "eslint": "^9.39.2",
+    "husky": "^9.1.7",
+    "prettier": "^3.7.4",
+    "typescript": "^5.9.3"
+  }
+}

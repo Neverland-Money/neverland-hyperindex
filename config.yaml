@@ -1,0 +1,315 @@
+# yaml-language-server: $schema=./node_modules/envio/evm.schema.json
+name: neverland-indexer
+description: Neverland Protocol Indexer
+
+field_selection:
+  transaction_fields:
+    - hash
+    - from
+    - to
+
+networks:
+  - id: 143 # Monad mainnet
+    start_block: 32587107
+    contracts:
+      # --------------------------------------
+      #           CONFIGURATIONS
+      # --------------------------------------
+      - name: PoolAddressesProviderRegistry
+        address: 0xD0CCDe10CAcd12f1c839Db6400B82a82ab90fa9B
+        handler: src/handlers/config.ts
+        events:
+          - event: AddressesProviderRegistered(address indexed addressesProvider, uint256 indexed id)
+          - event: AddressesProviderUnregistered(address indexed addressesProvider, uint256 indexed id)
+
+      # --------------------------------------
+      #     Incentives: RewardsController
+      # --------------------------------------
+      - name: RewardsController
+        address: 0x57ea245cCbFAb074baBb9d01d1F0c60525E52cec
+        handler: src/handlers/rewards.ts
+        events:
+          - event: AssetConfigUpdated(address indexed asset, address indexed reward, uint256 oldEmission, uint256 newEmission, uint256 oldDistributionEnd, uint256 newDistributionEnd, uint256 assetIndex)
+          - event: Accrued(address indexed asset, address indexed reward, address indexed user, uint256 assetIndex, uint256 userIndex, uint256 rewardsAccrued)
+          - event: RewardsClaimed(address indexed user, address indexed reward, address indexed to, address claimer, uint256 amount)
+          - event: ClaimerSet(address indexed user, address indexed claimer)
+          - event: TransferStrategyInstalled(address indexed reward, address indexed transferStrategy)
+
+      # --------------------------------------
+      #     Neverland: DustLock (veNFT)
+      # --------------------------------------
+      - name: DustLock
+        address: 0xBB4738D05AD1b3Da57a4881baE62Ce9bb1eEeD6C
+        handler: src/handlers/dustlock.ts
+        events:
+          - event: Deposit(address indexed provider, uint256 indexed tokenId, uint8 indexed depositType, uint256 value, uint256 locktime, uint256 ts)
+          - event: EarlyWithdraw(address indexed provider, uint256 indexed tokenId, uint256 value, uint256 amountReturned, uint256 ts)
+          - event: Withdraw(address indexed provider, uint256 indexed tokenId, uint256 value, uint256 ts)
+          - event: LockPermanent(address indexed sender, uint256 indexed tokenId, uint256 amount, uint256 ts)
+          - event: UnlockPermanent(address indexed sender, uint256 indexed tokenId, uint256 amount, uint256 ts)
+          - event: Supply(uint256 prevSupply, uint256 supply)
+          - event: Merge(address indexed sender, uint256 indexed from, uint256 indexed to, uint256 amountFrom, uint256 amountTo, uint256 amountFinal, uint256 locktime, uint256 ts)
+          - event: Split(uint256 indexed from, uint256 indexed tokenId1, uint256 indexed tokenId2, address sender, uint256 splitAmount1, uint256 splitAmount2, uint256 locktime, uint256 ts)
+          - event: Transfer(address indexed from, address indexed to, uint256 indexed tokenId)
+          - event: EarlyWithdrawPenaltyUpdated(uint256 oldPenalty, uint256 newPenalty)
+          - event: EarlyWithdrawTreasuryUpdated(address indexed oldTreasury, address indexed newTreasury)
+          - event: MinLockAmountUpdated(uint256 oldAmount, uint256 newAmount)
+          - event: RevenueRewardUpdated(address indexed oldReward, address indexed newReward)
+          - event: SplitPermissionUpdated(address indexed account, bool allowed)
+          - event: TeamProposed(address indexed currentTeam, address indexed proposedTeam)
+          - event: TeamAccepted(address indexed oldTeam, address indexed newTeam)
+          - event: TeamProposalCancelled(address indexed currentTeam, address indexed cancelledTeam)
+          - event: BaseURIUpdated(string oldBaseURI, string newBaseURI)
+          - event: MetadataUpdate(uint256 _tokenId)
+
+      # --------------------------------------
+      #     Neverland: DustToken
+      # --------------------------------------
+      - name: DustToken
+        address: 0xAD96C3dffCD6374294e2573A7fBBA96097CC8d7c
+        handler: src/handlers/rewards.ts
+        events:
+          - event: Transfer(address indexed from, address indexed to, uint256 value)
+          - event: Approval(address indexed owner, address indexed spender, uint256 value)
+          - event: OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner)
+          - event: OwnershipTransferred(address indexed previousOwner, address indexed newOwner)
+          - event: Paused(address account)
+          - event: Unpaused(address account)
+
+      # --------------------------------------
+      #     Neverland: RevenueReward
+      # --------------------------------------
+      - name: RevenueReward
+        address: 0xff20ac10eb808B1e31F5CfCa58D80eDE2Ba71c43
+        handler: src/handlers/rewards.ts
+        events:
+          - event: NotifyReward(address indexed from, address indexed token, uint256 epoch, uint256 amount)
+          - event: ClaimRewards(uint256 indexed tokenId, address indexed user, address indexed rewardToken, uint256 amount)
+          - event: RecoverTokens(address indexed token, uint256 amount)
+          - event: SelfRepayingLoanUpdate(uint256 indexed token, address rewardReceiver, bool isEnabled)
+          - event: RewardDistributorUpdated(address indexed oldDistributor, address indexed newDistributor)
+
+      # --------------------------------------
+      #     Neverland: UserVaultFactory
+      # --------------------------------------
+      - name: UserVaultFactory
+        address: 0xe82f2fa836BC5DB42a36C66027c0113BcAA28143
+        handler: src/handlers/config.ts
+        events:
+          - event: UserVaultCreated(address indexed user, address indexed vault)
+
+      # --------------------------------------
+      #     Leaderboard: EpochManager
+      # --------------------------------------
+      - name: EpochManager
+        address: 0xC13693F898F736666f46a73b2da8ecD9eA75a29c
+        handler: src/handlers/leaderboard.ts
+        events:
+          - event: EpochStart(uint256 indexed epochNumber, uint256 startTime)
+          - event: EpochEnd(uint256 indexed epochNumber, uint256 endTime)
+
+      # --------------------------------------
+      #     Leaderboard: LeaderboardConfig
+      # --------------------------------------
+      - name: LeaderboardConfig
+        address: 0x7F1D8ba99C5eF21B5930066529BA9996ac1076Dd
+        handler: src/handlers/leaderboard.ts
+        events:
+          - event: ConfigSnapshot(uint256 depositRateBps, uint256 borrowRateBps, uint256 vpRateBps, uint256 supplyDailyBonus, uint256 borrowDailyBonus, uint256 repayDailyBonus, uint256 withdrawDailyBonus, uint256 cooldownSeconds, uint256 minDailyBonusUsd, uint256 timestamp)
+          - event: DepositRateUpdated(uint256 oldRate, uint256 newRate, uint256 timestamp)
+          - event: BorrowRateUpdated(uint256 oldRate, uint256 newRate, uint256 timestamp)
+          - event: VpRateUpdated(uint256 oldRate, uint256 newRate, uint256 timestamp)
+          - event: DailyBonusUpdated(uint256 oldSupplyBonus, uint256 newSupplyBonus, uint256 oldBorrowBonus, uint256 newBorrowBonus, uint256 oldRepayBonus, uint256 newRepayBonus, uint256 oldWithdrawBonus, uint256 newWithdrawBonus, uint256 timestamp)
+          - event: CooldownUpdated(uint256 oldSeconds, uint256 newSeconds, uint256 timestamp)
+          - event: MinDailyBonusUsdUpdated(uint256 oldMin, uint256 newMin, uint256 timestamp)
+          - event: AddressBlacklisted(address indexed account, uint256 timestamp)
+          - event: AddressUnblacklisted(address indexed account, uint256 timestamp)
+          - event: PointsAwarded(address indexed user, uint256 points, string reason, uint256 timestamp)
+          - event: PointsRemoved(address indexed user, uint256 points, string reason, uint256 timestamp)
+          - event: LPPoolConfigured(address indexed pool, address indexed positionManager, address token0, address token1, uint256 lpRateBps, uint256 timestamp)
+          - event: LPPoolDisabled(address indexed pool, uint256 timestamp)
+          - event: LPRateUpdated(uint256 oldRate, uint256 newRate, uint256 timestamp)
+
+      # --------------------------------------
+      #     Leaderboard: LeaderboardKeeper
+      # --------------------------------------
+      - name: LeaderboardKeeper
+        address: 0x18AB7901a80ea595BF4888F47C2254f306C52664
+        handler: src/handlers/leaderboardKeeper.ts
+        events:
+          - event: VotingPowerSynced(address indexed user, uint256 votingPower, uint256 timestamp)
+          - event: NFTBalanceSynced(address indexed user, address indexed collection, uint256 balance, uint256 timestamp)
+          - event: LPBalanceSynced(address indexed user, address indexed pool, uint256 liquidity, uint256 timestamp)
+          - event: UserSettled(address indexed user, uint256 timestamp)
+          - event: BatchComplete(string operation, uint256 count, uint256 timestamp)
+          - event: KeeperUpdated(address indexed oldKeeper, address indexed newKeeper)
+          - event: MinSettlementIntervalUpdated(uint256 oldInterval, uint256 newInterval)
+          - event: SelfSyncCooldownUpdated(uint256 oldCooldown, uint256 newCooldown)
+          - event: OwnershipTransferred(address indexed previousOwner, address indexed newOwner)
+          - event: Initialized(uint8 version)
+
+      # --------------------------------------
+      #     Leaderboard: NFTPartnershipRegistry
+      # --------------------------------------
+      - name: NFTPartnershipRegistry
+        address: 0x569981B0dd2D062d6A54e4685Db0b2c196577650
+        handler: src/handlers/nft.ts
+        events:
+          - event: PartnershipAdded(address indexed collection, string name, bool active, uint256 startTimestamp, uint256 endTimestamp, uint256 currentFirstBonus, uint256 currentDecayRatio, uint256 totalPartnerships)
+          - event: PartnershipUpdated(address indexed collection, string name, bool active, uint256 startTimestamp, uint256 endTimestamp)
+          - event: PartnershipRemoved(address indexed collection, string name, uint256 totalPartnerships)
+          - event: MultiplierParamsUpdated(uint256 oldFirstBonus, uint256 newFirstBonus, uint256 oldDecayRatio, uint256 newDecayRatio, uint256 timestamp, uint256 totalActivePartnerships)
+
+      # --------------------------------------
+      #     Leaderboard: VotingPowerMultiplier
+      # --------------------------------------
+      - name: VotingPowerMultiplier
+        address: 0x03F17514294D35220Ed68510E6DA37f97409Fe65
+        handler: src/handlers/leaderboard.ts
+        events:
+          - event: TierAdded(uint256 indexed tierIndex, uint256 minVotingPower, uint256 multiplierBps, uint256 totalTiers)
+          - event: TierUpdated(uint256 indexed tierIndex, uint256 oldMinVotingPower, uint256 newMinVotingPower, uint256 oldMultiplierBps, uint256 newMultiplierBps)
+          - event: TierRemoved(uint256 indexed tierIndex, uint256 totalTiers)
+
+      # ============================================
+      #     DYNAMIC CONTRACTS (Factory Pattern)
+      # ============================================
+      # These contracts are discovered at runtime via contractRegister
+
+      # PoolAddressesProvider - registered from PoolAddressesProviderRegistry
+      - name: PoolAddressesProvider
+        abi_file_path: abis/lending/PoolAddressesProvider.json
+        handler: src/handlers/config.ts
+        events:
+          - event: ProxyCreated(bytes32 indexed id, address indexed proxyAddress, address indexed implementationAddress)
+          - event: PoolUpdated(address indexed oldAddress, address indexed newAddress)
+          - event: PoolConfiguratorUpdated(address indexed oldAddress, address indexed newAddress)
+          - event: PriceOracleUpdated(address indexed oldAddress, address indexed newAddress)
+          - event: PoolDataProviderUpdated(address indexed oldAddress, address indexed newAddress)
+          - event: ACLAdminUpdated(address indexed oldAddress, address indexed newAddress)
+          - event: ACLManagerUpdated(address indexed oldAddress, address indexed newAddress)
+          - event: AddressSet(bytes32 indexed id, address indexed oldAddress, address indexed newAddress)
+          - event: AddressSetAsProxy(bytes32 indexed id, address indexed proxyAddress, address oldImplementationAddress, address indexed newImplementationAddress)
+          - event: MarketIdSet(string indexed oldMarketId, string indexed newMarketId)
+          - event: OwnershipTransferred(address indexed previousOwner, address indexed newOwner)
+          - event: PriceOracleSentinelUpdated(address indexed oldAddress, address indexed newAddress)
+
+      # PoolConfigurator - registered from PoolAddressesProvider.ProxyCreated
+      - name: PoolConfigurator
+        abi_file_path: abis/lending/PoolConfigurator.json
+        handler: src/handlers/config.ts
+        events:
+          - event: ReserveInitialized(address indexed asset, address indexed aToken, address stableDebtToken, address variableDebtToken, address interestRateStrategyAddress)
+          - event: ReserveBorrowing(address indexed asset, bool enabled)
+          - event: CollateralConfigurationChanged(address indexed asset, uint256 ltv, uint256 liquidationThreshold, uint256 liquidationBonus)
+          - event: ReserveStableRateBorrowing(address indexed asset, bool enabled)
+          - event: ReserveActive(address indexed asset, bool active)
+          - event: ReserveFrozen(address indexed asset, bool frozen)
+          - event: ReservePaused(address indexed asset, bool paused)
+          - event: ReserveDropped(address indexed asset)
+          - event: ReserveFactorChanged(address indexed asset, uint256 oldReserveFactor, uint256 newReserveFactor)
+          - event: BorrowCapChanged(address indexed asset, uint256 oldBorrowCap, uint256 newBorrowCap)
+          - event: SupplyCapChanged(address indexed asset, uint256 oldSupplyCap, uint256 newSupplyCap)
+          - event: EModeAssetCategoryChanged(address indexed asset, uint8 oldCategoryId, uint8 newCategoryId)
+          - event: EModeCategoryAdded(uint8 indexed categoryId, uint256 ltv, uint256 liquidationThreshold, uint256 liquidationBonus, address oracle, string label)
+          - event: ATokenUpgraded(address indexed asset, address indexed proxy, address indexed implementation)
+          - event: StableDebtTokenUpgraded(address indexed asset, address indexed proxy, address indexed implementation)
+          - event: VariableDebtTokenUpgraded(address indexed asset, address indexed proxy, address indexed implementation)
+          - event: BorrowableInIsolationChanged(address asset, bool borrowable)
+          - event: SiloedBorrowingChanged(address indexed asset, bool oldState, bool newState)
+          - event: BridgeProtocolFeeUpdated(uint256 oldBridgeProtocolFee, uint256 newBridgeProtocolFee)
+          - event: DebtCeilingChanged(address indexed asset, uint256 oldDebtCeiling, uint256 newDebtCeiling)
+          - event: UnbackedMintCapChanged(address indexed asset, uint256 oldUnbackedMintCap, uint256 newUnbackedMintCap)
+          - event: LiquidationProtocolFeeChanged(address indexed asset, uint256 oldFee, uint256 newFee)
+          - event: ReserveInterestRateStrategyChanged(address indexed asset, address oldStrategy, address newStrategy)
+          - event: FlashloanPremiumTotalUpdated(uint128 oldFlashloanPremiumTotal, uint128 newFlashloanPremiumTotal)
+          - event: FlashloanPremiumToProtocolUpdated(uint128 oldFlashloanPremiumToProtocol, uint128 newFlashloanPremiumToProtocol)
+          - event: AssetCollateralInEModeChanged(address indexed asset, uint8 categoryId, bool collateral)
+          - event: AssetBorrowableInEModeChanged(address indexed asset, uint8 categoryId, bool borrowable)
+
+      # Pool - registered from PoolAddressesProvider.ProxyCreated
+      - name: Pool
+        abi_file_path: abis/lending/Pool.json
+        handler: src/handlers/pool.ts
+        events:
+          - event: Supply(address indexed reserve, address user, address indexed onBehalfOf, uint256 amount, uint16 indexed referralCode)
+          - event: Withdraw(address indexed reserve, address indexed user, address indexed to, uint256 amount)
+          - event: Borrow(address indexed reserve, address user, address indexed onBehalfOf, uint256 amount, uint8 interestRateMode, uint256 borrowRate, uint16 indexed referralCode)
+          - event: Repay(address indexed reserve, address indexed user, address indexed repayer, uint256 amount, bool useATokens)
+          - event: FlashLoan(address indexed target, address initiator, address indexed asset, uint256 amount, uint8 interestRateMode, uint256 premium, uint16 indexed referralCode)
+          - event: LiquidationCall(address indexed collateralAsset, address indexed debtAsset, address indexed user, uint256 debtToCover, uint256 liquidatedCollateralAmount, address liquidator, bool receiveAToken)
+          - event: ReserveUsedAsCollateralEnabled(address indexed reserve, address indexed user)
+          - event: ReserveUsedAsCollateralDisabled(address indexed reserve, address indexed user)
+          - event: ReserveDataUpdated(address indexed reserve, uint256 liquidityRate, uint256 stableBorrowRate, uint256 variableBorrowRate, uint256 liquidityIndex, uint256 variableBorrowIndex)
+          - event: MintedToTreasury(address indexed reserve, uint256 amountMinted)
+          - event: UserEModeSet(address indexed user, uint8 categoryId)
+          - event: MintUnbacked(address indexed reserve, address user, address indexed onBehalfOf, uint256 amount, uint16 indexed referralCode)
+          - event: BackUnbacked(address indexed reserve, address indexed backer, uint256 amount, uint256 fee)
+          - event: IsolationModeTotalDebtUpdated(address indexed asset, uint256 totalDebt)
+          - event: SwapBorrowRateMode(address indexed reserve, address indexed user, uint8 interestRateMode)
+          - event: RebalanceStableBorrowRate(address indexed reserve, address indexed user)
+
+      # AToken - registered from PoolConfigurator.ReserveInitialized
+      - name: AToken
+        abi_file_path: abis/lending/AToken.json
+        handler: src/handlers/tokenization.ts
+        events:
+          - event: Mint(address indexed caller, address indexed onBehalfOf, uint256 value, uint256 balanceIncrease, uint256 index)
+          - event: Burn(address indexed from, address indexed target, uint256 value, uint256 balanceIncrease, uint256 index)
+          - event: BalanceTransfer(address indexed from, address indexed to, uint256 value, uint256 index)
+          - event: Initialized(address indexed underlyingAsset, address indexed pool, address treasury, address incentivesController, uint8 aTokenDecimals, string aTokenName, string aTokenSymbol, bytes params)
+          - event: PriceObserved(address indexed asset, uint256 price, uint256 baseUnit, address indexed oracle, uint8 action, bool ok, address indexed user, uint256 timestamp)
+
+      # VariableDebtToken - registered from PoolConfigurator.ReserveInitialized
+      - name: VariableDebtToken
+        abi_file_path: abis/lending/VariableDebtToken.json
+        handler: src/handlers/tokenization.ts
+        events:
+          - event: Mint(address indexed caller, address indexed onBehalfOf, uint256 value, uint256 balanceIncrease, uint256 index)
+          - event: Burn(address indexed from, address indexed target, uint256 value, uint256 balanceIncrease, uint256 index)
+          - event: Initialized(address indexed underlyingAsset, address indexed pool, address incentivesController, uint8 debtTokenDecimals, string debtTokenName, string debtTokenSymbol, bytes params)
+          - event: BorrowAllowanceDelegated(address indexed fromUser, address indexed toUser, address indexed asset, uint256 amount)
+          - event: PriceObserved(address indexed asset, uint256 price, uint256 baseUnit, address indexed oracle, uint8 action, bool ok, address indexed user, uint256 timestamp)
+
+      # StableDebtToken - registered from PoolConfigurator.ReserveInitialized
+      - name: StableDebtToken
+        abi_file_path: abis/lending/StableDebtToken.json
+        handler: src/handlers/tokenization.ts
+        events:
+          - event: Mint(address indexed user, address indexed onBehalfOf, uint256 amount, uint256 currentBalance, uint256 balanceIncrease, uint256 newRate, uint256 avgStableRate, uint256 newTotalSupply)
+          - event: Burn(address indexed from, uint256 amount, uint256 currentBalance, uint256 balanceIncrease, uint256 avgStableRate, uint256 newTotalSupply)
+          - event: Initialized(address indexed underlyingAsset, address indexed pool, address incentivesController, uint8 debtTokenDecimals, string debtTokenName, string debtTokenSymbol, bytes params)
+          - event: BorrowAllowanceDelegated(address indexed fromUser, address indexed toUser, address indexed asset, uint256 amount)
+          - event: PriceObserved(address indexed asset, uint256 price, uint256 baseUnit, address indexed oracle, uint8 action, bool ok, address indexed user, uint256 timestamp)
+
+      # UserVault - registered from UserVaultFactory.UserVaultCreated
+      - name: UserVault
+        abi_file_path: abis/lending/UserVault.json
+        handler: src/handlers/config.ts
+        events:
+          - event: LoanSelfRepaid(address indexed user, address indexed vault, address debtAsset, address collateralAsset, uint256 amount)
+
+      # PartnerNFT - registered from NFTPartnershipRegistry.PartnershipAdded
+      - name: PartnerNFT
+        abi_file_path: abis/helpers/ERC721.json
+        handler: src/handlers/nft.ts
+        events:
+          - event: Transfer(address indexed from, address indexed to, uint256 indexed tokenId)
+
+      # NonfungiblePositionManager - registered from LeaderboardConfig.LPPoolConfigured
+      - name: NonfungiblePositionManager
+        abi_file_path: abis/uniswap/NonfungiblePositionManager.json
+        handler: src/handlers/lp.ts
+        events:
+          - event: IncreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)
+          - event: DecreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)
+          - event: Transfer(address indexed from, address indexed to, uint256 indexed tokenId)
+
+      # UniswapV3Pool - registered from LeaderboardConfig.LPPoolConfigured
+      - name: UniswapV3Pool
+        abi_file_path: abis/uniswap/UniswapV3Pool.json
+        handler: src/handlers/lp.ts
+        events:
+          - event: Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick)
+          - event: Mint(address sender, address indexed owner, int24 indexed tickLower, int24 indexed tickUpper, uint128 amount, uint256 amount0, uint256 amount1)
+          - event: Burn(address indexed owner, int24 indexed tickLower, int24 indexed tickUpper, uint128 amount, uint256 amount0, uint256 amount1)

@@ -1,0 +1,1597 @@
+# Neverland Protocol Schema for Envio HyperIndex
+# Migrated from TheGraph subgraph
+
+enum Action {
+  Supply
+  RedeemUnderlying
+  Repay
+  Borrow
+  SwapBorrowRate
+  UsageAsCollateral
+  RebalanceStableBorrowRate
+  LiquidationCall
+  UserEModeSet
+}
+
+type Protocol {
+  id: ID!
+}
+
+type ContractToPoolMapping {
+  id: ID!
+  pool_id: String! @index
+}
+
+type Pool {
+  id: ID!
+  addressProviderId: BigInt!
+  protocol_id: String! @index
+  pool: String
+  poolCollateralManager: String
+  poolConfiguratorImpl: String
+  poolImpl: String
+  poolDataProviderImpl: String
+  poolConfigurator: String
+  proxyPriceProvider: String
+  lastUpdateTimestamp: Int!
+  bridgeProtocolFee: BigInt
+  flashloanPremiumTotal: BigInt
+  flashloanPremiumToProtocol: BigInt
+  active: Boolean!
+  paused: Boolean!
+}
+
+type PoolAddressesProviderState {
+  id: ID!
+  owner: String
+  aclAdmin: String
+  aclManager: String
+  poolAdmin: String
+  emergencyAdmin: String
+  priceOracleSentinel: String
+  marketId: String
+  lastUpdate: Int!
+}
+
+type PoolAddressesProviderACLAdminUpdated {
+  id: ID!
+  poolAddressesProvider: String! @index
+  oldAddress: String!
+  newAddress: String!
+  timestamp: Int!
+  txHash: String!
+}
+
+type PoolAddressesProviderACLManagerUpdated {
+  id: ID!
+  poolAddressesProvider: String! @index
+  oldAddress: String!
+  newAddress: String!
+  timestamp: Int!
+  txHash: String!
+}
+
+type PoolAddressesProviderAddressSet {
+  id: ID!
+  poolAddressesProvider: String! @index
+  addressId: String! @index
+  oldAddress: String!
+  newAddress: String!
+  timestamp: Int!
+  txHash: String!
+}
+
+type PoolAddressesProviderAddressSetAsProxy {
+  id: ID!
+  poolAddressesProvider: String! @index
+  addressId: String! @index
+  proxyAddress: String!
+  oldImplementationAddress: String!
+  newImplementationAddress: String!
+  timestamp: Int!
+  txHash: String!
+}
+
+type PoolAddressesProviderMarketIdSet {
+  id: ID!
+  poolAddressesProvider: String! @index
+  oldMarketId: String!
+  newMarketId: String!
+  timestamp: Int!
+  txHash: String!
+}
+
+type PoolAddressesProviderOwnershipTransferred {
+  id: ID!
+  poolAddressesProvider: String! @index
+  previousOwner: String!
+  newOwner: String!
+  timestamp: Int!
+  txHash: String!
+}
+
+type PoolAddressesProviderPriceOracleSentinelUpdated {
+  id: ID!
+  poolAddressesProvider: String! @index
+  oldAddress: String!
+  newAddress: String!
+  timestamp: Int!
+  txHash: String!
+}
+
+type SubToken {
+  id: ID!
+  pool_id: String! @index
+  tokenContractImpl: String
+  underlyingAssetAddress: String! @index
+  underlyingAssetDecimals: Int!
+}
+
+type Referrer {
+  id: ID!
+}
+
+type Supply {
+  id: ID!
+  txHash: String! @index
+  action: Action!
+  pool_id: String! @index
+  user_id: String! @index
+  caller_id: String!
+  reserve_id: String! @index
+  referrer_id: String
+  userReserve_id: String!
+  amount: BigInt!
+  timestamp: Int!
+  assetPriceUSD: Float
+}
+
+type RedeemUnderlying {
+  id: ID!
+  txHash: String! @index
+  action: Action!
+  pool_id: String! @index
+  user_id: String! @index
+  to_id: String!
+  reserve_id: String! @index
+  userReserve_id: String!
+  amount: BigInt!
+  timestamp: Int!
+  assetPriceUSD: Float
+}
+
+type Borrow {
+  id: ID!
+  txHash: String! @index
+  action: Action!
+  pool_id: String! @index
+  user_id: String! @index
+  caller_id: String!
+  reserve_id: String! @index
+  userReserve_id: String!
+  amount: BigInt!
+  borrowRate: BigInt!
+  borrowRateMode: Int!
+  referrer_id: String
+  timestamp: Int!
+  stableTokenDebt: BigInt!
+  variableTokenDebt: BigInt!
+  assetPriceUSD: Float
+}
+
+type SwapBorrowRate {
+  id: ID!
+  txHash: String! @index
+  action: Action!
+  pool_id: String! @index
+  user_id: String! @index
+  reserve_id: String! @index
+  userReserve_id: String!
+  borrowRateModeFrom: Int!
+  borrowRateModeTo: Int!
+  stableBorrowRate: BigInt!
+  variableBorrowRate: BigInt!
+  timestamp: Int!
+}
+
+type UsageAsCollateral {
+  id: ID!
+  txHash: String! @index
+  action: Action!
+  pool_id: String! @index
+  user_id: String! @index
+  reserve_id: String! @index
+  userReserve_id: String!
+  fromState: Boolean!
+  toState: Boolean!
+  timestamp: Int!
+}
+
+type RebalanceStableBorrowRate {
+  id: ID!
+  txHash: String! @index
+  action: Action!
+  pool_id: String! @index
+  user_id: String! @index
+  reserve_id: String! @index
+  userReserve_id: String!
+  borrowRateFrom: BigInt!
+  borrowRateTo: BigInt!
+  timestamp: Int!
+}
+
+type Repay {
+  id: ID!
+  txHash: String! @index
+  action: Action!
+  pool_id: String! @index
+  user_id: String! @index
+  repayer_id: String!
+  reserve_id: String! @index
+  userReserve_id: String!
+  amount: BigInt!
+  timestamp: Int!
+  useATokens: Boolean!
+  assetPriceUSD: Float
+}
+
+type IsolationModeTotalDebtUpdated {
+  id: ID!
+  pool_id: String! @index
+  reserve_id: String! @index
+  isolatedDebt: BigInt!
+  timestamp: Int!
+}
+
+type FlashLoan {
+  id: ID!
+  pool_id: String! @index
+  reserve_id: String! @index
+  target: String!
+  amount: BigInt!
+  totalFee: BigInt!
+  lpFee: BigInt!
+  protocolFee: BigInt!
+  initiator_id: String!
+  timestamp: Int!
+  assetPriceUSD: Float
+}
+
+type LiquidationCall {
+  id: ID!
+  txHash: String! @index
+  action: Action!
+  pool_id: String! @index
+  user_id: String! @index
+  collateralReserve_id: String!
+  collateralUserReserve_id: String!
+  collateralAmount: BigInt!
+  principalReserve_id: String!
+  principalUserReserve_id: String!
+  principalAmount: BigInt!
+  liquidator: String!
+  timestamp: Int!
+  collateralAssetPriceUSD: Float!
+  borrowAssetPriceUSD: Float!
+}
+
+type MintUnbacked {
+  id: ID!
+  pool_id: String! @index
+  user_id: String! @index
+  caller_id: String!
+  reserve_id: String! @index
+  userReserve_id: String!
+  amount: BigInt!
+  referral: Int!
+  timestamp: Int!
+}
+
+type BackUnbacked {
+  id: ID!
+  pool_id: String! @index
+  reserve_id: String! @index
+  userReserve_id: String!
+  backer_id: String!
+  amount: BigInt!
+  fee: BigInt!
+  lpFee: BigInt!
+  protocolFee: BigInt!
+  timestamp: Int!
+}
+
+type MintedToTreasury {
+  id: ID!
+  pool_id: String! @index
+  reserve_id: String! @index
+  amount: BigInt!
+  timestamp: Int!
+}
+
+type UserEModeSet {
+  id: ID!
+  txHash: String! @index
+  action: Action!
+  user_id: String! @index
+  timestamp: Int!
+  categoryId: Int!
+}
+
+type ReserveConfigurationHistoryItem {
+  id: ID!
+  reserve_id: String! @index
+  usageAsCollateralEnabled: Boolean!
+  borrowingEnabled: Boolean!
+  stableBorrowRateEnabled: Boolean!
+  isActive: Boolean!
+  isFrozen: Boolean!
+  reserveInterestRateStrategy: String!
+  baseLTVasCollateral: BigInt!
+  reserveLiquidationThreshold: BigInt!
+  reserveLiquidationBonus: BigInt!
+  timestamp: Int!
+}
+
+type ReserveParamsHistoryItem {
+  id: ID!
+  reserve_id: String! @index
+  variableBorrowRate: BigInt!
+  variableBorrowIndex: BigInt!
+  utilizationRate: Float!
+  stableBorrowRate: BigInt!
+  averageStableBorrowRate: BigInt!
+  liquidityIndex: BigInt!
+  liquidityRate: BigInt!
+  totalLiquidity: BigInt!
+  totalATokenSupply: BigInt!
+  totalLiquidityAsCollateral: BigInt!
+  availableLiquidity: BigInt!
+  priceInEth: BigInt!
+  priceInUsd: Float!
+  timestamp: Int!
+  accruedToTreasury: BigInt!
+  totalScaledVariableDebt: BigInt!
+  totalCurrentVariableDebt: BigInt!
+  totalPrincipalStableDebt: BigInt!
+  lifetimePrincipalStableDebt: BigInt!
+  lifetimeScaledVariableDebt: BigInt!
+  lifetimeCurrentVariableDebt: BigInt!
+  lifetimeLiquidity: BigInt!
+  lifetimeRepayments: BigInt!
+  lifetimeWithdrawals: BigInt!
+  lifetimeBorrows: BigInt!
+  lifetimeLiquidated: BigInt!
+  lifetimeFlashLoans: BigInt!
+  lifetimeFlashLoanPremium: BigInt!
+  lifetimeFlashLoanLPPremium: BigInt!
+  lifetimeFlashLoanProtocolPremium: BigInt!
+  lifetimeReserveFactorAccrued: BigInt!
+  lifetimePortalLPFee: BigInt!
+  lifetimePortalProtocolFee: BigInt!
+  lifetimeSuppliersInterestEarned: BigInt!
+}
+
+type EModeCategory {
+  id: ID!
+  ltv: BigInt!
+  liquidationThreshold: BigInt!
+  liquidationBonus: BigInt!
+  oracle: String!
+  label: String!
+}
+
+type MapAssetPool {
+  id: ID!
+  pool: String! @index
+  underlyingAsset: String! @index
+}
+
+type Reserve {
+  id: ID!
+  underlyingAsset: String! @index
+  pool_id: String! @index
+  symbol: String!
+  name: String!
+  decimals: Int!
+  usageAsCollateralEnabled: Boolean!
+  borrowingEnabled: Boolean!
+  stableBorrowRateEnabled: Boolean!
+  isActive: Boolean!
+  isFrozen: Boolean!
+  reserveInterestRateStrategy: String!
+  optimalUtilisationRate: BigInt!
+  variableRateSlope1: BigInt!
+  variableRateSlope2: BigInt!
+  stableRateSlope1: BigInt!
+  stableRateSlope2: BigInt!
+  baseVariableBorrowRate: BigInt!
+  baseLTVasCollateral: BigInt!
+  reserveLiquidationThreshold: BigInt!
+  reserveLiquidationBonus: BigInt!
+  utilizationRate: Float!
+  totalLiquidity: BigInt!
+  totalATokenSupply: BigInt!
+  totalLiquidityAsCollateral: BigInt!
+  availableLiquidity: BigInt!
+  totalPrincipalStableDebt: BigInt!
+  totalScaledVariableDebt: BigInt!
+  totalCurrentVariableDebt: BigInt!
+  totalSupplies: BigInt!
+  liquidityRate: BigInt!
+  accruedToTreasury: BigInt!
+  averageStableRate: BigInt!
+  variableBorrowRate: BigInt!
+  stableBorrowRate: BigInt!
+  liquidityIndex: BigInt!
+  variableBorrowIndex: BigInt!
+  aToken_id: String! @index
+  vToken_id: String! @index
+  sToken_id: String! @index
+  reserveFactor: BigInt!
+  lastUpdateTimestamp: Int!
+  stableDebtLastUpdateTimestamp: Int!
+  isPaused: Boolean!
+  isDropped: Boolean!
+  borrowCap: BigInt
+  supplyCap: BigInt
+  debtCeiling: BigInt
+  unbackedMintCap: BigInt
+  liquidationProtocolFee: BigInt
+  borrowableInIsolation: Boolean
+  eMode_id: String
+  siloedBorrowing: Boolean!
+  lifetimeLiquidity: BigInt!
+  lifetimePrincipalStableDebt: BigInt!
+  lifetimeScaledVariableDebt: BigInt!
+  lifetimeCurrentVariableDebt: BigInt!
+  lifetimeRepayments: BigInt!
+  lifetimeWithdrawals: BigInt!
+  lifetimeBorrows: BigInt!
+  lifetimeLiquidated: BigInt!
+  lifetimeFlashLoans: BigInt!
+  lifetimeFlashLoanPremium: BigInt!
+  lifetimeFlashLoanLPPremium: BigInt!
+  lifetimeFlashLoanProtocolPremium: BigInt!
+  lifetimePortalLPFee: BigInt!
+  lifetimePortalProtocolFee: BigInt!
+  lifetimeSuppliersInterestEarned: BigInt!
+  lifetimeReserveFactorAccrued: BigInt!
+  unbacked: BigInt!
+  price: String!
+  priceInUsd: Float!
+  priceInUsdE8: BigInt!
+}
+
+type ATokenBalanceHistoryItem {
+  id: ID!
+  userReserve_id: String! @index
+  timestamp: Int!
+  scaledATokenBalance: BigInt!
+  currentATokenBalance: BigInt!
+  index: BigInt!
+}
+
+type VTokenBalanceHistoryItem {
+  id: ID!
+  userReserve_id: String! @index
+  scaledVariableDebt: BigInt!
+  currentVariableDebt: BigInt!
+  timestamp: Int!
+  index: BigInt!
+}
+
+type STokenBalanceHistoryItem {
+  id: ID!
+  userReserve_id: String! @index
+  principalStableDebt: BigInt!
+  currentStableDebt: BigInt!
+  timestamp: Int!
+  avgStableBorrowRate: BigInt!
+}
+
+type StableTokenDelegatedAllowance {
+  id: ID!
+  fromUser_id: String! @index
+  toUser_id: String! @index
+  amountAllowed: BigInt!
+  userReserve_id: String!
+}
+
+type VariableTokenDelegatedAllowance {
+  id: ID!
+  fromUser_id: String! @index
+  toUser_id: String! @index
+  amountAllowed: BigInt!
+  userReserve_id: String!
+}
+
+type UserReserve {
+  id: ID!
+  pool_id: String! @index
+  reserve_id: String! @index
+  user_id: String! @index
+  usageAsCollateralEnabledOnUser: Boolean!
+  scaledATokenBalance: BigInt!
+  currentATokenBalance: BigInt!
+  scaledVariableDebt: BigInt!
+  currentVariableDebt: BigInt!
+  principalStableDebt: BigInt!
+  currentStableDebt: BigInt!
+  currentTotalDebt: BigInt!
+  stableBorrowRate: BigInt!
+  oldStableBorrowRate: BigInt!
+  liquidityRate: BigInt!
+  stableBorrowLastUpdateTimestamp: Int!
+  variableBorrowIndex: BigInt!
+  lastUpdateTimestamp: Int!
+}
+
+type User {
+  id: ID!
+  borrowedReservesCount: Int!
+  eModeCategoryId_id: String @index
+  points_id: String @index
+  unclaimedRewards: BigInt!
+  rewardsLastUpdated: Int!
+  lifetimeRewards: BigInt!
+  userVault_id: String @index
+  totalSelfRepaymentsReceived: BigInt!
+}
+
+type SwapHistory {
+  id: ID!
+  fromAsset: String!
+  toAsset: String!
+  fromAmount: BigInt!
+  receivedAmount: BigInt!
+  swapType: String!
+}
+
+type EModeCategoryConfig {
+  id: ID!
+  category_id: String! @index
+  asset: String! @index
+  collateral: Boolean!
+  borrowable: Boolean!
+}
+
+type PriceOracle {
+  id: ID!
+  proxyPriceProvider: String!
+  usdPriceEth: BigInt!
+  usdPriceEthMainSource: String!
+  usdPriceEthFallbackRequired: Boolean!
+  fallbackPriceOracle: String!
+  tokensWithFallback: [String!]!
+  lastUpdateTimestamp: Int!
+  usdDependentAssets: [String!]!
+  version: Int!
+  baseCurrency: String!
+  baseCurrencyUnit: BigInt!
+}
+
+type PriceOracleAsset {
+  id: ID!
+  oracle_id: String! @index
+  priceSource: String!
+  dependentAssets: [String!]!
+  priceType: String!
+  platform: String!
+  priceInEth: BigInt!
+  isFallbackRequired: Boolean!
+  lastUpdateTimestamp: Int!
+  priceCacheExpiry: Int!
+  fromChainlinkSourcesRegistry: Boolean!
+  lastPriceUsd: Float!
+  cumulativeUsdPriceHours: Float!
+  resetTimestamp: Int!
+  resetCumulativeUsdPriceHours: Float!
+}
+
+type PriceHistoryItem {
+  id: ID!
+  asset: String! @index
+  price: BigInt!
+  timestamp: Int!
+}
+
+type UsdEthPriceHistoryItem {
+  id: ID!
+  oracle: String!
+  price: BigInt!
+  timestamp: Int!
+}
+
+type RewardsController {
+  id: ID!
+}
+
+type RewardFeedOracle {
+  id: ID!
+  rewardFeedAddress: String!
+  createdAt: Int!
+  updatedAt: Int!
+}
+
+type UserReward {
+  id: ID!
+  reward: String! @index
+  user: String! @index
+  index: BigInt!
+  createdAt: Int!
+  updatedAt: Int!
+}
+
+type Reward {
+  id: ID!
+  rewardToken: String! @index
+  asset: String! @index
+  rewardsController: String! @index
+  index: BigInt!
+  distributionEnd: Int!
+  emissionsPerSecond: BigInt!
+  precision: BigInt!
+  createdAt: Int!
+  updatedAt: Int!
+  rewardTokenDecimals: Int!
+  rewardTokenSymbol: String!
+  rewardFeedOracle: String!
+}
+
+type RewardClaimer {
+  id: ID!
+  rewardsController: String! @index
+  user: String! @index
+  claimer: String!
+  updatedAt: Int!
+}
+
+type RewardTransferStrategy {
+  id: ID!
+  rewardsController: String!
+  reward: String!
+  strategy: String!
+  updatedAt: Int!
+}
+
+type RewardedAction {
+  id: ID!
+  rewardsController: String! @index
+  user: String! @index
+  amount: BigInt!
+  txHash: String!
+  timestamp: Int!
+}
+
+type ClaimRewardsCall {
+  id: ID!
+  rewardsController: String! @index
+  user: String! @index
+  to: String!
+  caller: String!
+  amount: BigInt!
+  txHash: String!
+  action: String!
+  timestamp: Int!
+}
+
+# Leaderboard/Points entities
+type UserPoints {
+  id: ID!
+  user_id: String! @index
+  lifetimeDepositPoints: BigInt!
+  lifetimeBorrowPoints: BigInt!
+  lifetimeDailySupplyPoints: BigInt!
+  lifetimeDailyBorrowPoints: BigInt!
+  lifetimeDailyRepayPoints: BigInt!
+  lifetimeDailyWithdrawPoints: BigInt!
+  lifetimeDailyVPPoints: BigInt!
+  lifetimeTotalPoints: BigInt!
+  epochsParticipated: [BigInt!]!
+  lifetimeEpochsIncluded: [BigInt!]!
+  lastUpdatedAt: Int!
+}
+
+type UserDailyActivity {
+  id: ID!
+  user_id: String! @index
+  day: Int! @index
+  hasSupplied: Boolean!
+  hasBorrowed: Boolean!
+  hasRepaid: Boolean!
+  hasWithdrawn: Boolean!
+  supplyTimestamp: Int
+  borrowTimestamp: Int
+  repayTimestamp: Int
+  withdrawTimestamp: Int
+  updatedAt: Int!
+  dailySupplyUsdHighwater: Float!
+  dailyBorrowUsdHighwater: Float!
+  dailyRepayUsdHighwater: Float!
+  dailyWithdrawUsdHighwater: Float!
+}
+
+type UserReservePoints {
+  id: ID!
+  user_id: String! @index
+  reserve_id: String! @index
+  lastUpdateTimestamp: Int!
+  lastDepositUsd: Float!
+  lastBorrowUsd: Float!
+  lastDepositIndex: Float!
+  lastBorrowIndex: Float!
+  lastDepositTokens: Float!
+  lastBorrowTokens: Float!
+  depositPoints: BigInt!
+  borrowPoints: BigInt!
+  totalPoints: BigInt!
+  resetTimestamp: Int!
+  resetDepositIndex: Float!
+  resetBorrowIndex: Float!
+}
+
+type TopK {
+  id: ID!
+  epochNumber: BigInt! @index
+  k: Int!
+  entries: [String!]!
+  updatedAt: Int!
+}
+
+type TopKEntry {
+  id: ID!
+  epochNumber: BigInt! @index
+  userId: String! @index
+  points: Float!
+  rank: Int!
+}
+
+type ScoreBucket {
+  id: ID!
+  epochNumber: BigInt! @index
+  index: Int!
+  lower: Float!
+  upper: Float!
+  count: Int!
+  updatedAt: Int!
+}
+
+type LeaderboardTotals {
+  id: ID!
+  epochNumber: BigInt! @index
+  totalUsers: Int!
+  updatedAt: Int!
+}
+
+type UserIndex {
+  id: ID!
+  user: String! @index
+  epochNumber: BigInt! @index
+  points: Float!
+  bucketIndex: Int!
+  updatedAt: Int!
+}
+
+type ProtocolStats {
+  id: ID!
+  tvlUsd: Float!
+  suppliesUsd: Float!
+  borrowsUsd: Float!
+  availableUsd: Float!
+  tvlE8: BigInt!
+  suppliesE8: BigInt!
+  borrowsE8: BigInt!
+  availableE8: BigInt!
+  totalRevenueUsd: Float!
+  supplyRevenueUsd: Float!
+  protocolRevenueUsd: Float!
+  updatedAt: Int!
+  totalTransactions: BigInt!
+  totalSelfRepayVolume: BigInt!
+  totalSelfRepayCount: BigInt!
+  totalDustTransfers: BigInt!
+  uniqueUsers: Int!
+  lastTxTimestamp: Int!
+  lastTxHash: String!
+}
+
+type ProtocolStatsSnapshot {
+  id: ID!
+  timestamp: Int! @index
+  blockNumber: BigInt! @index
+  txHash: String! @index
+  tvlUsd: Float!
+  suppliesUsd: Float!
+  borrowsUsd: Float!
+  availableUsd: Float!
+  tvlE8: BigInt!
+  suppliesE8: BigInt!
+  borrowsE8: BigInt!
+  availableE8: BigInt!
+  totalRevenueUsd: Float!
+  supplyRevenueUsd: Float!
+  protocolRevenueUsd: Float!
+  totalTransactions: BigInt!
+  uniqueUsers: Int!
+}
+
+type ReserveAggregate {
+  id: ID!
+  suppliesUsd: Float!
+  borrowsUsd: Float!
+  availableUsd: Float!
+  suppliesE8: BigInt!
+  borrowsE8: BigInt!
+  availableE8: BigInt!
+  priceE8: BigInt!
+  lastSuppliersInterestEarnedToken: BigInt!
+  lastProtocolAccruedToken: BigInt!
+  updatedAt: Int!
+}
+
+# DustLock (veNFT) entities
+type DustLockToken {
+  id: ID!
+  owner: String! @index
+  lockedAmount: BigInt!
+  end: Int!
+  isPermanent: Boolean!
+  createdAt: Int!
+  updatedAt: Int!
+  lastDepositType: String
+  selfRepayEnabled: Boolean!
+  rewardReceiver: String
+}
+
+type DustLockDeposit {
+  id: ID!
+  provider: String! @index
+  tokenId: String! @index
+  depositType: String!
+  value: BigInt!
+  locktime: Int!
+  txHash: String!
+  timestamp: Int!
+}
+
+type DustLockEarlyWithdraw {
+  id: ID!
+  provider: String! @index
+  tokenId: String! @index
+  value: BigInt!
+  amountReturned: BigInt!
+  penalty: BigInt!
+  txHash: String!
+  timestamp: Int!
+}
+
+type DustLockWithdraw {
+  id: ID!
+  provider: String! @index
+  tokenId: String! @index
+  value: BigInt!
+  txHash: String!
+  timestamp: Int!
+}
+
+type DustLockSupplyHistory {
+  id: ID!
+  prevSupply: BigInt!
+  supply: BigInt!
+  timestamp: Int!
+}
+
+type DustLockMerge {
+  id: ID!
+  sender: String! @index
+  fromToken: String! @index
+  toToken: String! @index
+  amountFrom: BigInt!
+  amountTo: BigInt!
+  amountFinal: BigInt!
+  locktime: Int!
+  txHash: String!
+  timestamp: Int!
+}
+
+type DustLockSplit {
+  id: ID!
+  fromToken: String! @index
+  tokenId1: String! @index
+  tokenId2: String! @index
+  sender: String! @index
+  splitAmount1: BigInt!
+  splitAmount2: BigInt!
+  locktime: Int!
+  txHash: String!
+  timestamp: Int!
+}
+
+type DustLockPermanentLock {
+  id: ID!
+  tokenId: String! @index
+  owner: String! @index
+  amount: BigInt!
+  txHash: String!
+  timestamp: Int!
+}
+
+type DustLockPermanentUnlock {
+  id: ID!
+  tokenId: String! @index
+  owner: String! @index
+  txHash: String!
+  timestamp: Int!
+}
+
+# RevenueReward entities
+type RevenueRewardToken {
+  id: ID!
+  totalNotified: BigInt!
+  totalClaimed: BigInt!
+  firstSeen: Int!
+  lastUpdated: Int!
+}
+
+type RevenueRewardEpoch {
+  id: ID!
+  token: String! @index
+  epoch: Int! @index
+  amount: BigInt!
+}
+
+type RevenueRewardClaim {
+  id: ID!
+  tokenId: BigInt! @index
+  user: String! @index
+  token: String! @index
+  amount: BigInt!
+  txHash: String!
+  timestamp: Int!
+}
+
+type SelfRepayingLoan {
+  id: ID!
+  tokenId: BigInt! @index
+  receiver: String!
+  enabled: Boolean!
+  updatedAt: Int!
+}
+
+type SelfRepayLoanUpdate {
+  id: ID!
+  tokenId: BigInt! @index
+  user: String! @index
+  receiver: String!
+  isEnabled: Boolean!
+  txHash: String!
+  timestamp: Int!
+}
+
+type DustLockAdminEvent {
+  id: ID!
+  eventType: String!
+  addressOne: String
+  addressTwo: String
+  oldValue: BigInt
+  newValue: BigInt
+  boolValue: Boolean
+  tokenId: String
+  stringOne: String
+  stringTwo: String
+  timestamp: Int!
+  txHash: String!
+}
+
+type PendingGatewayWithdrawal {
+  id: ID!
+  txHash: String!
+  reserve: String!
+  gateway: String!
+  actualUser: String
+}
+
+# Dust Token Tracking
+type DustTokenStat {
+  id: ID!
+  transferCount: BigInt!
+  approvalCount: BigInt!
+  ownershipChangeCount: BigInt!
+  pauseEventCount: BigInt!
+  paused: Boolean!
+  lastUpdate: Int!
+}
+
+type DustTransfer {
+  id: ID!
+  from: String! @index
+  to: String! @index
+  value: BigInt!
+  timestamp: Int!
+  txHash: String!
+}
+
+type DustApproval {
+  id: ID!
+  owner: String! @index
+  spender: String! @index
+  value: BigInt!
+  timestamp: Int!
+  txHash: String!
+}
+
+type DustOwnershipChange {
+  id: ID!
+  previousOwner: String!
+  newOwner: String!
+  timestamp: Int!
+  txHash: String!
+}
+
+type DustPauseEvent {
+  id: ID!
+  account: String!
+  paused: Boolean!
+  timestamp: Int!
+  txHash: String!
+}
+
+# User Vault / Self-Repayment
+type UserVault {
+  id: ID!
+  user: String! @index
+  createdAt: Int!
+  totalRepayVolume: BigInt!
+  repayCount: BigInt!
+  lastRepayAt: Int!
+}
+
+type UserVaultEntity {
+  id: ID!
+  owner: String! @index
+  createdAt: Int!
+  lastUpdate: Int!
+  totalSelfRepayVolume: BigInt!
+  totalSelfRepayCount: BigInt!
+  isActive: Boolean!
+}
+
+type LoanSelfRepayment {
+  id: ID!
+  vault: String! @index
+  user: String! @index
+  poolAddressesProvider: String!
+  debtAsset: String!
+  amount: BigInt!
+  timestamp: Int!
+  txHash: String!
+}
+
+# Rewards System
+type RewardAssetConfig {
+  id: ID!
+  rewardsController: String! @index
+  asset: String! @index
+  reward: String! @index
+  emission: BigInt!
+  distributionEnd: Int!
+  assetIndex: BigInt!
+  updatedAt: Int!
+}
+
+type RewardAssetConfigHistory {
+  id: ID!
+  rewardsController: String! @index
+  asset: String! @index
+  reward: String! @index
+  oldEmission: BigInt!
+  newEmission: BigInt!
+  oldDistributionEnd: Int!
+  newDistributionEnd: Int!
+  assetIndex: BigInt!
+  periodStart: Int!
+  periodEnd: Int!
+  emittedAmount: BigInt!
+  timestamp: Int!
+}
+
+type RevenueRewardNotification {
+  id: ID!
+  from: String!
+  rewardToken: String!
+  amount: BigInt!
+  epochId: BigInt!
+  timestamp: Int!
+  txHash: String!
+}
+
+type RevenueRewardRecovery {
+  id: ID!
+  token: String!
+  amount: BigInt!
+  timestamp: Int!
+  txHash: String!
+}
+
+type RevenueRewardDistributorUpdate {
+  id: ID!
+  oldDistributor: String!
+  newDistributor: String!
+  timestamp: Int!
+  txHash: String!
+}
+
+type BorrowAllowance {
+  id: ID!
+  fromUser: String! @index
+  toUser: String! @index
+  asset: String! @index
+  amount: BigInt!
+  lastUpdate: Int!
+}
+
+# Leaderboard System
+type LeaderboardState {
+  id: ID!
+  currentEpochNumber: BigInt!
+  isActive: Boolean!
+}
+
+type LeaderboardBlacklist {
+  id: ID!
+  user_id: String! @index
+  isBlacklisted: Boolean!
+  lastUpdate: Int!
+}
+
+type LeaderboardKeeperState {
+  id: ID!
+  keeper: String
+  owner: String
+  minSettlementInterval: BigInt
+  selfSyncCooldown: BigInt
+  lastUpdate: Int!
+}
+
+type LeaderboardKeeperBatchComplete {
+  id: ID!
+  operation: String!
+  count: BigInt!
+  timestamp: Int!
+  txHash: String!
+}
+
+type LeaderboardKeeperUserSettled {
+  id: ID!
+  user_id: String! @index
+  timestamp: Int!
+  txHash: String!
+}
+
+type LeaderboardKeeperVotingPowerSynced {
+  id: ID!
+  user_id: String! @index
+  votingPower: BigInt!
+  timestamp: Int!
+  txHash: String!
+}
+
+type LeaderboardKeeperNFTBalanceSynced {
+  id: ID!
+  user_id: String! @index
+  collection: String! @index
+  balance: BigInt!
+  timestamp: Int!
+  txHash: String!
+}
+
+type LeaderboardKeeperLPBalanceSynced {
+  id: ID!
+  user_id: String! @index
+  pool: String! @index
+  liquidity: BigInt!
+  timestamp: Int!
+  txHash: String!
+}
+
+type LeaderboardKeeperKeeperUpdate {
+  id: ID!
+  oldKeeper: String!
+  newKeeper: String!
+  timestamp: Int!
+  txHash: String!
+}
+
+type LeaderboardKeeperMinSettlementIntervalUpdate {
+  id: ID!
+  oldInterval: BigInt!
+  newInterval: BigInt!
+  timestamp: Int!
+  txHash: String!
+}
+
+type LeaderboardKeeperSelfSyncCooldownUpdate {
+  id: ID!
+  oldCooldown: BigInt!
+  newCooldown: BigInt!
+  timestamp: Int!
+  txHash: String!
+}
+
+type LeaderboardKeeperOwnershipTransferred {
+  id: ID!
+  previousOwner: String!
+  newOwner: String!
+  timestamp: Int!
+  txHash: String!
+}
+
+type LeaderboardKeeperInitialized {
+  id: ID!
+  version: Int!
+  timestamp: Int!
+  txHash: String!
+}
+
+type LeaderboardEpoch {
+  id: ID!
+  epochNumber: BigInt! @index
+  startBlock: BigInt!
+  startTime: Int!
+  endBlock: BigInt
+  endTime: Int
+  isActive: Boolean! @index
+  duration: BigInt
+  scheduledStartTime: Int
+  scheduledEndTime: Int
+}
+
+type LeaderboardConfigSnapshot {
+  id: ID!
+  depositRateBps: BigInt!
+  borrowRateBps: BigInt!
+  vpRateBps: BigInt!
+  supplyDailyBonus: Float!
+  borrowDailyBonus: Float!
+  repayDailyBonus: Float!
+  withdrawDailyBonus: Float!
+  cooldownSeconds: Int!
+  minDailyBonusUsd: Float!
+  timestamp: Int!
+  txHash: String!
+}
+
+type NFTPartnership {
+  id: ID!
+  collection: String! @index
+  name: String!
+  active: Boolean!
+  startTimestamp: Int!
+  endTimestamp: Int
+  addedAt: Int!
+  lastUpdate: Int!
+}
+
+type NFTMultiplierSnapshot {
+  id: ID!
+  firstBonus: BigInt!
+  decayRatio: BigInt!
+  activePartnershipCount: BigInt!
+  timestamp: Int!
+  txHash: String!
+}
+
+type NFTMultiplierConfig {
+  id: ID!
+  firstBonus: BigInt!
+  decayRatio: BigInt!
+  lastUpdate: Int!
+}
+
+type NFTPartnershipRegistryState {
+  id: ID!
+  activeCollections: [String!]!
+  lastUpdate: Int!
+}
+
+type LeaderboardConfig {
+  id: ID!
+  depositRateBps: BigInt!
+  borrowRateBps: BigInt!
+  vpRateBps: BigInt!
+  lpRateBps: BigInt!
+  supplyDailyBonus: Float!
+  borrowDailyBonus: Float!
+  repayDailyBonus: Float!
+  withdrawDailyBonus: Float!
+  cooldownSeconds: Int!
+  minDailyBonusUsd: Float!
+  lastUpdate: Int!
+}
+
+type VotingPowerTier {
+  id: ID!
+  tierIndex: BigInt! @index
+  minVotingPower: BigInt!
+  multiplierBps: BigInt!
+  createdAt: Int!
+  lastUpdate: Int!
+  isActive: Boolean! @index
+}
+
+type UserTokenList {
+  id: ID!
+  user_id: String! @index
+  tokenIds: [BigInt!]!
+  lastUpdate: Int!
+}
+
+type UserReserveList {
+  id: ID!
+  user_id: String! @index
+  reserveIds: [String!]!
+  lastUpdate: Int!
+}
+
+type UserNFTOwnership {
+  id: ID!
+  user_id: String! @index
+  partnership_id: String! @index
+  balance: BigInt!
+  hasNFT: Boolean!
+  lastCheckedAt: Int!
+  lastCheckedBlock: BigInt!
+}
+
+type UserNFTBaseline {
+  id: ID!
+  user_id: String! @index
+  partnership_id: String! @index
+  checkedAt: Int!
+  checkedBlock: BigInt!
+}
+
+type UserLPBaseline {
+  id: ID!
+  user_id: String! @index
+  positionManager: String! @index
+  checkedAt: Int!
+  checkedBlock: BigInt!
+}
+
+type SelfTransferredToken {
+  id: ID!
+  user: String! @index
+  collection: String! @index
+  tokenId: BigInt!
+  syncedAt: Int!
+}
+
+type UserLeaderboardState {
+  id: ID!
+  user_id: String! @index
+  nftCount: BigInt!
+  nftMultiplier: BigInt!
+  votingPower: BigInt!
+  vpTierIndex: BigInt
+  vpMultiplier: BigInt!
+  combinedMultiplier: BigInt!
+  totalEpochsParticipated: BigInt!
+  lifetimePoints: BigInt!
+  currentEpochId: String
+  currentEpochRank: BigInt
+  lastUpdate: Int!
+}
+
+type UserEpochStats {
+  id: ID!
+  user_id: String! @index
+  epochNumber: BigInt! @index
+  depositPoints: BigInt!
+  borrowPoints: BigInt!
+  lpPoints: BigInt!
+  dailySupplyPoints: BigInt!
+  dailyBorrowPoints: BigInt!
+  dailyRepayPoints: BigInt!
+  dailyWithdrawPoints: BigInt!
+  dailyVPPoints: BigInt!
+  dailyLPPoints: BigInt!
+  manualAwardPoints: BigInt!
+  depositMultiplierBps: BigInt!
+  borrowMultiplierBps: BigInt!
+  vpMultiplierBps: BigInt!
+  lpMultiplierBps: BigInt!
+  depositPointsWithMultiplier: BigInt!
+  borrowPointsWithMultiplier: BigInt!
+  vpPointsWithMultiplier: BigInt!
+  lpPointsWithMultiplier: BigInt!
+  lastSupplyPointsDay: Int!
+  lastBorrowPointsDay: Int!
+  lastRepayPointsDay: Int!
+  lastWithdrawPointsDay: Int!
+  lastVPPointsDay: Int!
+  totalPoints: BigInt!
+  totalPointsWithMultiplier: BigInt!
+  totalMultiplierBps: BigInt!
+  lastAppliedMultiplierBps: BigInt!
+  testnetBonusBps: BigInt!
+  rank: Int
+  firstSeenAt: Int!
+  lastUpdatedAt: Int!
+}
+
+type UserMultiplierSnapshot {
+  id: ID!
+  user_id: String! @index
+  timestamp: Int!
+  nftCount: BigInt!
+  nftMultiplier: BigInt!
+  votingPower: BigInt!
+  vpMultiplier: BigInt!
+  combinedMultiplier: BigInt!
+  changeReason: String!
+  txHash: String!
+}
+
+type UserVotingPowerHistory {
+  id: ID!
+  user: String! @index
+  tokenId: BigInt! @index
+  votingPower: BigInt!
+  timestamp: Int!
+  txHash: String!
+  eventType: String!
+}
+
+type ManualPointsAward {
+  id: ID!
+  user_id: String! @index
+  epochNumber: BigInt! @index
+  points: Float!
+  reason: String!
+  timestamp: Int!
+  txHash: String!
+}
+
+type EpochLeaderboardStats {
+  id: ID!
+  epoch_id: String! @index
+  totalUsers: BigInt!
+  totalPoints: BigInt!
+  avgPointsPerUser: BigInt!
+  topUserAddress: String
+  topUserPoints: BigInt
+  lastUpdate: Int!
+}
+
+# ============================================
+#     LP (Liquidity Provider) Tracking
+# ============================================
+
+type TokenInfo {
+  id: ID!
+  address: String! @index
+  decimals: Int!
+  symbol: String
+  name: String
+  lastUpdate: Int!
+}
+
+type LPPoolRegistry {
+  id: ID!
+  poolIds: [String!]!
+  lastUpdate: Int!
+}
+
+type LPPoolPositionIndex {
+  id: ID!
+  pool: String! @index
+  positionIds: [String!]!
+  lastUpdate: Int!
+}
+
+type UserLPPositionIndex {
+  id: ID!
+  user_id: String! @index
+  positionIds: [String!]!
+  lastUpdate: Int!
+}
+
+type LPPoolConfig {
+  id: ID!
+  pool: String! @index
+  positionManager: String!
+  token0: String!
+  token1: String!
+  fee: Int
+  lpRateBps: BigInt!
+  isActive: Boolean!
+  enabledAtEpoch: BigInt!
+  enabledAtTimestamp: Int!
+  disabledAtEpoch: BigInt
+  disabledAtTimestamp: Int
+  lastUpdate: Int!
+}
+
+type LPPoolState {
+  id: ID!
+  pool: String! @index
+  currentTick: Int!
+  sqrtPriceX96: BigInt!
+  token0Price: BigInt!
+  token1Price: BigInt!
+  lastUpdate: Int!
+}
+
+type LPPoolStats {
+  id: ID!
+  pool: String! @index
+  totalPositions: Int!
+  inRangePositions: Int!
+  totalValueUsd: BigInt!
+  inRangeValueUsd: BigInt!
+  lastUpdate: Int!
+}
+
+type LPPoolVolumeBucket {
+  id: ID!
+  pool: String! @index
+  bucketStart: Int! @index
+  volumeUsd: BigInt!
+  lastUpdate: Int!
+}
+
+type LPPoolFeeStats {
+  id: ID!
+  pool: String! @index
+  volumeUsd24h: BigInt!
+  feesUsd24h: BigInt!
+  feeAprBps: BigInt!
+  lastUpdate: Int!
+}
+
+type UserLPPosition {
+  id: ID!
+  tokenId: BigInt! @index
+  user_id: String! @index
+  pool: String! @index
+  positionManager: String!
+  tickLower: Int!
+  tickUpper: Int!
+  liquidity: BigInt!
+  amount0: BigInt!
+  amount1: BigInt!
+  isInRange: Boolean!
+  valueUsd: BigInt!
+  # Time tracking for points accrual (same pattern as supply/borrow)
+  lastInRangeTimestamp: Int!
+  accumulatedInRangeSeconds: BigInt!
+  lastSettledAt: Int!
+  settledLpPoints: BigInt!
+  createdAt: Int!
+  lastUpdate: Int!
+}
+
+type UserLPStats {
+  id: ID!
+  user_id: String! @index
+  totalPositions: Int!
+  inRangePositions: Int!
+  totalValueUsd: BigInt!
+  inRangeValueUsd: BigInt!
+  lastUpdate: Int!
+}
+
+type LPMintData {
+  id: ID!
+  pool: String! @index
+  positionManager: String!
+  owner: String!
+  tickLower: Int!
+  tickUpper: Int!
+  liquidity: BigInt!
+  amount0: BigInt!
+  amount1: BigInt!
+  txHash: String! @index
+  timestamp: Int!
+}

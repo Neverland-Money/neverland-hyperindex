@@ -1,0 +1,12 @@
+#!/bin/sh
+. "$(dirname -- "$0")/_/husky.sh"
+
+set -e
+
+pnpm run codegen
+git diff --exit-code -- . ':(exclude)generated' ':(exclude)coverage' ':(exclude)dist-test' ':(exclude)*.lcov'
+
+pnpm run format:check
+pnpm run lint
+pnpm run type-check
+pnpm run test:coverage
