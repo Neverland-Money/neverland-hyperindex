@@ -20,8 +20,8 @@ export const EPOCH_1_START_BLOCK_OVERRIDE = 46264051;
 export const BOOTSTRAP_CONFIG = {
   depositRateBps: 200n, // 2% per day in basis points
   borrowRateBps: 500n, // 5% per day in basis points
-  vpRateBps: 2000n, // 20% per day in basis points
-  lpRateBps: 2000n, // 20% per day in basis points
+  vpRateBps: 2500n, // 25% per day in basis points
+  lpRateBps: 2500n, // 25% per day in basis points
   supplyDailyBonus: 0,
   borrowDailyBonus: 0,
   repayDailyBonus: 0,
@@ -83,7 +83,7 @@ export const BOOTSTRAP_LP_POOL_CONFIGS: BootstrapLPPoolConfig[] = [
     token0: '0x00000000efe302beaa2b3e6e1b18d08d69a9012a', // AUSD
     token1: '0xad96c3dffcd6374294e2573a7fbba96097cc8d7c', // DUST
     fee: 10000,
-    lpRateBps: 2000n,
+    lpRateBps: 2500n,
   },
 ];
 
