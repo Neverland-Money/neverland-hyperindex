@@ -102,7 +102,7 @@ networks:
       #     Leaderboard: EpochManager
       # --------------------------------------
       - name: EpochManager
-        address: 0xC13693F898F736666f46a73b2da8ecD9eA75a29c
+        address: 0x8C050048F9A8a6dCdC921fbcd1b58Af78e9d742D
         handler: src/handlers/leaderboard.ts
         events:
           - event: EpochStart(uint256 indexed epochNumber, uint256 startTime)
@@ -112,7 +112,7 @@ networks:
       #     Leaderboard: LeaderboardConfig
       # --------------------------------------
       - name: LeaderboardConfig
-        address: 0x7F1D8ba99C5eF21B5930066529BA9996ac1076Dd
+        address: 0xf4DFF4120C14850EFd87824df2F28c71282D7Be0
         handler: src/handlers/leaderboard.ts
         events:
           - event: ConfigSnapshot(uint256 depositRateBps, uint256 borrowRateBps, uint256 vpRateBps, uint256 supplyDailyBonus, uint256 borrowDailyBonus, uint256 repayDailyBonus, uint256 withdrawDailyBonus, uint256 cooldownSeconds, uint256 minDailyBonusUsd, uint256 timestamp)
@@ -134,7 +134,7 @@ networks:
       #     Leaderboard: LeaderboardKeeper
       # --------------------------------------
       - name: LeaderboardKeeper
-        address: 0x18AB7901a80ea595BF4888F47C2254f306C52664
+        address: 0x14c3576fB96A06128856C34DF8447e38B15Fa028
         handler: src/handlers/leaderboardKeeper.ts
         events:
           - event: VotingPowerSynced(address indexed user, uint256 votingPower, uint256 timestamp)
@@ -152,7 +152,7 @@ networks:
       #     Leaderboard: NFTPartnershipRegistry
       # --------------------------------------
       - name: NFTPartnershipRegistry
-        address: 0x569981B0dd2D062d6A54e4685Db0b2c196577650
+        address: 0xeFE499674D8c088293B13cf906f0a7Caf6788461
         handler: src/handlers/nft.ts
         events:
           - event: PartnershipAdded(address indexed collection, string name, bool active, uint256 startTimestamp, uint256 endTimestamp, uint256 currentFirstBonus, uint256 currentDecayRatio, uint256 totalPartnerships)
@@ -164,7 +164,7 @@ networks:
       #     Leaderboard: VotingPowerMultiplier
       # --------------------------------------
       - name: VotingPowerMultiplier
-        address: 0x03F17514294D35220Ed68510E6DA37f97409Fe65
+        address: 0xd49217c58fA25465BCA8A235790ef9D24F9eF011
         handler: src/handlers/leaderboard.ts
         events:
           - event: TierAdded(uint256 indexed tierIndex, uint256 minVotingPower, uint256 multiplierBps, uint256 totalTiers)
