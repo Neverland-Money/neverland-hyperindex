@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
+// Disable bootstrap in tests to use default config values
+process.env.ENVIO_DISABLE_BOOTSTRAP = 'true';
+
 import {
   AUSD_ADDRESS,
   DUST_LOCK_START_BLOCK,

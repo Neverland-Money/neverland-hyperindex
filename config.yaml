@@ -289,9 +289,34 @@ networks:
         events:
           - event: LoanSelfRepaid(address indexed user, address indexed vault, address debtAsset, address collateralAsset, uint256 amount)
 
-      # PartnerNFT - registered from NFTPartnershipRegistry.PartnershipAdded
+      # PartnerNFT - registered from NFTPartnershipRegistry.PartnershipAdded (for dynamic registration)
       - name: PartnerNFT
         abi_file_path: abis/helpers/ERC721.json
+        handler: src/handlers/nft.ts
+        events:
+          - event: Transfer(address indexed from, address indexed to, uint256 indexed tokenId)
+
+      # Static NFT collections (bootstrapped - tracked from start)
+      - name: The10kSquad
+        abi_file_path: abis/helpers/ERC721.json
+        address: 0x818030837e8350ba63e64d7dc01a547fa73c8279
+        start_block: 0
+        handler: src/handlers/nft.ts
+        events:
+          - event: Transfer(address indexed from, address indexed to, uint256 indexed tokenId)
+
+      - name: Overnads
+        abi_file_path: abis/helpers/ERC721.json
+        address: 0xfb5ba4061f5c50b1daa6c067bb2dfb0a8ebf6a8d
+        start_block: 0
+        handler: src/handlers/nft.ts
+        events:
+          - event: Transfer(address indexed from, address indexed to, uint256 indexed tokenId)
+
+      - name: SolveilPass
+        abi_file_path: abis/helpers/ERC721.json
+        address: 0x8255dacd8a45f4abe6dc821e6f7f3c92a8e22fbb
+        start_block: 0
         handler: src/handlers/nft.ts
         events:
           - event: Transfer(address indexed from, address indexed to, uint256 indexed tokenId)

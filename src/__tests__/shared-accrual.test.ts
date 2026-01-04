@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 
+process.env.ENVIO_DISABLE_BOOTSTRAP = 'true';
+
 import { LEADERBOARD_START_BLOCK } from '../helpers/constants';
 import { createDefaultReserve } from '../helpers/entityHelpers';
 import { accruePointsForUserReserve, syncUserReservePointsBaseline } from '../handlers/shared';

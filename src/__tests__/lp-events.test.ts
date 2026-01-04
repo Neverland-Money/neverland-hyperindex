@@ -8,6 +8,7 @@ import { installViemMock, setLPPositionOverride } from './viem-mock';
 
 process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'true';
 process.env.ENVIO_DISABLE_ETH_CALLS = 'true';
+process.env.ENVIO_DISABLE_BOOTSTRAP = 'true';
 installViemMock();
 
 const TOKEN_ID = 1n;

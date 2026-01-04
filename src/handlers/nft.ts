@@ -18,7 +18,13 @@
  * - Users accumulate points from held NFTs without needing to transfer
  */
 
-import { NFTPartnershipRegistry, PartnerNFT } from '../../generated';
+import {
+  NFTPartnershipRegistry,
+  PartnerNFT,
+  The10kSquad,
+  Overnads,
+  SolveilPass,
+} from '../../generated';
 import {
   getOrCreateUserLeaderboardState,
   createMultiplierSnapshot,
@@ -351,3 +357,154 @@ PartnerNFT.Transfer.handler(async ({ event, context }) => {
     await updateNFTOwnership(to, +1);
   }
 });
+
+// ============================================
+// Static NFT Collection Handlers (reuse PartnerNFT logic)
+// ============================================
+
+// The10kSquad uses same handler as PartnerNFT
+The10kSquad.Transfer.handler(async ({ event, context }) => {
+  // Forward to PartnerNFT handler logic - same event structure
+  await handleNFTTransfer(event, context);
+});
+
+// Overnads uses same handler as PartnerNFT
+Overnads.Transfer.handler(async ({ event, context }) => {
+  await handleNFTTransfer(event, context);
+});
+
+// SolveilPass uses same handler as PartnerNFT
+SolveilPass.Transfer.handler(async ({ event, context }) => {
+  await handleNFTTransfer(event, context);
+});
+
+// Shared NFT Transfer handler logic
+async function handleNFTTransfer(
+  event: {
+    srcAddress: string;
+    params: { from: string; to: string; tokenId: bigint };
+    block: { timestamp: number; number: number };
+    transaction: { hash: string };
+    logIndex: number;
+  },
+  context: handlerContext
+) {
+  await recordProtocolTransaction(
+    context,
+    event.transaction.hash,
+    Number(event.block.timestamp),
+    BigInt(event.block.number)
+  );
+  const nftContract = normalizeAddress(event.srcAddress);
+  const from = normalizeAddress(event.params.from);
+  const to = normalizeAddress(event.params.to);
+  const timestamp = Number(event.block.timestamp);
+
+  // Self-transfer: no balance change, only update lastChecked timestamp
+  if (from === to && from !== ZERO_ADDRESS) {
+    const ownershipId = `${from}:${nftContract}`;
+    const ownership = await context.UserNFTOwnership.get(ownershipId);
+    if (ownership) {
+      context.UserNFTOwnership.set({
+        ...ownership,
+        lastCheckedAt: timestamp,
+        lastCheckedBlock: BigInt(event.block.number),
+      });
+    }
+    return;
+  }
+
+  // Helper to update NFT ownership
+  async function updateNFTOwnership(userAddress: string, delta: number) {
+    const normalizedUser = normalizeAddress(userAddress);
+
+    const ownershipId = `${normalizedUser}:${nftContract}`;
+    const ownership = await context.UserNFTOwnership.get(ownershipId);
+    const oldBalance = ownership?.balance || 0n;
+
+    let newBalance = oldBalance + BigInt(delta);
+    if (newBalance < 0n) newBalance = 0n;
+
+    const hasNFT = newBalance > 0n;
+    const wasOwning = oldBalance > 0n;
+
+    if (hasNFT) {
+      context.UserNFTOwnership.set({
+        id: ownershipId,
+        user_id: normalizedUser,
+        partnership_id: nftContract,
+        balance: newBalance,
+        hasNFT,
+        lastCheckedAt: timestamp,
+        lastCheckedBlock: BigInt(event.block.number),
+      });
+    } else if (ownership) {
+      context.UserNFTOwnership.deleteUnsafe(ownershipId);
+    }
+
+    // Update multiplier only if collection ownership changed (0 <-> >0)
+    if (wasOwning !== hasNFT) {
+      await settlePointsForUser(
+        context,
+        normalizedUser,
+        null,
+        timestamp,
+        BigInt(event.block.number),
+        {
+          ignoreCooldown: true,
+          skipNftSync: true,
+        }
+      );
+
+      const state = await getOrCreateUserLeaderboardState(context, normalizedUser, timestamp);
+      const oldMultiplier = state.nftMultiplier;
+
+      let newNftCount = state.nftCount;
+      if (hasNFT && !wasOwning) {
+        newNftCount = state.nftCount + 1n;
+      } else if (!hasNFT && wasOwning) {
+        newNftCount = state.nftCount > 0n ? state.nftCount - 1n : 0n;
+      }
+
+      const newNftMultiplier = await calculateNFTMultiplier(context, newNftCount);
+
+      let combinedMultiplier = (newNftMultiplier * state.vpMultiplier) / 10000n;
+      if (combinedMultiplier > 100000n) combinedMultiplier = 100000n;
+
+      context.UserLeaderboardState.set({
+        ...state,
+        nftCount: newNftCount,
+        nftMultiplier: newNftMultiplier,
+        combinedMultiplier,
+        lastUpdate: timestamp,
+      });
+
+      if (oldMultiplier !== newNftMultiplier) {
+        const changeReason = hasNFT
+          ? `NFT_RECEIVED:${nftContract}`
+          : `NFT_TRANSFERRED:${nftContract}`;
+        createMultiplierSnapshot(
+          context,
+          {
+            ...state,
+            nftCount: newNftCount,
+            nftMultiplier: newNftMultiplier,
+            combinedMultiplier,
+          },
+          timestamp,
+          event.transaction.hash,
+          changeReason,
+          Number(event.logIndex)
+        );
+      }
+    }
+  }
+
+  // Update both sender and receiver
+  if (from !== ZERO_ADDRESS) {
+    await updateNFTOwnership(from, -1);
+  }
+  if (to !== ZERO_ADDRESS) {
+    await updateNFTOwnership(to, +1);
+  }
+}

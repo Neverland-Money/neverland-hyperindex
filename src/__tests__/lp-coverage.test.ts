@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
+process.env.ENVIO_DISABLE_BOOTSTRAP = 'true';
+
 import { AUSD_ADDRESS } from '../helpers/constants';
 import {
   getOrCreateLPPoolState,

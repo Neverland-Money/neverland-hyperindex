@@ -3,6 +3,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 
+// Disable bootstrap in tests
+process.env.ENVIO_DISABLE_BOOTSTRAP = 'true';
+
 import { POOL_CONFIGURATOR_ID, POOL_ID, ZERO_ADDRESS } from '../helpers/constants';
 import {
   VIEM_ATOKEN_ADDRESS,

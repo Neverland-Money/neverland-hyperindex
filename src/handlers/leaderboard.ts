@@ -20,25 +20,32 @@ import {
   updateLifetimePoints,
 } from './shared';
 import { getTestnetBonusBps } from '../helpers/testnetTiers';
-import { normalizeAddress } from '../helpers/constants';
+import {
+  normalizeAddress,
+  EPOCH_1_START_TIME_OVERRIDE,
+  BOOTSTRAP_CONFIG,
+} from '../helpers/constants';
 import { readPoolFee } from '../helpers/viem';
 import './lp';
 
 async function getOrInitLeaderboardConfig(context: handlerContext, timestamp: number) {
   let config = await context.LeaderboardConfig.get('global');
   if (!config) {
+    // Use bootstrap config if epoch 1 override is set and not disabled via env var
+    const useBootstrap =
+      EPOCH_1_START_TIME_OVERRIDE > 0 && process.env.ENVIO_DISABLE_BOOTSTRAP !== 'true';
     config = {
       id: 'global',
-      depositRateBps: 0n,
-      borrowRateBps: 0n,
-      vpRateBps: 0n,
-      lpRateBps: 0n,
-      supplyDailyBonus: 0,
-      borrowDailyBonus: 0,
-      repayDailyBonus: 0,
-      withdrawDailyBonus: 0,
-      cooldownSeconds: 0,
-      minDailyBonusUsd: 0,
+      depositRateBps: useBootstrap ? BOOTSTRAP_CONFIG.depositRateBps : 0n,
+      borrowRateBps: useBootstrap ? BOOTSTRAP_CONFIG.borrowRateBps : 0n,
+      vpRateBps: useBootstrap ? BOOTSTRAP_CONFIG.vpRateBps : 0n,
+      lpRateBps: useBootstrap ? BOOTSTRAP_CONFIG.lpRateBps : 0n,
+      supplyDailyBonus: useBootstrap ? BOOTSTRAP_CONFIG.supplyDailyBonus : 0,
+      borrowDailyBonus: useBootstrap ? BOOTSTRAP_CONFIG.borrowDailyBonus : 0,
+      repayDailyBonus: useBootstrap ? BOOTSTRAP_CONFIG.repayDailyBonus : 0,
+      withdrawDailyBonus: useBootstrap ? BOOTSTRAP_CONFIG.withdrawDailyBonus : 0,
+      cooldownSeconds: useBootstrap ? BOOTSTRAP_CONFIG.cooldownSeconds : 0,
+      minDailyBonusUsd: useBootstrap ? BOOTSTRAP_CONFIG.minDailyBonusUsd : 0,
       lastUpdate: timestamp,
     };
     context.LeaderboardConfig.set(config);
@@ -59,8 +66,17 @@ EpochManager.EpochStart.handler(async ({ event, context }) => {
   );
   const epochNumber = event.params.epochNumber;
   const epochId = epochNumber.toString();
-  const scheduledStartTime = Number(event.params.startTime);
   const currentTimestamp = Number(event.block.timestamp);
+
+  // If epoch 1 override is set and this is epoch 1, use the override timestamp instead
+  // (unless bootstrap is disabled via env var for testing)
+  const useOverride =
+    epochNumber === 1n &&
+    EPOCH_1_START_TIME_OVERRIDE > 0 &&
+    process.env.ENVIO_DISABLE_BOOTSTRAP !== 'true';
+  const scheduledStartTime = useOverride
+    ? EPOCH_1_START_TIME_OVERRIDE
+    : Number(event.params.startTime);
 
   const existingEpoch = await context.LeaderboardEpoch.get(epochId);
   const shouldSetStartBlock = scheduledStartTime > 0 && scheduledStartTime <= currentTimestamp;
@@ -70,6 +86,13 @@ EpochManager.EpochStart.handler(async ({ event, context }) => {
       : shouldSetStartBlock
         ? BigInt(event.block.number)
         : 0n;
+
+  // Never overwrite scheduledStartTime for an active epoch
+  // This is a defensive measure - altering start time of an active epoch would corrupt point calculations
+  // Note: this also protects bootstrap's start time since bootstrap sets isActive: true
+  const finalScheduledStartTime = existingEpoch?.isActive
+    ? existingEpoch.scheduledStartTime
+    : scheduledStartTime;
 
   context.LeaderboardEpoch.set({
     ...(existingEpoch ?? {
@@ -84,7 +107,7 @@ EpochManager.EpochStart.handler(async ({ event, context }) => {
       scheduledStartTime: 0,
       scheduledEndTime: 0,
     }),
-    scheduledStartTime,
+    scheduledStartTime: finalScheduledStartTime,
     startBlock,
   });
 

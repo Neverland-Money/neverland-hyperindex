@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
+import { LEADERBOARD_START_BLOCK } from '../helpers/constants';
 
 process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'true';
 process.env.ENVIO_DISABLE_ETH_CALLS = 'true';
@@ -71,7 +72,7 @@ test('keeper events update leaderboard state and ownership', async () => {
   mockDb = mockDb.entities.LeaderboardEpoch.set({
     id: '1',
     epochNumber: 1n,
-    startBlock: 1n,
+    startBlock: BigInt(LEADERBOARD_START_BLOCK),
     startTime: 0,
     endBlock: undefined,
     endTime: undefined,
@@ -167,7 +168,7 @@ test('keeper events update leaderboard state and ownership', async () => {
     user: ADDRESSES.user,
     votingPower: 1000n * 10n ** 18n,
     timestamp: 100n,
-    ...eventData(10, 100, ADDRESSES.keeper),
+    ...eventData(LEADERBOARD_START_BLOCK + 10, 100, ADDRESSES.keeper),
   });
   mockDb = await TestHelpers.LeaderboardKeeper.VotingPowerSynced.processEvent({
     event: vpSynced,
@@ -179,7 +180,7 @@ test('keeper events update leaderboard state and ownership', async () => {
     collection: ADDRESSES.collection,
     balance: 1n,
     timestamp: 101n,
-    ...eventData(10, 101, ADDRESSES.keeper),
+    ...eventData(LEADERBOARD_START_BLOCK + 10, 101, ADDRESSES.keeper),
   });
   mockDb = await TestHelpers.LeaderboardKeeper.NFTBalanceSynced.processEvent({
     event: nftSynced,
@@ -193,7 +194,7 @@ test('keeper events update leaderboard state and ownership', async () => {
   const settle = TestHelpers.LeaderboardKeeper.UserSettled.createMockEvent({
     user: ADDRESSES.user,
     timestamp: 86400n,
-    ...eventData(11, 86400, ADDRESSES.keeper),
+    ...eventData(LEADERBOARD_START_BLOCK + 11, 86400, ADDRESSES.keeper),
   });
   mockDb = await TestHelpers.LeaderboardKeeper.UserSettled.processEvent({
     event: settle,

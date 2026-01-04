@@ -7,6 +7,7 @@ import { installViemMock } from './viem-mock';
 
 process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'true';
 process.env.ENVIO_DISABLE_ETH_CALLS = 'true';
+process.env.ENVIO_DISABLE_BOOTSTRAP = 'true';
 
 const ADDRESSES = {
   epochManager: '0x000000000000000000000000000000000000c001',

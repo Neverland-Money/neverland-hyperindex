@@ -23,6 +23,14 @@ import {
   ZERO_ADDRESS,
   normalizeAddress,
   toScaledPoints,
+  EPOCH_1_START_TIME_OVERRIDE,
+  EPOCH_1_END_TIME_OVERRIDE,
+  EPOCH_1_START_BLOCK_OVERRIDE,
+  BOOTSTRAP_CONFIG,
+  BOOTSTRAP_VP_TIERS,
+  BOOTSTRAP_NFT_PARTNERSHIPS,
+  BOOTSTRAP_NFT_MULTIPLIER_CONFIG,
+  BOOTSTRAP_LP_POOL_CONFIGS,
 } from '../helpers/constants';
 import { readNFTBalance } from '../helpers/viem';
 import { calculateVotingPower, getCurrentDay } from '../helpers/points';
@@ -111,6 +119,145 @@ export async function getOrCreateProtocolStats(context: handlerContext, timestam
   return ps;
 }
 
+// Bootstrap leaderboard state on first event when epoch 1 override is set
+export async function bootstrapLeaderboardIfNeeded(
+  context: handlerContext,
+  timestamp: number,
+  blockNumber: bigint
+): Promise<void> {
+  // Skip bootstrap if override is 0 or if disabled via env var (for testing)
+  if (EPOCH_1_START_TIME_OVERRIDE <= 0 || process.env.ENVIO_DISABLE_BOOTSTRAP === 'true') return;
+
+  // Check if already bootstrapped
+  const existingState = await context.LeaderboardState.get('current');
+  if (existingState && existingState.currentEpochNumber > 0n) return;
+
+  // Bootstrap LeaderboardEpoch 1
+  // Use deterministic startBlock if set, otherwise use current block
+  const startBlock =
+    EPOCH_1_START_BLOCK_OVERRIDE > 0 ? BigInt(EPOCH_1_START_BLOCK_OVERRIDE) : blockNumber;
+  const epoch1 = await context.LeaderboardEpoch.get('1');
+  if (!epoch1) {
+    context.LeaderboardEpoch.set({
+      id: '1',
+      epochNumber: 1n,
+      startBlock,
+      startTime: EPOCH_1_START_TIME_OVERRIDE,
+      endBlock: undefined,
+      endTime: undefined,
+      isActive: true,
+      duration: undefined,
+      scheduledStartTime: EPOCH_1_START_TIME_OVERRIDE,
+      scheduledEndTime: EPOCH_1_END_TIME_OVERRIDE,
+    });
+  }
+
+  // Bootstrap LeaderboardState
+  context.LeaderboardState.set({
+    id: 'current',
+    currentEpochNumber: 1n,
+    isActive: true,
+  });
+
+  // Bootstrap VotingPowerTiers
+  for (let i = 0; i < BOOTSTRAP_VP_TIERS.length; i++) {
+    const [minVotingPower, multiplierBps] = BOOTSTRAP_VP_TIERS[i];
+    context.VotingPowerTier.set({
+      id: i.toString(),
+      tierIndex: BigInt(i),
+      minVotingPower,
+      multiplierBps,
+      createdAt: EPOCH_1_START_TIME_OVERRIDE,
+      lastUpdate: EPOCH_1_START_TIME_OVERRIDE,
+      isActive: true,
+    });
+  }
+
+  // Bootstrap NFT Partnerships
+  const activeCollections: string[] = [];
+  for (const partnership of BOOTSTRAP_NFT_PARTNERSHIPS) {
+    const id = normalizeAddress(partnership.collection);
+    activeCollections.push(id);
+    context.NFTPartnership.set({
+      id,
+      collection: id,
+      name: partnership.name,
+      active: true,
+      startTimestamp: partnership.startTimestamp,
+      endTimestamp: partnership.endTimestamp,
+      addedAt: EPOCH_1_START_TIME_OVERRIDE,
+      lastUpdate: EPOCH_1_START_TIME_OVERRIDE,
+    });
+  }
+
+  // Bootstrap NFTPartnershipRegistryState
+  if (activeCollections.length > 0) {
+    context.NFTPartnershipRegistryState.set({
+      id: 'current',
+      activeCollections,
+      lastUpdate: EPOCH_1_START_TIME_OVERRIDE,
+    });
+  }
+
+  // Bootstrap NFTMultiplierConfig
+  if (BOOTSTRAP_NFT_PARTNERSHIPS.length > 0) {
+    context.NFTMultiplierConfig.set({
+      id: 'global',
+      firstBonus: BOOTSTRAP_NFT_MULTIPLIER_CONFIG.firstBonus,
+      decayRatio: BOOTSTRAP_NFT_MULTIPLIER_CONFIG.decayRatio,
+      lastUpdate: EPOCH_1_START_TIME_OVERRIDE,
+    });
+  }
+
+  // Bootstrap LP Pool Configs
+  const poolIds: string[] = [];
+  for (const poolConfig of BOOTSTRAP_LP_POOL_CONFIGS) {
+    const poolId = normalizeAddress(poolConfig.pool);
+    poolIds.push(poolId);
+    context.LPPoolConfig.set({
+      id: poolId,
+      pool: poolId,
+      positionManager: normalizeAddress(poolConfig.positionManager),
+      token0: normalizeAddress(poolConfig.token0),
+      token1: normalizeAddress(poolConfig.token1),
+      fee: poolConfig.fee,
+      lpRateBps: poolConfig.lpRateBps,
+      isActive: true,
+      enabledAtEpoch: 1n,
+      enabledAtTimestamp: EPOCH_1_START_TIME_OVERRIDE,
+      disabledAtEpoch: undefined,
+      disabledAtTimestamp: undefined,
+      lastUpdate: EPOCH_1_START_TIME_OVERRIDE,
+    });
+  }
+
+  // Bootstrap LPPoolRegistry
+  if (poolIds.length > 0) {
+    context.LPPoolRegistry.set({
+      id: 'global',
+      poolIds,
+      lastUpdate: EPOCH_1_START_TIME_OVERRIDE,
+    });
+  }
+
+  // Bootstrap LeaderboardConfig
+  const useBootstrap = EPOCH_1_START_TIME_OVERRIDE > 0;
+  context.LeaderboardConfig.set({
+    id: 'global',
+    depositRateBps: useBootstrap ? BOOTSTRAP_CONFIG.depositRateBps : 0n,
+    borrowRateBps: useBootstrap ? BOOTSTRAP_CONFIG.borrowRateBps : 0n,
+    vpRateBps: useBootstrap ? BOOTSTRAP_CONFIG.vpRateBps : 0n,
+    lpRateBps: useBootstrap ? BOOTSTRAP_CONFIG.lpRateBps : 0n,
+    supplyDailyBonus: useBootstrap ? BOOTSTRAP_CONFIG.supplyDailyBonus : 0,
+    borrowDailyBonus: useBootstrap ? BOOTSTRAP_CONFIG.borrowDailyBonus : 0,
+    repayDailyBonus: useBootstrap ? BOOTSTRAP_CONFIG.repayDailyBonus : 0,
+    withdrawDailyBonus: useBootstrap ? BOOTSTRAP_CONFIG.withdrawDailyBonus : 0,
+    cooldownSeconds: useBootstrap ? BOOTSTRAP_CONFIG.cooldownSeconds : 0,
+    minDailyBonusUsd: useBootstrap ? BOOTSTRAP_CONFIG.minDailyBonusUsd : 0,
+    lastUpdate: timestamp,
+  });
+}
+
 export async function recordProtocolTransaction(
   context: handlerContext,
   txHash: string,
@@ -119,12 +266,10 @@ export async function recordProtocolTransaction(
   // logIndex?: number,
   // eventLabel?: string
 ): Promise<void> {
-  // const blockLabel = blockNumber !== undefined ? blockNumber.toString() : 'n/a';
-  // const logIndexLabel = logIndex !== undefined ? logIndex.toString() : 'n/a';
-  // const eventPrefix = eventLabel ? `${eventLabel} ` : '';
-  // context.log.debug(
-  //   `${eventPrefix}event received tx=${txHash} ts=${timestamp} block=${blockLabel} logIndex=${logIndexLabel}`
-  // );
+  // Bootstrap leaderboard on first event if epoch 1 override is set
+  if (blockNumber !== undefined) {
+    await bootstrapLeaderboardIfNeeded(context, timestamp, blockNumber);
+  }
 
   await applyScheduledEpochTransitions(context, timestamp, blockNumber);
   let ps = await getOrCreateProtocolStats(context, timestamp);
