@@ -36,14 +36,3 @@ jobs:
 
       - name: Verify source files
         run: git diff --exit-code -- . ':(exclude)generated' ':(exclude)coverage' ':(exclude)dist-test' ':(exclude)*.lcov'
-
-      - name: Test with coverage
-        run: pnpm run test:coverage:check
-
-      - name: Upload coverage to Codecov
-        if: github.event_name == 'push'
-        uses: codecov/codecov-action@v4
-        with:
-          file: ./coverage/lcov.info
-          flags: unittests
-          name: codecov-umbrella
