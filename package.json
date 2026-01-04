@@ -17,7 +17,7 @@
     "test": "npm run test:build && node --test dist-test/src/__tests__/*.test.js",
     "test:coverage": "npm run test:build && c8 --reporter=text --reporter=lcov --reporter=html node --test dist-test/src/__tests__/*.test.js",
     "test:coverage:check": "npm run test:coverage -- --check-coverage --lines 100 --functions 100 --branches 100 --statements 100",
-    "type-check": "tsc --noEmit",
+    "type-check": "envio codegen && tsc --noEmit",
     "prepare": "husky"
   },
   "c8": {

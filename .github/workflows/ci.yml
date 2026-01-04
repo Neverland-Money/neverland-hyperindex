@@ -28,12 +28,6 @@ jobs:
       - name: Install deps
         run: pnpm install --frozen-lockfile
 
-      - name: Codegen
-        run: pnpm run codegen
-
-      - name: Verify generated files are committed
-        run: git diff --exit-code -- . ':(exclude)generated' ':(exclude)coverage' ':(exclude)dist-test' ':(exclude)*.lcov'
-
       - name: Format check
         run: pnpm run format:check
 
@@ -42,6 +36,9 @@ jobs:
 
       - name: Type check
         run: pnpm run type-check
+      
+      - name: Verify generated files are committed
+        run: git diff --exit-code -- . ':(exclude)generated' ':(exclude)coverage' ':(exclude)dist-test' ':(exclude)*.lcov'
 
       - name: Test with coverage
         run: pnpm run test:coverage:check
