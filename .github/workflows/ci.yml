@@ -28,6 +28,9 @@ jobs:
       - name: Install deps
         run: pnpm install --frozen-lockfile
 
+      - name: Clean generated folder
+        run: rm -rf generated
+
       - name: Format check
         run: pnpm run format:check
 
