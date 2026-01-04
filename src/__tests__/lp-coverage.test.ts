@@ -363,6 +363,8 @@ test('lp chain sync creates positions and updates indices/prices', async () => {
       sqrtPriceX96: 2n ** 96n,
       token0Price: 7n,
       token1Price: 11n,
+      feeProtocol0: 0,
+      feeProtocol1: 0,
       lastUpdate: 0,
     });
     stores.TokenInfo.set({
@@ -442,6 +444,8 @@ test('lp chain sync uses token1 ausd pricing', async () => {
       sqrtPriceX96: 2n ** 96n,
       token0Price: 9n,
       token1Price: 9n,
+      feeProtocol0: 0,
+      feeProtocol1: 0,
       lastUpdate: 0,
     });
     stores.TokenInfo.set({
@@ -516,6 +520,8 @@ test('lp chain sync uses token1 ausd pricing with higher token0 decimals', async
       sqrtPriceX96: 2n ** 96n,
       token0Price: 9n,
       token1Price: 9n,
+      feeProtocol0: 0,
+      feeProtocol1: 0,
       lastUpdate: 0,
     });
     stores.TokenInfo.set({
@@ -594,6 +600,8 @@ test('lp chain sync updates existing position indices', async () => {
       sqrtPriceX96: 2n ** 96n,
       token0Price: 1n,
       token1Price: 1n,
+      feeProtocol0: 0,
+      feeProtocol1: 0,
       lastUpdate: 0,
     });
     stores.UserLPPosition.set({
@@ -667,6 +675,8 @@ test('settleUserLPPositions settles points and skips empty', async () => {
     sqrtPriceX96: 2n ** 96n,
     token0Price: 100000000n,
     token1Price: 100000000n,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
     lastUpdate: 0,
   });
   stores.TokenInfo.set({
@@ -765,6 +775,8 @@ test('settleUserLPPositions handles missing epoch', async () => {
     sqrtPriceX96: 2n ** 96n,
     token0Price: 100000000n,
     token1Price: 100000000n,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
     lastUpdate: 0,
   });
   stores.UserLPPosition.set({
@@ -817,6 +829,8 @@ test('settleLPPoolPositions handles empty and active pools', async () => {
     sqrtPriceX96: 2n ** 96n,
     token0Price: 100000000n,
     token1Price: 100000000n,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
     lastUpdate: 0,
   });
   stores.TokenInfo.set({
@@ -902,6 +916,8 @@ test('swap fee stats handle missing stores and windowed volume', async () => {
     sqrtPriceX96: 2n ** 96n,
     token0Price: 100000000n,
     token1Price: 100000000n,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
     lastUpdate: 0,
   });
   stores.TokenInfo.set({
@@ -1306,6 +1322,8 @@ test('settleUserLPPositions uses single active pool config fallback', async () =
     sqrtPriceX96: 2n ** 96n,
     token0Price: 100000000n,
     token1Price: 100000000n,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
     lastUpdate: 0,
   });
 

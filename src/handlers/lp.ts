@@ -191,6 +191,8 @@ async function ensureHardcodedPoolConfig(context: handlerContext, timestamp: num
       sqrtPriceX96: 0n,
       token0Price: 0n,
       token1Price: 0n,
+      feeProtocol0: 0,
+      feeProtocol1: 0,
       lastUpdate: timestamp,
     });
   }
@@ -455,6 +457,8 @@ export async function syncUserLPPositionsFromChain(
           ...poolState,
           token0Price,
           token1Price,
+          feeProtocol0: poolState.feeProtocol0 ?? 0,
+          feeProtocol1: poolState.feeProtocol1 ?? 0,
           lastUpdate: timestamp,
         });
       }
@@ -496,6 +500,8 @@ async function getOrCreateLPPoolState(context: handlerContext, pool: string, tim
       sqrtPriceX96: 0n,
       token0Price: 0n,
       token1Price: 0n,
+      feeProtocol0: 0,
+      feeProtocol1: 0,
       lastUpdate: timestamp,
     };
     context.LPPoolState.set(state);
@@ -579,6 +585,46 @@ async function updatePoolLPStats(context: handlerContext, pool: string, timestam
     return;
   }
 
+  // Get current prices and decimals to recalculate position values
+  const poolConfig = await getActiveLPPoolConfig(context, poolId);
+  const poolState = await context.LPPoolState.get(poolId);
+  if (!poolConfig || !poolState) {
+    // Fallback to using stored values if we can't get current prices
+    let totalPositions = 0;
+    let inRangePositions = 0;
+    let totalValueUsd = 0n;
+    let inRangeValueUsd = 0n;
+
+    for (const position of positions) {
+      if (position.liquidity === 0n && position.amount0 === 0n && position.amount1 === 0n) {
+        continue;
+      }
+      totalPositions += 1;
+      totalValueUsd += position.valueUsd;
+      if (position.isInRange) {
+        inRangePositions += 1;
+        inRangeValueUsd += position.valueUsd;
+      }
+    }
+
+    setPoolStats(
+      context,
+      poolId,
+      totalPositions,
+      inRangePositions,
+      totalValueUsd,
+      inRangeValueUsd,
+      timestamp
+    );
+    return;
+  }
+
+  const { token0Decimals, token1Decimals } = await getPoolTokenDecimals(
+    context,
+    poolConfig,
+    timestamp
+  );
+
   let totalPositions = 0;
   let inRangePositions = 0;
   let totalValueUsd = 0n;
@@ -588,11 +634,22 @@ async function updatePoolLPStats(context: handlerContext, pool: string, timestam
     if (position.liquidity === 0n && position.amount0 === 0n && position.amount1 === 0n) {
       continue;
     }
+
+    // Recalculate valueUsd with current prices instead of using stale stored value
+    const valueUsd = calculatePositionValueUsd(
+      position.amount0,
+      position.amount1,
+      poolState.token0Price,
+      poolState.token1Price,
+      token0Decimals,
+      token1Decimals
+    );
+
     totalPositions += 1;
-    totalValueUsd += position.valueUsd;
+    totalValueUsd += valueUsd;
     if (position.isInRange) {
       inRangePositions += 1;
-      inRangeValueUsd += position.valueUsd;
+      inRangeValueUsd += valueUsd;
     }
   }
 
@@ -619,7 +676,8 @@ function calculateSwapVolumeUsd(
   const scale1 = 10n ** BigInt(token1Decimals);
   const value0 = (absBigInt(amount0) * token0PriceUsd) / scale0;
   const value1 = (absBigInt(amount1) * token1PriceUsd) / scale1;
-  return value0 > value1 ? value0 : value1;
+  // Use average of both sides to match Uniswap's volume calculation
+  return (value0 + value1) / 2n;
 }
 
 async function updatePoolFeeStats(
@@ -683,9 +741,25 @@ async function updatePoolFeeStats(
 
   const poolFee =
     (await ensurePoolFee(context, poolConfig, timestamp, blockNumber)) ?? poolConfig.fee ?? 0;
-  const feesUsd24h = poolFee > 0 ? (volumeUsd24h * BigInt(poolFee)) / FEE_UNITS_DENOMINATOR : 0n;
+  let feesUsd24h = poolFee > 0 ? (volumeUsd24h * BigInt(poolFee)) / FEE_UNITS_DENOMINATOR : 0n;
+
+  // Adjust for protocol fees - if feeProtocol is set, protocol takes 1/feeProtocol of the fees
+  // LPs only receive the remainder
+  const poolState = await context.LPPoolState.get(poolId);
+  const feeProtocol0 = poolState?.feeProtocol0 ?? 0;
+  const feeProtocol1 = poolState?.feeProtocol1 ?? 0;
+
+  // Use the higher protocol fee (more conservative for LP APR)
+  const maxFeeProtocol = Math.max(feeProtocol0, feeProtocol1);
+  if (maxFeeProtocol > 0 && feesUsd24h > 0n) {
+    // Protocol takes 1/feeProtocol, LPs get (feeProtocol-1)/feeProtocol
+    const lpFeeFraction = BigInt(maxFeeProtocol - 1);
+    const totalFraction = BigInt(maxFeeProtocol);
+    feesUsd24h = (feesUsd24h * lpFeeFraction) / totalFraction;
+  }
+
   const poolStats = await poolStatsStore?.get?.(poolId);
-  const tvlUsd = poolStats?.inRangeValueUsd ?? 0n;
+  const tvlUsd = poolStats?.totalValueUsd ?? 0n;
   const feeAprBps =
     feesUsd24h > 0n && tvlUsd > 0n ? (feesUsd24h * DAYS_PER_YEAR * BASIS_POINTS) / tvlUsd : 0n;
 
@@ -874,6 +948,8 @@ async function seedPoolStateFromChain(
     sqrtPriceX96: slot0.sqrtPriceX96,
     token0Price,
     token1Price,
+    feeProtocol0: poolState.feeProtocol0 ?? 0,
+    feeProtocol1: poolState.feeProtocol1 ?? 0,
     lastUpdate: timestamp,
   };
   context.LPPoolState.set(updatedState);
@@ -1820,6 +1896,8 @@ NonfungiblePositionManager.Transfer.handler(async ({ event, context }) => {
       ...poolState,
       token0Price,
       token1Price,
+      feeProtocol0: poolState.feeProtocol0 ?? 0,
+      feeProtocol1: poolState.feeProtocol1 ?? 0,
       lastUpdate: timestamp,
     });
 
@@ -1950,6 +2028,8 @@ UniswapV3Pool.Initialize.handler(async ({ event, context }) => {
     sqrtPriceX96,
     token0Price,
     token1Price,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
     lastUpdate: timestamp,
   });
 });
@@ -1994,6 +2074,8 @@ UniswapV3Pool.Swap.handler(async ({ event, context }) => {
     token1Price = isAusdToken0 ? pairedTokenPrice : ausdPrice;
   }
 
+  const prevFeeProtocol0 = poolState?.feeProtocol0 ?? 0;
+  const prevFeeProtocol1 = poolState?.feeProtocol1 ?? 0;
   context.LPPoolState.set({
     id: pool,
     pool,
@@ -2001,6 +2083,8 @@ UniswapV3Pool.Swap.handler(async ({ event, context }) => {
     sqrtPriceX96,
     token0Price,
     token1Price,
+    feeProtocol0: prevFeeProtocol0,
+    feeProtocol1: prevFeeProtocol1,
     lastUpdate: timestamp,
   });
 
@@ -2027,6 +2111,30 @@ UniswapV3Pool.Swap.handler(async ({ event, context }) => {
     token1Decimals
   );
   await updatePoolFeeStats(context, poolConfig, volumeUsd, timestamp, BigInt(event.block.number));
+});
+
+UniswapV3Pool.SetFeeProtocol.handler(async ({ event, context }) => {
+  const pool = normalizeAddress(event.srcAddress);
+  const timestamp = Number(event.block.timestamp);
+
+  const poolConfig =
+    pool === HARDCODED_LP_POOL
+      ? await ensureHardcodedPoolConfig(context, timestamp)
+      : await getActiveLPPoolConfig(context, pool);
+  if (!poolConfig) return;
+
+  const poolState = await context.LPPoolState.get(pool);
+  if (!poolState) return;
+
+  const feeProtocol0 = Number(event.params.feeProtocol0New);
+  const feeProtocol1 = Number(event.params.feeProtocol1New);
+
+  context.LPPoolState.set({
+    ...poolState,
+    feeProtocol0,
+    feeProtocol1,
+    lastUpdate: timestamp,
+  });
 });
 
 UniswapV3Pool.Mint.handler(async ({ event, context }) => {

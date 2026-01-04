@@ -670,6 +670,8 @@ LeaderboardConfigContract.LPPoolConfigured.handler(async ({ event, context }) =>
     sqrtPriceX96: 0n,
     token0Price: 0n,
     token1Price: 0n,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
     lastUpdate: timestamp,
   });
 

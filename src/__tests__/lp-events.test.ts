@@ -129,6 +129,8 @@ test('increase liquidity before transfer uses cached mint amounts', async () => 
       sqrtPriceX96: 0n,
       token0Price: PRICE_E8,
       token1Price: PRICE_E8,
+      feeProtocol0: 0,
+      feeProtocol1: 0,
       lastUpdate: 0,
     });
     mockDb = mockDb.entities.TokenInfo.set({
@@ -239,6 +241,8 @@ test('increase liquidity uses pool mint data when eth_call is unavailable', asyn
     sqrtPriceX96: 0n,
     token0Price: PRICE_E8,
     token1Price: PRICE_E8,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
     lastUpdate: 0,
   });
   mockDb = mockDb.entities.TokenInfo.set({
@@ -398,6 +402,8 @@ test('swap accrues lp points when position stays in range', async () => {
       sqrtPriceX96: 0n,
       token0Price: PRICE_E8,
       token1Price: PRICE_E8,
+      feeProtocol0: 0,
+      feeProtocol1: 0,
       lastUpdate: 0,
     });
     mockDb = mockDb.entities.TokenInfo.set({
@@ -515,6 +521,8 @@ test('swap updates fee apr stats', async () => {
     sqrtPriceX96: 0n,
     token0Price: PRICE_E8,
     token1Price: PRICE_E8,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
     lastUpdate: 0,
   });
   mockDb = mockDb.entities.TokenInfo.set({
@@ -552,9 +560,10 @@ test('swap updates fee apr stats', async () => {
 
   const feeStats = mockDb.entities.LPPoolFeeStats.get(ADDRESSES.pool);
   assert.ok(feeStats);
-  assert.equal(feeStats?.volumeUsd24h, 200000000n);
-  assert.equal(feeStats?.feesUsd24h, 2000000n);
-  assert.equal(feeStats?.feeAprBps, 73n);
+  // Volume is average: amount0=1M, amount1=2M at same price → (100000000 + 200000000) / 2 = 150000000
+  assert.equal(feeStats?.volumeUsd24h, 150000000n);
+  assert.equal(feeStats?.feesUsd24h, 1500000n);
+  assert.equal(feeStats?.feeAprBps, 54n);
 });
 
 test('increase/decrease liquidity update existing position', async () => {
@@ -601,6 +610,8 @@ test('increase/decrease liquidity update existing position', async () => {
     sqrtPriceX96: 2n ** 96n,
     token0Price: PRICE_E8,
     token1Price: PRICE_E8,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
     lastUpdate: 0,
   });
   mockDb = mockDb.entities.TokenInfo.set({
@@ -828,6 +839,8 @@ test('swap handles ausd pricing and empty positions', async () => {
     sqrtPriceX96: 2n ** 96n,
     token0Price: 0n,
     token1Price: 0n,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
     lastUpdate: 0,
   });
   mockDb = mockDb.entities.TokenInfo.set({
@@ -903,6 +916,8 @@ test('swap handles out-of-range positions', async () => {
     sqrtPriceX96: 2n ** 96n,
     token0Price: PRICE_E8,
     token1Price: PRICE_E8,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
     lastUpdate: 0,
   });
   mockDb = mockDb.entities.TokenInfo.set({
@@ -1097,6 +1112,8 @@ test('increase liquidity updates in-range transitions', async () => {
     sqrtPriceX96: 2n ** 96n,
     token0Price: PRICE_E8,
     token1Price: PRICE_E8,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
     lastUpdate: 0,
   });
   mockDb = mockDb.entities.TokenInfo.set({
@@ -1157,6 +1174,8 @@ test('increase liquidity updates in-range transitions', async () => {
     sqrtPriceX96: 2n ** 96n,
     token0Price: PRICE_E8,
     token1Price: PRICE_E8,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
     lastUpdate: 0,
   });
   const exit = TestHelpers.NonfungiblePositionManager.IncreaseLiquidity.createMockEvent({
@@ -1218,6 +1237,8 @@ test('decrease liquidity updates in-range transitions', async () => {
     sqrtPriceX96: 2n ** 96n,
     token0Price: PRICE_E8,
     token1Price: PRICE_E8,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
     lastUpdate: 0,
   });
   mockDb = mockDb.entities.TokenInfo.set({
@@ -1278,6 +1299,8 @@ test('decrease liquidity updates in-range transitions', async () => {
     sqrtPriceX96: 2n ** 96n,
     token0Price: PRICE_E8,
     token1Price: PRICE_E8,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
     lastUpdate: 0,
   });
   const exit = TestHelpers.NonfungiblePositionManager.DecreaseLiquidity.createMockEvent({
@@ -1329,6 +1352,8 @@ test('transfer mint uses ausd pricing for token0', async () => {
     sqrtPriceX96: 2n ** 96n,
     token0Price: PRICE_E8,
     token1Price: 0n,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
     lastUpdate: 0,
   });
   mockDb = mockDb.entities.TokenInfo.set({
@@ -1444,6 +1469,8 @@ test('transfer mint selects matching pool config when multiple fees exist', asyn
     sqrtPriceX96: 0n,
     token0Price: PRICE_E8,
     token1Price: PRICE_E8,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
     lastUpdate: 0,
   });
   mockDb = mockDb.entities.TokenInfo.set({
@@ -1520,6 +1547,8 @@ test('swap leaves out-of-range positions untouched', async () => {
     sqrtPriceX96: 2n ** 96n,
     token0Price: PRICE_E8,
     token1Price: PRICE_E8,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
     lastUpdate: 0,
   });
   mockDb = mockDb.entities.TokenInfo.set({

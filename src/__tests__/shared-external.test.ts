@@ -396,6 +396,8 @@ test('settlements sync LP positions from chain when enabled', async () => {
       sqrtPriceX96: LP_SQRT_PRICE_X96,
       token0Price: LP_PRICE_E8,
       token1Price: LP_PRICE_E8,
+      feeProtocol0: 0,
+      feeProtocol1: 0,
       lastUpdate: 0,
     });
     tokenInfo.set({

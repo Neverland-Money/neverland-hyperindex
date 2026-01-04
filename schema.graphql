@@ -1520,6 +1520,8 @@ type LPPoolState {
   sqrtPriceX96: BigInt!
   token0Price: BigInt!
   token1Price: BigInt!
+  feeProtocol0: Int!
+  feeProtocol1: Int!
   lastUpdate: Int!
 }
 
