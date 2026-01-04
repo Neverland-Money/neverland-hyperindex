@@ -600,6 +600,12 @@ LeaderboardConfigContract.LPPoolConfigured.handler(async ({ event, context }) =>
       fee = fetchedFee;
     }
   }
+  if (fee === undefined) {
+    const existingConfig = await context.LPPoolConfig.get(pool);
+    if (existingConfig?.fee !== undefined) {
+      fee = existingConfig.fee;
+    }
+  }
 
   // Get current epoch
   const leaderboardState = await context.LeaderboardState.get('current');

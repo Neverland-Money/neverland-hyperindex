@@ -222,7 +222,7 @@
   },
   {
     "type": "function",
-    "name": "syncLPBalances",
+    "name": "syncLPPositions",
     "inputs": [
       {
         "name": "users",
@@ -235,9 +235,24 @@
         "internalType": "address[]"
       },
       {
-        "name": "liquidities",
+        "name": "tokenIds",
         "type": "uint256[]",
         "internalType": "uint256[]"
+      },
+      {
+        "name": "tickLowers",
+        "type": "int24[]",
+        "internalType": "int24[]"
+      },
+      {
+        "name": "tickUppers",
+        "type": "int24[]",
+        "internalType": "int24[]"
+      },
+      {
+        "name": "liquidities",
+        "type": "uint128[]",
+        "internalType": "uint128[]"
       }
     ],
     "outputs": [],
@@ -363,7 +378,7 @@
   },
   {
     "type": "event",
-    "name": "LPBalanceSynced",
+    "name": "LPPositionSynced",
     "inputs": [
       {
         "name": "user",
@@ -378,10 +393,28 @@
         "internalType": "address"
       },
       {
-        "name": "liquidity",
+        "name": "tokenId",
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
+      },
+      {
+        "name": "tickLower",
+        "type": "int24",
+        "indexed": false,
+        "internalType": "int24"
+      },
+      {
+        "name": "tickUpper",
+        "type": "int24",
+        "indexed": false,
+        "internalType": "int24"
+      },
+      {
+        "name": "liquidity",
+        "type": "uint128",
+        "indexed": false,
+        "internalType": "uint128"
       },
       {
         "name": "timestamp",

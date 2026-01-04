@@ -299,6 +299,8 @@ networks:
       # NonfungiblePositionManager - registered from LeaderboardConfig.LPPoolConfigured
       - name: NonfungiblePositionManager
         abi_file_path: abis/uniswap/NonfungiblePositionManager.json
+        address: 0x7197e214c0b767cfb76fb734ab638e2c192f4e53
+        start_block: 41231451
         handler: src/handlers/lp.ts
         events:
           - event: IncreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)
@@ -308,8 +310,11 @@ networks:
       # UniswapV3Pool - registered from LeaderboardConfig.LPPoolConfigured
       - name: UniswapV3Pool
         abi_file_path: abis/uniswap/UniswapV3Pool.json
+        address: 0xd15965968fe8bf2babbe39b2fc5de1ab6749141f
+        start_block: 41231451
         handler: src/handlers/lp.ts
         events:
+          - event: Initialize(uint160 sqrtPriceX96, int24 tick)
           - event: Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick)
           - event: Mint(address sender, address indexed owner, int24 indexed tickLower, int24 indexed tickUpper, uint128 amount, uint256 amount0, uint256 amount1)
           - event: Burn(address indexed owner, int24 indexed tickLower, int24 indexed tickUpper, uint128 amount, uint256 amount0, uint256 amount1)

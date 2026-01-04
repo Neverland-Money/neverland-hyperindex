@@ -50,6 +50,13 @@ const FEE_UNITS_DENOMINATOR = 1_000_000n;
 const VOLUME_BUCKET_SECONDS = 3600;
 const VOLUME_WINDOW_HOURS = 24;
 const DAYS_PER_YEAR = 365n;
+const HARDCODED_LP_POOL = normalizeAddress('0xd15965968fe8bf2babbe39b2fc5de1ab6749141f');
+const HARDCODED_LP_POSITION_MANAGER = normalizeAddress(
+  '0x7197e214c0b767cfb76fb734ab638e2c192f4e53'
+);
+const HARDCODED_LP_TOKEN0 = AUSD_ADDRESS;
+const HARDCODED_LP_TOKEN1 = normalizeAddress('0xad96c3dffcd6374294e2573a7fbba96097cc8d7c');
+const HARDCODED_LP_FEE = 10000;
 
 function logLpDebug(context: handlerContext, message: string) {
   if (process.env.DEBUG_LP_POINTS === 'true') {
@@ -139,6 +146,58 @@ async function getSingleActiveLPPoolConfig(context: handlerContext) {
   return configs.length === 1 ? configs[0] : null;
 }
 
+async function ensureHardcodedPoolConfig(context: handlerContext, timestamp: number) {
+  let config = await context.LPPoolConfig.get(HARDCODED_LP_POOL);
+  if (config) return config;
+
+  const leaderboardState = await context.LeaderboardState.get('current');
+  const currentEpoch = leaderboardState?.currentEpochNumber ?? 1n;
+  const globalConfig = await context.LeaderboardConfig.get('global');
+  const lpRateBps = globalConfig?.lpRateBps ?? 0n;
+
+  config = {
+    id: HARDCODED_LP_POOL,
+    pool: HARDCODED_LP_POOL,
+    positionManager: HARDCODED_LP_POSITION_MANAGER,
+    token0: HARDCODED_LP_TOKEN0,
+    token1: HARDCODED_LP_TOKEN1,
+    fee: HARDCODED_LP_FEE,
+    lpRateBps,
+    isActive: true,
+    enabledAtEpoch: currentEpoch,
+    enabledAtTimestamp: timestamp,
+    disabledAtEpoch: undefined,
+    disabledAtTimestamp: undefined,
+    lastUpdate: timestamp,
+  };
+  context.LPPoolConfig.set(config);
+
+  const registry = await context.LPPoolRegistry.get('global');
+  const existingPoolIds = registry?.poolIds ?? [];
+  if (!existingPoolIds.includes(HARDCODED_LP_POOL)) {
+    context.LPPoolRegistry.set({
+      id: 'global',
+      poolIds: [...existingPoolIds, HARDCODED_LP_POOL],
+      lastUpdate: timestamp,
+    });
+  }
+
+  const existingState = await context.LPPoolState.get(HARDCODED_LP_POOL);
+  if (!existingState) {
+    context.LPPoolState.set({
+      id: HARDCODED_LP_POOL,
+      pool: HARDCODED_LP_POOL,
+      currentTick: 0,
+      sqrtPriceX96: 0n,
+      token0Price: 0n,
+      token1Price: 0n,
+      lastUpdate: timestamp,
+    });
+  }
+
+  return config;
+}
+
 async function getEffectiveLPPoolConfig(context: handlerContext, pool: string) {
   const poolId = normalizeAddress(pool);
   const config = await context.LPPoolConfig.get(poolId);
@@ -216,7 +275,8 @@ export async function syncUserLPPositionsFromChain(
   context: handlerContext,
   userId: string,
   timestamp: number,
-  blockNumber?: bigint
+  blockNumber?: bigint,
+  options?: { forceRescan?: boolean; managers?: string[] }
 ): Promise<void> {
   if (!shouldUseEthCalls() || process.env.ENABLE_LP_CHAIN_SYNC !== 'true') {
     return;
@@ -226,14 +286,27 @@ export async function syncUserLPPositionsFromChain(
   const configs = await listActiveLPPoolConfigs(context);
   if (configs.length === 0) return;
 
-  const uniqueManagers = Array.from(new Set(configs.map(config => config.positionManager)));
+  let uniqueManagers = Array.from(
+    new Set(configs.map(config => normalizeAddress(config.positionManager)))
+  );
+  if (options?.managers && options.managers.length > 0) {
+    const allowedManagers = new Set(options.managers.map(manager => normalizeAddress(manager)));
+    uniqueManagers = uniqueManagers.filter(manager => allowedManagers.has(manager));
+    if (uniqueManagers.length === 0) return;
+  }
   let createdAny = false;
   const touchedPools = new Set<string>();
 
   for (const manager of uniqueManagers) {
     const baselineId = `${normalizedUserId}:${manager}`;
     const baseline = await context.UserLPBaseline.get(baselineId);
-    if (baseline) continue;
+    if (baseline && !options?.forceRescan) continue;
+    if (baseline && options?.forceRescan) {
+      logLpDebug(
+        context,
+        `[lp] chain sync force rescan user=${normalizedUserId} manager=${manager}`
+      );
+    }
 
     const balance = await readLPBalance(manager, normalizedUserId, blockNumber, context.log);
     if (balance === null) {
@@ -1195,6 +1268,11 @@ NonfungiblePositionManager.IncreaseLiquidity.handler(async ({ event, context }) 
   const timestamp = Number(event.block.timestamp);
   const positionManager = normalizeAddress(event.srcAddress);
   const liquidityDelta = BigInt(event.params.liquidity);
+  const isHardcodedManager = positionManager === HARDCODED_LP_POSITION_MANAGER;
+  // For hardcoded manager, ensure config exists upfront
+  const hardcodedConfig = isHardcodedManager
+    ? await ensureHardcodedPoolConfig(context, timestamp)
+    : null;
   logLpDebug(
     context,
     `[lp] IncreaseLiquidity tokenId=${positionId} manager=${positionManager} amount0=${event.params.amount0.toString()} amount1=${event.params.amount1.toString()} liquidity=${liquidityDelta.toString()}`
@@ -1212,13 +1290,10 @@ NonfungiblePositionManager.IncreaseLiquidity.handler(async ({ event, context }) 
       return;
     }
 
-    let positionData = await readLPPosition(
-      positionManager,
-      tokenId,
-      BigInt(event.block.number),
-      context.log
-    );
-    let poolConfig = positionData
+    let positionData = shouldUseEthCalls()
+      ? await readLPPosition(positionManager, tokenId, BigInt(event.block.number), context.log)
+      : null;
+    let poolConfig: Awaited<ReturnType<typeof getActiveLPPoolConfig>> = positionData
       ? await resolvePoolConfigForPosition(
           context,
           positionManager,
@@ -1228,7 +1303,7 @@ NonfungiblePositionManager.IncreaseLiquidity.handler(async ({ event, context }) 
           timestamp,
           BigInt(event.block.number)
         )
-      : null;
+      : hardcodedConfig;
     const txMintKey = buildTxMintKey(
       event.transaction.hash,
       event.params.amount0,
@@ -1238,14 +1313,13 @@ NonfungiblePositionManager.IncreaseLiquidity.handler(async ({ event, context }) 
     let mintData: Awaited<ReturnType<typeof context.LPMintData.get>>;
 
     if (!positionData || !poolConfig) {
-      if (!positionData) {
-        context.log.debug(
-          `[lp] readLPPosition unavailable on IncreaseLiquidity tokenId=${tokenId.toString()} tx=${event.transaction.hash}`
-        );
-      }
       mintData = await context.LPMintData.get(txMintKey);
       if (mintData) {
-        poolConfig = await getActiveLPPoolConfig(context, mintData.pool);
+        const mintPool = normalizeAddress(mintData.pool);
+        poolConfig =
+          mintPool === HARDCODED_LP_POOL
+            ? await ensureHardcodedPoolConfig(context, timestamp)
+            : await getActiveLPPoolConfig(context, mintPool);
         if (poolConfig) {
           positionData = {
             token0: poolConfig.token0,
@@ -1259,29 +1333,90 @@ NonfungiblePositionManager.IncreaseLiquidity.handler(async ({ event, context }) 
       }
     }
 
-    if (!positionData || !poolConfig) {
-      logLpDebug(
-        context,
-        `[lp] IncreaseLiquidity skip tokenId=${positionId} missing=${!positionData ? 'position' : ''}${!positionData && !poolConfig ? ',' : ''}${!poolConfig ? 'poolConfig' : ''}`
+    if (!positionData || !poolConfig) return;
+
+    // Create position directly - don't rely on Transfer event ordering
+    const owner = event.transaction.from ? normalizeAddress(event.transaction.from) : ZERO_ADDRESS;
+    await getOrCreateUser(context, owner);
+
+    const poolState = await seedPoolStateFromChain(
+      context,
+      poolConfig.pool,
+      timestamp,
+      BigInt(event.block.number)
+    );
+    const isInRange = isPositionInRange(
+      positionData.tickLower,
+      positionData.tickUpper,
+      poolState.currentTick
+    );
+
+    const { token0Decimals, token1Decimals } = await getPoolTokenDecimals(
+      context,
+      poolConfig,
+      timestamp
+    );
+    const ausdPrice = getAusdPrice();
+    const isAusdToken0 = poolConfig.token0 === AUSD_ADDRESS;
+    const isAusdToken1 = poolConfig.token1 === AUSD_ADDRESS;
+    let token0Price = poolState.token0Price;
+    let token1Price = poolState.token1Price;
+    if (isAusdToken0 || isAusdToken1) {
+      const pairedTokenPrice = calculateDustPriceFromPool(
+        poolState.sqrtPriceX96,
+        ausdPrice,
+        isAusdToken0,
+        token0Decimals,
+        token1Decimals
       );
-      return;
+      token0Price = isAusdToken0 ? ausdPrice : pairedTokenPrice;
+      token1Price = isAusdToken0 ? pairedTokenPrice : ausdPrice;
     }
 
-    // Key by tokenId so Transfer handler can look it up without eth_call
-    const owner = event.transaction.from ? normalizeAddress(event.transaction.from) : ZERO_ADDRESS;
-    context.LPMintData.set({
-      id: pendingKey,
+    const derivedAmounts = derivePositionAmounts(
+      liquidityDelta,
+      positionData.tickLower,
+      positionData.tickUpper,
+      poolState.sqrtPriceX96,
+      event.params.amount0,
+      event.params.amount1
+    );
+    const valueUsd = calculatePositionValueUsd(
+      derivedAmounts.amount0,
+      derivedAmounts.amount1,
+      token0Price,
+      token1Price,
+      token0Decimals,
+      token1Decimals
+    );
+
+    context.UserLPPosition.set({
+      id: positionId,
+      tokenId,
+      user_id: owner,
       pool: poolConfig.pool,
       positionManager,
-      owner,
       tickLower: positionData.tickLower,
       tickUpper: positionData.tickUpper,
       liquidity: liquidityDelta,
-      amount0: event.params.amount0,
-      amount1: event.params.amount1,
-      txHash: event.transaction.hash,
-      timestamp,
+      amount0: derivedAmounts.amount0,
+      amount1: derivedAmounts.amount1,
+      isInRange,
+      valueUsd,
+      lastInRangeTimestamp: isInRange ? timestamp : 0,
+      accumulatedInRangeSeconds: 0n,
+      lastSettledAt: timestamp,
+      settledLpPoints: 0n,
+      createdAt: timestamp,
+      lastUpdate: timestamp,
     });
+
+    await addPositionToPoolIndex(context, poolConfig.pool, positionId, timestamp);
+    await addPositionToUserIndex(context, owner, positionId, timestamp);
+    await updateUserLPStats(context, owner, timestamp);
+    await updatePoolLPStats(context, poolConfig.pool, timestamp);
+
+    // Clean up mint data
     if (mintData) {
       const poolMintKey = `${mintData.pool}:${mintData.tickLower}:${mintData.tickUpper}:${mintData.txHash}`;
       context.LPMintData.deleteUnsafe(poolMintKey);
@@ -1292,7 +1427,11 @@ NonfungiblePositionManager.IncreaseLiquidity.handler(async ({ event, context }) 
     return;
   }
 
-  const poolConfig = await getActiveLPPoolConfig(context, position.pool);
+  const existingPool = normalizeAddress(position.pool);
+  const poolConfig =
+    existingPool === HARDCODED_LP_POOL
+      ? await ensureHardcodedPoolConfig(context, timestamp)
+      : await getActiveLPPoolConfig(context, existingPool);
   if (!poolConfig) return;
 
   const poolState = await seedPoolStateFromChain(
@@ -1394,7 +1533,11 @@ NonfungiblePositionManager.DecreaseLiquidity.handler(async ({ event, context }) 
   let position = await context.UserLPPosition.get(positionId);
   if (!position) return;
 
-  const poolConfig = await getActiveLPPoolConfig(context, position.pool);
+  const decreasePool = normalizeAddress(position.pool);
+  const poolConfig =
+    decreasePool === HARDCODED_LP_POOL
+      ? await ensureHardcodedPoolConfig(context, timestamp)
+      : await getActiveLPPoolConfig(context, decreasePool);
   if (!poolConfig) return;
 
   const poolState = await seedPoolStateFromChain(
@@ -1495,6 +1638,11 @@ NonfungiblePositionManager.Transfer.handler(async ({ event, context }) => {
   const timestamp = Number(event.block.timestamp);
   const blockNumber = BigInt(event.block.number);
   const positionManager = normalizeAddress(event.srcAddress);
+  const isHardcodedManager = positionManager === HARDCODED_LP_POSITION_MANAGER;
+  // For hardcoded manager, ensure config exists upfront
+  const hardcodedConfig = isHardcodedManager
+    ? await ensureHardcodedPoolConfig(context, timestamp)
+    : null;
   logLpDebug(
     context,
     `[lp] Transfer tokenId=${positionId} from=${from} to=${to} manager=${positionManager} tx=${event.transaction.hash}`
@@ -1504,9 +1652,30 @@ NonfungiblePositionManager.Transfer.handler(async ({ event, context }) => {
   if (from === ZERO_ADDRESS) {
     await getOrCreateUser(context, to);
 
+    // Check if position was already created by IncreaseLiquidity (event ordering may vary)
+    const existingPosition = await context.UserLPPosition.get(positionId);
+    if (existingPosition) {
+      // Position exists - just update owner if different (Transfer has correct owner)
+      if (existingPosition.user_id !== to) {
+        const oldOwner = existingPosition.user_id;
+        context.UserLPPosition.set({
+          ...existingPosition,
+          user_id: to,
+          lastUpdate: timestamp,
+        });
+        await removePositionFromUserIndex(context, oldOwner, positionId, timestamp);
+        await addPositionToUserIndex(context, to, positionId, timestamp);
+        await updateUserLPStats(context, oldOwner, timestamp);
+        await updateUserLPStats(context, to, timestamp);
+      }
+      return;
+    }
+
     // Try eth_call first to get position data
-    let positionData = await readLPPosition(positionManager, tokenId, blockNumber, context.log);
-    let poolConfig = positionData
+    let positionData = shouldUseEthCalls()
+      ? await readLPPosition(positionManager, tokenId, blockNumber, context.log)
+      : null;
+    let poolConfig: Awaited<ReturnType<typeof getActiveLPPoolConfig>> = positionData
       ? await resolvePoolConfigForPosition(
           context,
           positionManager,
@@ -1516,7 +1685,7 @@ NonfungiblePositionManager.Transfer.handler(async ({ event, context }) => {
           timestamp,
           blockNumber
         )
-      : null;
+      : hardcodedConfig;
 
     // Fallback: If eth_call failed or no matching pool config, try to find LPMintData
     // The IncreaseLiquidity handler caches this data keyed by tokenId
@@ -1524,14 +1693,13 @@ NonfungiblePositionManager.Transfer.handler(async ({ event, context }) => {
     let mintData = await context.LPMintData.get(pendingMintKey);
 
     if (!positionData || !poolConfig) {
-      if (!positionData) {
-        context.log.debug(
-          `[lp] readLPPosition unavailable on Transfer tokenId=${tokenId.toString()} tx=${event.transaction.hash}`
-        );
-      }
       // Use LPMintData to reconstruct position data
       if (mintData) {
-        poolConfig = await getActiveLPPoolConfig(context, mintData.pool);
+        const mintPool = normalizeAddress(mintData.pool);
+        poolConfig =
+          mintPool === HARDCODED_LP_POOL
+            ? await ensureHardcodedPoolConfig(context, timestamp)
+            : await getActiveLPPoolConfig(context, mintPool);
         if (poolConfig) {
           positionData = {
             token0: poolConfig.token0,
@@ -1741,14 +1909,61 @@ NonfungiblePositionManager.Transfer.handler(async ({ event, context }) => {
 //     UniswapV3Pool Handlers
 // ============================================
 
-UniswapV3Pool.Swap.handler(async ({ event, context }) => {
+UniswapV3Pool.Initialize.handler(async ({ event, context }) => {
   const pool = normalizeAddress(event.srcAddress);
-
-  // Check if this pool is tracked
-  const poolConfig = await getActiveLPPoolConfig(context, pool);
+  const timestamp = Number(event.block.timestamp);
+  const poolConfig =
+    pool === HARDCODED_LP_POOL
+      ? await ensureHardcodedPoolConfig(context, timestamp)
+      : await getActiveLPPoolConfig(context, pool);
   if (!poolConfig) return;
 
+  const currentTick = Number(event.params.tick);
+  const sqrtPriceX96 = event.params.sqrtPriceX96;
+
+  const { token0Decimals, token1Decimals } = await getPoolTokenDecimals(
+    context,
+    poolConfig,
+    timestamp
+  );
+  let token0Price = 0n;
+  let token1Price = 0n;
+  const isAusdToken0 = poolConfig.token0 === AUSD_ADDRESS;
+  const isAusdToken1 = poolConfig.token1 === AUSD_ADDRESS;
+  if (isAusdToken0 || isAusdToken1) {
+    const ausdPrice = getAusdPrice();
+    const pairedTokenPrice = calculateDustPriceFromPool(
+      sqrtPriceX96,
+      ausdPrice,
+      isAusdToken0,
+      token0Decimals,
+      token1Decimals
+    );
+    token0Price = isAusdToken0 ? ausdPrice : pairedTokenPrice;
+    token1Price = isAusdToken0 ? pairedTokenPrice : ausdPrice;
+  }
+
+  context.LPPoolState.set({
+    id: pool,
+    pool,
+    currentTick,
+    sqrtPriceX96,
+    token0Price,
+    token1Price,
+    lastUpdate: timestamp,
+  });
+});
+
+UniswapV3Pool.Swap.handler(async ({ event, context }) => {
+  const pool = normalizeAddress(event.srcAddress);
   const timestamp = Number(event.block.timestamp);
+
+  // Check if this pool is tracked
+  const poolConfig =
+    pool === HARDCODED_LP_POOL
+      ? await ensureHardcodedPoolConfig(context, timestamp)
+      : await getActiveLPPoolConfig(context, pool);
+  if (!poolConfig) return;
   const currentTick = Number(event.params.tick);
   const sqrtPriceX96 = event.params.sqrtPriceX96;
 
@@ -1823,7 +2038,12 @@ UniswapV3Pool.Mint.handler(async ({ event, context }) => {
   );
 
   const pool = normalizeAddress(event.srcAddress);
-  const poolConfig = await getActiveLPPoolConfig(context, pool);
+  let poolConfig: Awaited<ReturnType<typeof getActiveLPPoolConfig>> = null;
+  if (pool === HARDCODED_LP_POOL) {
+    poolConfig = await ensureHardcodedPoolConfig(context, Number(event.block.timestamp));
+  } else {
+    poolConfig = await getActiveLPPoolConfig(context, pool);
+  }
   if (!poolConfig) return;
 
   const timestamp = Number(event.block.timestamp);

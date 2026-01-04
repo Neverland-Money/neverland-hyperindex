@@ -164,14 +164,11 @@ LeaderboardKeeper.LPBalanceSynced.handler(async ({ event, context }) => {
   const blockNumber = BigInt(event.block.number);
 
   const poolConfig = await context.LPPoolConfig.get(pool);
-  if (poolConfig) {
-    const baselineId = `${userId}:${poolConfig.positionManager}`;
-    context.UserLPBaseline.set({
-      id: baselineId,
-      user_id: userId,
-      positionManager: poolConfig.positionManager,
-      checkedAt: timestamp,
-      checkedBlock: blockNumber,
+  if (poolConfig && liquidity > 0n) {
+    const { syncUserLPPositionsFromChain } = await import('./lp');
+    await syncUserLPPositionsFromChain(context, userId, timestamp, blockNumber, {
+      forceRescan: true,
+      managers: [poolConfig.positionManager],
     });
   }
 

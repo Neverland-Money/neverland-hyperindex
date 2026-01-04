@@ -77,122 +77,132 @@ function createEventDataFactory() {
 }
 
 test('increase liquidity before transfer uses cached mint amounts', async () => {
-  setLPPositionOverride([
-    0n,
-    ZERO_ADDRESS,
-    ADDRESSES.token0,
-    ADDRESSES.token1,
-    3000,
-    TICK_LOWER,
-    TICK_UPPER,
-    123n,
-    0n,
-    0n,
-    0n,
-    0n,
-  ]);
+  const prevDisableExternal = process.env.DISABLE_EXTERNAL_CALLS;
+  const prevDisableEth = process.env.DISABLE_ETH_CALLS;
+  process.env.DISABLE_EXTERNAL_CALLS = 'false';
+  process.env.DISABLE_ETH_CALLS = 'false';
+  try {
+    setLPPositionOverride([
+      0n,
+      ZERO_ADDRESS,
+      ADDRESSES.token0,
+      ADDRESSES.token1,
+      3000,
+      TICK_LOWER,
+      TICK_UPPER,
+      123n,
+      0n,
+      0n,
+      0n,
+      0n,
+    ]);
 
-  const TestHelpers = loadTestHelpers();
-  let mockDb = TestHelpers.MockDb.createMockDb();
-  const eventData = createEventDataFactory();
+    const TestHelpers = loadTestHelpers();
+    let mockDb = TestHelpers.MockDb.createMockDb();
+    const eventData = createEventDataFactory();
 
-  mockDb = mockDb.entities.LPPoolRegistry.set({
-    id: 'global',
-    poolIds: [ADDRESSES.pool],
-    lastUpdate: 0,
-  });
-  mockDb = mockDb.entities.LPPoolConfig.set({
-    id: ADDRESSES.pool,
-    pool: ADDRESSES.pool,
-    positionManager: ADDRESSES.positionManager,
-    token0: ADDRESSES.token0,
-    token1: ADDRESSES.token1,
-    fee: undefined,
-    lpRateBps: 0n,
-    isActive: true,
-    enabledAtEpoch: 1n,
-    enabledAtTimestamp: 0,
-    disabledAtEpoch: undefined,
-    disabledAtTimestamp: undefined,
-    lastUpdate: 0,
-  });
-  mockDb = mockDb.entities.LPPoolState.set({
-    id: ADDRESSES.pool,
-    pool: ADDRESSES.pool,
-    currentTick: 0,
-    sqrtPriceX96: 0n,
-    token0Price: PRICE_E8,
-    token1Price: PRICE_E8,
-    lastUpdate: 0,
-  });
-  mockDb = mockDb.entities.TokenInfo.set({
-    id: ADDRESSES.token0,
-    address: ADDRESSES.token0,
-    decimals: DECIMALS,
-    symbol: 'TK0',
-    name: 'Token0',
-    lastUpdate: 0,
-  });
-  mockDb = mockDb.entities.TokenInfo.set({
-    id: ADDRESSES.token1,
-    address: ADDRESSES.token1,
-    decimals: DECIMALS,
-    symbol: 'TK1',
-    name: 'Token1',
-    lastUpdate: 0,
-  });
+    mockDb = mockDb.entities.LPPoolRegistry.set({
+      id: 'global',
+      poolIds: [ADDRESSES.pool],
+      lastUpdate: 0,
+    });
+    mockDb = mockDb.entities.LPPoolConfig.set({
+      id: ADDRESSES.pool,
+      pool: ADDRESSES.pool,
+      positionManager: ADDRESSES.positionManager,
+      token0: ADDRESSES.token0,
+      token1: ADDRESSES.token1,
+      fee: undefined,
+      lpRateBps: 0n,
+      isActive: true,
+      enabledAtEpoch: 1n,
+      enabledAtTimestamp: 0,
+      disabledAtEpoch: undefined,
+      disabledAtTimestamp: undefined,
+      lastUpdate: 0,
+    });
+    mockDb = mockDb.entities.LPPoolState.set({
+      id: ADDRESSES.pool,
+      pool: ADDRESSES.pool,
+      currentTick: 0,
+      sqrtPriceX96: 0n,
+      token0Price: PRICE_E8,
+      token1Price: PRICE_E8,
+      lastUpdate: 0,
+    });
+    mockDb = mockDb.entities.TokenInfo.set({
+      id: ADDRESSES.token0,
+      address: ADDRESSES.token0,
+      decimals: DECIMALS,
+      symbol: 'TK0',
+      name: 'Token0',
+      lastUpdate: 0,
+    });
+    mockDb = mockDb.entities.TokenInfo.set({
+      id: ADDRESSES.token1,
+      address: ADDRESSES.token1,
+      decimals: DECIMALS,
+      symbol: 'TK1',
+      name: 'Token1',
+      lastUpdate: 0,
+    });
 
-  const increaseMeta = eventData(100, 1000, ADDRESSES.positionManager);
-  const txHash = increaseMeta.mockEventData.transaction.hash;
+    const increaseMeta = eventData(100, 1000, ADDRESSES.positionManager);
+    const txHash = increaseMeta.mockEventData.transaction.hash;
 
-  const increase = TestHelpers.NonfungiblePositionManager.IncreaseLiquidity.createMockEvent({
-    tokenId: TOKEN_ID,
-    liquidity: 123n,
-    amount0: AMOUNT0,
-    amount1: AMOUNT1,
-    ...increaseMeta,
-  });
-  mockDb = await TestHelpers.NonfungiblePositionManager.IncreaseLiquidity.processEvent({
-    event: increase,
-    mockDb,
-  });
+    const increase = TestHelpers.NonfungiblePositionManager.IncreaseLiquidity.createMockEvent({
+      tokenId: TOKEN_ID,
+      liquidity: 123n,
+      amount0: AMOUNT0,
+      amount1: AMOUNT1,
+      ...increaseMeta,
+    });
+    mockDb = await TestHelpers.NonfungiblePositionManager.IncreaseLiquidity.processEvent({
+      event: increase,
+      mockDb,
+    });
 
-  // LPMintData is keyed by pending:tokenId for easy lookup by Transfer handler
-  const mintKey = `pending:${TOKEN_ID.toString()}`;
-  const pending = mockDb.entities.LPMintData.get(mintKey);
-  assert.ok(pending);
-  assert.equal(pending?.amount0, AMOUNT0);
-  assert.equal(pending?.amount1, AMOUNT1);
+    // IncreaseLiquidity now creates position directly (no pending data)
+    const positionAfterIncrease = mockDb.entities.UserLPPosition.get(TOKEN_ID.toString());
+    assert.ok(positionAfterIncrease);
+    assert.equal(positionAfterIncrease?.amount0, AMOUNT0);
+    assert.equal(positionAfterIncrease?.amount1, AMOUNT1);
 
-  const transferMeta = {
-    mockEventData: {
-      block: increaseMeta.mockEventData.block,
-      logIndex: increaseMeta.mockEventData.logIndex + 1,
-      srcAddress: ADDRESSES.positionManager,
-      transaction: { hash: txHash },
-    },
-  };
-  const transfer = TestHelpers.NonfungiblePositionManager.Transfer.createMockEvent({
-    from: ZERO_ADDRESS,
-    to: ADDRESSES.user,
-    tokenId: TOKEN_ID,
-    ...transferMeta,
-  });
-  mockDb = await TestHelpers.NonfungiblePositionManager.Transfer.processEvent({
-    event: transfer,
-    mockDb,
-  });
+    const transferMeta = {
+      mockEventData: {
+        block: increaseMeta.mockEventData.block,
+        logIndex: increaseMeta.mockEventData.logIndex + 1,
+        srcAddress: ADDRESSES.positionManager,
+        transaction: { hash: txHash },
+      },
+    };
+    const transfer = TestHelpers.NonfungiblePositionManager.Transfer.createMockEvent({
+      from: ZERO_ADDRESS,
+      to: ADDRESSES.user,
+      tokenId: TOKEN_ID,
+      ...transferMeta,
+    });
+    mockDb = await TestHelpers.NonfungiblePositionManager.Transfer.processEvent({
+      event: transfer,
+      mockDb,
+    });
 
-  const position = mockDb.entities.UserLPPosition.get(TOKEN_ID.toString());
-  assert.ok(position);
-  assert.equal(position?.amount0, AMOUNT0);
-  assert.equal(position?.amount1, AMOUNT1);
-  assert.equal(position?.valueUsd, EXPECTED_VALUE_USD);
+    const position = mockDb.entities.UserLPPosition.get(TOKEN_ID.toString());
+    assert.ok(position);
+    assert.equal(position?.amount0, AMOUNT0);
+    assert.equal(position?.amount1, AMOUNT1);
+    assert.equal(position?.valueUsd, EXPECTED_VALUE_USD);
 
-  const pendingAfter = mockDb.entities.LPMintData.get(mintKey);
-  assert.equal(pendingAfter, undefined);
+    // Mint data should be cleaned up after position creation
+    const pendingKey = `pending:${TOKEN_ID.toString()}`;
+    const pendingAfter = mockDb.entities.LPMintData.get(pendingKey);
+    assert.equal(pendingAfter, undefined);
 
-  setLPPositionOverride(undefined);
+    setLPPositionOverride(undefined);
+  } finally {
+    process.env.DISABLE_EXTERNAL_CALLS = prevDisableExternal;
+    process.env.DISABLE_ETH_CALLS = prevDisableEth;
+  }
 });
 
 test('increase liquidity uses pool mint data when eth_call is unavailable', async () => {
@@ -283,12 +293,13 @@ test('increase liquidity uses pool mint data when eth_call is unavailable', asyn
     mockDb,
   });
 
-  const mintKey = `pending:${TOKEN_ID.toString()}`;
-  const pending = mockDb.entities.LPMintData.get(mintKey);
-  assert.ok(pending);
-  assert.equal(pending?.tickLower, TICK_LOWER);
-  assert.equal(pending?.tickUpper, TICK_UPPER);
+  // IncreaseLiquidity now creates position directly using Pool.Mint data
+  const positionAfterIncrease = mockDb.entities.UserLPPosition.get(TOKEN_ID.toString());
+  assert.ok(positionAfterIncrease);
+  assert.equal(positionAfterIncrease?.tickLower, TICK_LOWER);
+  assert.equal(positionAfterIncrease?.tickUpper, TICK_UPPER);
 
+  // Pool mint data should be cleaned up
   const poolMintKey = `${ADDRESSES.pool}:${TICK_LOWER}:${TICK_UPPER}:${txHash}`;
   const poolMintData = mockDb.entities.LPMintData.get(poolMintKey);
   assert.equal(poolMintData, undefined);
@@ -317,143 +328,152 @@ test('increase liquidity uses pool mint data when eth_call is unavailable', asyn
 });
 
 test('swap accrues lp points when position stays in range', async () => {
-  setLPPositionOverride([
-    0n,
-    ZERO_ADDRESS,
-    ADDRESSES.token0,
-    ADDRESSES.token1,
-    3000,
-    TICK_LOWER,
-    TICK_UPPER,
-    123n,
-    0n,
-    0n,
-    0n,
-    0n,
-  ]);
+  const prevDisableExternal = process.env.DISABLE_EXTERNAL_CALLS;
+  const prevDisableEth = process.env.DISABLE_ETH_CALLS;
+  process.env.DISABLE_EXTERNAL_CALLS = 'false';
+  process.env.DISABLE_ETH_CALLS = 'false';
+  try {
+    setLPPositionOverride([
+      0n,
+      ZERO_ADDRESS,
+      ADDRESSES.token0,
+      ADDRESSES.token1,
+      3000,
+      TICK_LOWER,
+      TICK_UPPER,
+      123n,
+      0n,
+      0n,
+      0n,
+      0n,
+    ]);
 
-  const TestHelpers = loadTestHelpers();
-  let mockDb = TestHelpers.MockDb.createMockDb();
-  const eventData = createEventDataFactory();
+    const TestHelpers = loadTestHelpers();
+    let mockDb = TestHelpers.MockDb.createMockDb();
+    const eventData = createEventDataFactory();
 
-  mockDb = mockDb.entities.LeaderboardState.set({
-    id: 'current',
-    currentEpochNumber: 1n,
-    isActive: true,
-  });
-  mockDb = mockDb.entities.LeaderboardEpoch.set({
-    id: '1',
-    epochNumber: 1n,
-    startBlock: 0n,
-    startTime: 1000,
-    endBlock: undefined,
-    endTime: undefined,
-    isActive: true,
-    duration: undefined,
-    scheduledStartTime: 0,
-    scheduledEndTime: 0,
-  });
+    mockDb = mockDb.entities.LeaderboardState.set({
+      id: 'current',
+      currentEpochNumber: 1n,
+      isActive: true,
+    });
+    mockDb = mockDb.entities.LeaderboardEpoch.set({
+      id: '1',
+      epochNumber: 1n,
+      startBlock: 0n,
+      startTime: 1000,
+      endBlock: undefined,
+      endTime: undefined,
+      isActive: true,
+      duration: undefined,
+      scheduledStartTime: 0,
+      scheduledEndTime: 0,
+    });
 
-  mockDb = mockDb.entities.LPPoolRegistry.set({
-    id: 'global',
-    poolIds: [ADDRESSES.pool],
-    lastUpdate: 0,
-  });
-  mockDb = mockDb.entities.LPPoolConfig.set({
-    id: ADDRESSES.pool,
-    pool: ADDRESSES.pool,
-    positionManager: ADDRESSES.positionManager,
-    token0: ADDRESSES.token0,
-    token1: ADDRESSES.token1,
-    fee: undefined,
-    lpRateBps: 2000n,
-    isActive: true,
-    enabledAtEpoch: 1n,
-    enabledAtTimestamp: 0,
-    disabledAtEpoch: undefined,
-    disabledAtTimestamp: undefined,
-    lastUpdate: 0,
-  });
-  mockDb = mockDb.entities.LPPoolState.set({
-    id: ADDRESSES.pool,
-    pool: ADDRESSES.pool,
-    currentTick: 0,
-    sqrtPriceX96: 0n,
-    token0Price: PRICE_E8,
-    token1Price: PRICE_E8,
-    lastUpdate: 0,
-  });
-  mockDb = mockDb.entities.TokenInfo.set({
-    id: ADDRESSES.token0,
-    address: ADDRESSES.token0,
-    decimals: DECIMALS,
-    symbol: 'TK0',
-    name: 'Token0',
-    lastUpdate: 0,
-  });
-  mockDb = mockDb.entities.TokenInfo.set({
-    id: ADDRESSES.token1,
-    address: ADDRESSES.token1,
-    decimals: DECIMALS,
-    symbol: 'TK1',
-    name: 'Token1',
-    lastUpdate: 0,
-  });
+    mockDb = mockDb.entities.LPPoolRegistry.set({
+      id: 'global',
+      poolIds: [ADDRESSES.pool],
+      lastUpdate: 0,
+    });
+    mockDb = mockDb.entities.LPPoolConfig.set({
+      id: ADDRESSES.pool,
+      pool: ADDRESSES.pool,
+      positionManager: ADDRESSES.positionManager,
+      token0: ADDRESSES.token0,
+      token1: ADDRESSES.token1,
+      fee: undefined,
+      lpRateBps: 2000n,
+      isActive: true,
+      enabledAtEpoch: 1n,
+      enabledAtTimestamp: 0,
+      disabledAtEpoch: undefined,
+      disabledAtTimestamp: undefined,
+      lastUpdate: 0,
+    });
+    mockDb = mockDb.entities.LPPoolState.set({
+      id: ADDRESSES.pool,
+      pool: ADDRESSES.pool,
+      currentTick: 0,
+      sqrtPriceX96: 0n,
+      token0Price: PRICE_E8,
+      token1Price: PRICE_E8,
+      lastUpdate: 0,
+    });
+    mockDb = mockDb.entities.TokenInfo.set({
+      id: ADDRESSES.token0,
+      address: ADDRESSES.token0,
+      decimals: DECIMALS,
+      symbol: 'TK0',
+      name: 'Token0',
+      lastUpdate: 0,
+    });
+    mockDb = mockDb.entities.TokenInfo.set({
+      id: ADDRESSES.token1,
+      address: ADDRESSES.token1,
+      decimals: DECIMALS,
+      symbol: 'TK1',
+      name: 'Token1',
+      lastUpdate: 0,
+    });
 
-  const increaseMeta = eventData(100, 1000, ADDRESSES.positionManager);
-  const txHash = increaseMeta.mockEventData.transaction.hash;
-  const increase = TestHelpers.NonfungiblePositionManager.IncreaseLiquidity.createMockEvent({
-    tokenId: TOKEN_ID,
-    liquidity: 123n,
-    amount0: AMOUNT0,
-    amount1: AMOUNT1,
-    ...increaseMeta,
-  });
-  mockDb = await TestHelpers.NonfungiblePositionManager.IncreaseLiquidity.processEvent({
-    event: increase,
-    mockDb,
-  });
+    const increaseMeta = eventData(100, 1000, ADDRESSES.positionManager);
+    const txHash = increaseMeta.mockEventData.transaction.hash;
+    const increase = TestHelpers.NonfungiblePositionManager.IncreaseLiquidity.createMockEvent({
+      tokenId: TOKEN_ID,
+      liquidity: 123n,
+      amount0: AMOUNT0,
+      amount1: AMOUNT1,
+      ...increaseMeta,
+    });
+    mockDb = await TestHelpers.NonfungiblePositionManager.IncreaseLiquidity.processEvent({
+      event: increase,
+      mockDb,
+    });
 
-  const transferMeta = {
-    mockEventData: {
-      block: increaseMeta.mockEventData.block,
-      logIndex: increaseMeta.mockEventData.logIndex + 1,
-      srcAddress: ADDRESSES.positionManager,
-      transaction: { hash: txHash },
-    },
-  };
-  const transfer = TestHelpers.NonfungiblePositionManager.Transfer.createMockEvent({
-    from: ZERO_ADDRESS,
-    to: ADDRESSES.user,
-    tokenId: TOKEN_ID,
-    ...transferMeta,
-  });
-  mockDb = await TestHelpers.NonfungiblePositionManager.Transfer.processEvent({
-    event: transfer,
-    mockDb,
-  });
+    const transferMeta = {
+      mockEventData: {
+        block: increaseMeta.mockEventData.block,
+        logIndex: increaseMeta.mockEventData.logIndex + 1,
+        srcAddress: ADDRESSES.positionManager,
+        transaction: { hash: txHash },
+      },
+    };
+    const transfer = TestHelpers.NonfungiblePositionManager.Transfer.createMockEvent({
+      from: ZERO_ADDRESS,
+      to: ADDRESSES.user,
+      tokenId: TOKEN_ID,
+      ...transferMeta,
+    });
+    mockDb = await TestHelpers.NonfungiblePositionManager.Transfer.processEvent({
+      event: transfer,
+      mockDb,
+    });
 
-  const swapMeta = eventData(101, 1000 + 3600, ADDRESSES.pool);
-  const swap = TestHelpers.UniswapV3Pool.Swap.createMockEvent({
-    sender: ADDRESSES.user,
-    recipient: ADDRESSES.user,
-    amount0: 0n,
-    amount1: 0n,
-    sqrtPriceX96: 0n,
-    liquidity: 0n,
-    tick: 10n,
-    ...swapMeta,
-  });
-  mockDb = await TestHelpers.UniswapV3Pool.Swap.processEvent({
-    event: swap,
-    mockDb,
-  });
+    const swapMeta = eventData(101, 1000 + 3600, ADDRESSES.pool);
+    const swap = TestHelpers.UniswapV3Pool.Swap.createMockEvent({
+      sender: ADDRESSES.user,
+      recipient: ADDRESSES.user,
+      amount0: 0n,
+      amount1: 0n,
+      sqrtPriceX96: 0n,
+      liquidity: 0n,
+      tick: 10n,
+      ...swapMeta,
+    });
+    mockDb = await TestHelpers.UniswapV3Pool.Swap.processEvent({
+      event: swap,
+      mockDb,
+    });
 
-  const epochStats = mockDb.entities.UserEpochStats.get(`${ADDRESSES.user}:1`);
-  assert.ok(epochStats);
-  assert.ok(epochStats?.lpPoints && epochStats.lpPoints > 0n);
+    const epochStats = mockDb.entities.UserEpochStats.get(`${ADDRESSES.user}:1`);
+    assert.ok(epochStats);
+    assert.ok(epochStats?.lpPoints && epochStats.lpPoints > 0n);
 
-  setLPPositionOverride(undefined);
+    setLPPositionOverride(undefined);
+  } finally {
+    process.env.DISABLE_EXTERNAL_CALLS = prevDisableExternal;
+    process.env.DISABLE_ETH_CALLS = prevDisableEth;
+  }
 });
 
 test('swap updates fee apr stats', async () => {

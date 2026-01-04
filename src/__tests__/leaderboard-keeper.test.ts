@@ -436,7 +436,7 @@ test('voting power synced caps combined multiplier', async () => {
   assert.equal(updated?.combinedMultiplier, 100000n);
 });
 
-test('lp balance synced records baseline and event', async () => {
+test('lp balance synced records event without chain sync', async () => {
   const TestHelpers = loadTestHelpers();
   let mockDb = TestHelpers.MockDb.createMockDb();
   const eventData = createEventDataFactory();
@@ -473,7 +473,7 @@ test('lp balance synced records baseline and event', async () => {
   });
 
   const baseline = mockDb.entities.UserLPBaseline.get(`${ADDRESSES.user}:${manager}`);
-  assert.ok(baseline);
+  assert.equal(baseline, undefined);
 
   const record = mockDb.entities.LeaderboardKeeperLPBalanceSynced.get(
     `${syncedMeta.mockEventData.transaction.hash}-${syncedMeta.mockEventData.logIndex}`
