@@ -53,7 +53,6 @@ services:
     container_name: neverland-indexer
     restart: unless-stopped
     working_dir: /app
-    user: "${UID:-1000}:${GID:-1000}"
     environment:
       - NODE_ENV=production
       - ENVIO_API_TOKEN=${ENVIO_API_TOKEN}
