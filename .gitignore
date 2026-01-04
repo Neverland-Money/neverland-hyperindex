@@ -69,6 +69,7 @@ web_modules/
 .env
 .env.*
 !.env.example
+!.env.production
 
 # parcel-bundler cache (https://parceljs.org/)
 .cache
@@ -139,6 +140,9 @@ AGENTS.md
 !.yarn/releases
 !.yarn/sdks
 !.yarn/versions
+
+# Docker & PNPM
+.pnpm-store
 
 # Vite files
 vite.config.js.timestamp-*

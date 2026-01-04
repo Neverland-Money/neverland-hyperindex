@@ -1,0 +1,137 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: neverland-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-envio}
+      POSTGRES_INITDB_ARGS: "-E UTF8"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - hyperindex
+
+  hasura:
+    image: hasura/graphql-engine:v2.36.0
+    container_name: neverland-hasura
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      HASURA_GRAPHQL_DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-envio}
+      HASURA_GRAPHQL_ENABLE_CONSOLE: "true"
+      HASURA_GRAPHQL_DEV_MODE: "false"
+      HASURA_GRAPHQL_ENABLED_LOG_TYPES: startup, http-log, webhook-log, websocket-log, query-log
+      HASURA_GRAPHQL_ADMIN_SECRET: ${HASURA_ADMIN_SECRET:-admin-secret}
+      HASURA_GRAPHQL_UNAUTHORIZED_ROLE: public
+      HASURA_GRAPHQL_ENABLE_TELEMETRY: "false"
+      HASURA_GRAPHQL_ENABLE_ALLOWLIST: "false"
+      HASURA_GRAPHQL_PLAYGROUND_ENABLED: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 5 bash -c ':> /dev/tcp/localhost/8080' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - hyperindex
+
+  indexer:
+    image: node:22-alpine
+    container_name: neverland-indexer
+    restart: unless-stopped
+    working_dir: /app
+    user: "${UID:-1000}:${GID:-1000}"
+    environment:
+      - NODE_ENV=production
+      - ENVIO_API_TOKEN=${ENVIO_API_TOKEN}
+      - HASURA_GRAPHQL_ENDPOINT=http://hasura:8080/v1/metadata
+      - HASURA_GRAPHQL_ADMIN_SECRET=${HASURA_ADMIN_SECRET:-admin-secret}
+      - HASURA_GRAPHQL_ROLE=admin
+      - ENVIO_PG_HOST=postgres
+      - ENVIO_PG_PORT=5432
+      - ENVIO_PG_DATABASE=${POSTGRES_DB:-envio}
+      - ENVIO_PG_USER=${POSTGRES_USER:-postgres}
+      - ENVIO_PG_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - ENVIO_PG_SSL_MODE=false
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-envio}
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - RPC_URL_143=${RPC_URL_143:-https://rpc-mainnet.monadinfra.com}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - METRICS_PORT=${METRICS_PORT:-9090}
+      - ENVIO_THROTTLE_CHAIN_METADATA_INTERVAL_MILLIS=10000
+      - ENVIO_THROTTLE_PRUNE_STALE_DATA_INTERVAL_MILLIS=60000
+      - ENVIO_THROTTLE_LIVE_METRICS_BENCHMARK_INTERVAL_MILLIS=5000
+      - ENVIO_THROTTLE_JSON_FILE_BENCHMARK_INTERVAL_MILLIS=30000
+      - ENVIO_DISABLE_EXTERNAL_CALLS=${ENVIO_DISABLE_EXTERNAL_CALLS:-false}
+      - ENVIO_DISABLE_ETH_CALLS=${ENVIO_DISABLE_ETH_CALLS:-false}
+      - ENVIO_ENABLE_NFT_CHAIN_SYNC=${ENVIO_ENABLE_NFT_CHAIN_SYNC:-false}
+      - ENVIO_ENABLE_LP_CHAIN_SYNC=${ENVIO_ENABLE_LP_CHAIN_SYNC:-false}
+      - DEBUG_LP_POINTS=${DEBUG_LP_POINTS:-false}
+    volumes:
+      - .:/app
+      - node_modules:/app/node_modules
+      - pnpm_store:/root/.local/share/pnpm/store
+    ports:
+      - "9090:9090"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      hasura:
+        condition: service_healthy
+    command: >
+      sh -c "
+        apk add --no-cache curl &&
+        npm install -g pnpm@10 &&
+        pnpm install --frozen-lockfile &&
+        pnpm run codegen &&
+        pnpm run start
+      "
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://hasura:8080/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+    networks:
+      - hyperindex
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: neverland-cloudflared
+    restart: unless-stopped
+    command: tunnel run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      hasura:
+        condition: service_healthy
+    networks:
+      - hyperindex
+
+volumes:
+  postgres_data:
+    driver: local
+  node_modules:
+    driver: local
+  pnpm_store:
+    driver: local
+
+networks:
+  hyperindex:
+    driver: bridge
