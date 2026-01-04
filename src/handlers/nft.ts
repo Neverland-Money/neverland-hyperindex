@@ -32,7 +32,7 @@ import {
   recordProtocolTransaction,
   settlePointsForUser,
 } from './shared';
-import { normalizeAddress } from '../helpers/constants';
+import { normalizeAddress, BOOTSTRAP_NFT_MULTIPLIER_CONFIG } from '../helpers/constants';
 import type { handlerContext } from '../../generated';
 
 /**
@@ -54,21 +54,20 @@ async function calculateNFTMultiplier(
     return MIN_MULTIPLIER_BPS; // 1.0x for no NFTs
   }
 
-  // Load NFT multiplier configuration
+  // Load NFT multiplier configuration (use bootstrap values if not yet configured)
   const config = await context.NFTMultiplierConfig.get('current');
-  if (!config) {
-    return MIN_MULTIPLIER_BPS; // Fallback if not configured
-  }
+  const firstBonus = config?.firstBonus ?? BOOTSTRAP_NFT_MULTIPLIER_CONFIG.firstBonus;
+  const decayRatio = config?.decayRatio ?? BOOTSTRAP_NFT_MULTIPLIER_CONFIG.decayRatio;
 
   const BASIS_POINTS = 10000n;
   let totalMultiplier = MIN_MULTIPLIER_BPS;
-  let currentBonus = config.firstBonus;
+  let currentBonus = firstBonus;
 
   // Add decaying bonuses for each collection
   for (let i = 0n; i < collectionCount; i++) {
     totalMultiplier = totalMultiplier + currentBonus;
     // Decay the bonus for next collection
-    currentBonus = (currentBonus * config.decayRatio) / BASIS_POINTS;
+    currentBonus = (currentBonus * decayRatio) / BASIS_POINTS;
   }
 
   // Cap NFT multiplier at 5x (50000 basis points)
@@ -235,6 +234,10 @@ NFTPartnershipRegistry.MultiplierParamsUpdated.handler(async ({ event, context }
 // ============================================
 // PartnerNFT Handlers
 // ============================================
+
+PartnerNFT.Transfer.contractRegister(({ event, context }) => {
+  context.addPartnerNFT(normalizeAddress(event.srcAddress));
+});
 
 PartnerNFT.Transfer.handler(async ({ event, context }) => {
   await recordProtocolTransaction(

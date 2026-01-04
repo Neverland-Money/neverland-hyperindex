@@ -237,7 +237,7 @@ test('transfer uses default multiplier when config missing', async () => {
   });
 
   const state = mockDb.entities.UserLeaderboardState.get(ADDRESSES.user);
-  assert.equal(state?.nftMultiplier, 10000n);
+  assert.equal(state?.nftMultiplier, 11000n); // Bootstrap config: 10000 + 1000 = 11000
   assert.equal(state?.nftCount, 1n);
 });
 

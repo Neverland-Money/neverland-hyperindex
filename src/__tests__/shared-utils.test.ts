@@ -300,7 +300,8 @@ test('NFT multiplier returns base when config missing', async () => {
   const context = { NFTMultiplierConfig: configStore } as unknown as handlerContext;
 
   const multiplier = await calculateNFTMultiplierFromCount(context, 2n);
-  assert.equal(multiplier, 10000n);
+  // Bootstrap config fallback: 10000 + 1000 + 900 = 11900
+  assert.equal(multiplier, 11900n);
 });
 
 test('recalculateUserTotalVP returns early before dust lock start block', async () => {
@@ -1144,18 +1145,28 @@ test('average combined multiplier caps at maximum', async () => {
   const userTokenList = createStore<UserTokenList_t>();
   const dustLockToken = createStore<DustLockToken_t>();
   const votingPowerTier = createStore<VotingPowerTier_t>();
+  const nftMultiplierConfig = createStore<NFTMultiplierConfig_t>();
   const context = {
     UserLeaderboardState: userState,
     UserTokenList: userTokenList,
     DustLockToken: dustLockToken,
     VotingPowerTier: votingPowerTier,
+    NFTMultiplierConfig: nftMultiplierConfig,
   } as unknown as handlerContext;
+
+  // Set NFT config with high firstBonus to create a 5x NFT multiplier (50000)
+  nftMultiplierConfig.set({
+    id: 'current',
+    firstBonus: 40000n, // 4x bonus per NFT
+    decayRatio: 10000n, // no decay
+    lastUpdate: 0,
+  });
 
   userState.set({
     id: '0xuser',
     user_id: '0xuser',
     nftCount: 1n,
-    nftMultiplier: 50000n,
+    nftMultiplier: 50000n, // Will be recalculated to 50000 (10000 + 40000)
     votingPower: 0n,
     vpTierIndex: 0n,
     vpMultiplier: 10000n,

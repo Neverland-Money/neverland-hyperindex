@@ -732,17 +732,17 @@ export async function calculateNFTMultiplierFromCount(
     return MIN_MULTIPLIER_BPS;
   }
 
+  // Load NFT multiplier configuration (use bootstrap values if not yet configured)
   const config = await context.NFTMultiplierConfig.get('current');
-  if (!config) {
-    return MIN_MULTIPLIER_BPS;
-  }
+  const firstBonus = config?.firstBonus ?? BOOTSTRAP_NFT_MULTIPLIER_CONFIG.firstBonus;
+  const decayRatio = config?.decayRatio ?? BOOTSTRAP_NFT_MULTIPLIER_CONFIG.decayRatio;
 
   let totalMultiplier = MIN_MULTIPLIER_BPS;
-  let currentBonus = config.firstBonus;
+  let currentBonus = firstBonus;
 
   for (let i = 0n; i < collectionCount; i++) {
     totalMultiplier = totalMultiplier + currentBonus;
-    currentBonus = (currentBonus * config.decayRatio) / BASIS_POINTS;
+    currentBonus = (currentBonus * decayRatio) / BASIS_POINTS;
   }
 
   const MAX_NFT_MULTIPLIER = 50000n;
@@ -1404,7 +1404,10 @@ export async function refreshUserVotingPowerState(
   const vpMultiplier = await calculateVPMultiplier(context, currentVP);
   const vpTierIndex = await findVPTierIndex(context, currentVP);
 
-  let combinedMultiplierBps = (state.nftMultiplier * vpMultiplier) / BASIS_POINTS;
+  // Recalculate NFT multiplier from nftCount to fix any stale values
+  const nftMultiplier = await calculateNFTMultiplierFromCount(context, state.nftCount);
+
+  let combinedMultiplierBps = (nftMultiplier * vpMultiplier) / BASIS_POINTS;
   if (combinedMultiplierBps > MAX_COMBINED_MULTIPLIER) {
     combinedMultiplierBps = MAX_COMBINED_MULTIPLIER;
   }
@@ -1413,6 +1416,7 @@ export async function refreshUserVotingPowerState(
     state.votingPower !== currentVP ||
     state.vpMultiplier !== vpMultiplier ||
     state.vpTierIndex !== vpTierIndex ||
+    state.nftMultiplier !== nftMultiplier ||
     state.combinedMultiplier !== combinedMultiplierBps
   ) {
     context.UserLeaderboardState.set({
@@ -1420,6 +1424,7 @@ export async function refreshUserVotingPowerState(
       votingPower: currentVP,
       vpMultiplier,
       vpTierIndex,
+      nftMultiplier,
       combinedMultiplier: combinedMultiplierBps,
       lastUpdate: timestamp,
     });
@@ -1449,7 +1454,10 @@ export async function calculateAverageCombinedMultiplierBps(
   );
   const vpMultiplier = await calculateVPMultiplier(context, averageVP);
 
-  let combinedMultiplierBps = (state.nftMultiplier * vpMultiplier) / BASIS_POINTS;
+  // Recalculate NFT multiplier from nftCount to ensure accuracy
+  const nftMultiplier = await calculateNFTMultiplierFromCount(context, state.nftCount);
+
+  let combinedMultiplierBps = (nftMultiplier * vpMultiplier) / BASIS_POINTS;
   if (combinedMultiplierBps > MAX_COMBINED_MULTIPLIER) {
     combinedMultiplierBps = MAX_COMBINED_MULTIPLIER;
   }
