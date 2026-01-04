@@ -3,8 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 
-process.env.DISABLE_EXTERNAL_CALLS = 'true';
-process.env.DISABLE_ETH_CALLS = 'true';
+process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'true';
+process.env.ENVIO_DISABLE_ETH_CALLS = 'true';
 
 const ADDRESSES = {
   keeper: '0x000000000000000000000000000000000000b001',

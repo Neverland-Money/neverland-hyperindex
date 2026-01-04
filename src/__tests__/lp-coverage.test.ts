@@ -215,39 +215,39 @@ function setLeaderboardState(
 }
 
 test('lp chain sync respects flags and missing registry', async () => {
-  const prevExternal = process.env.DISABLE_EXTERNAL_CALLS;
-  const prevEth = process.env.DISABLE_ETH_CALLS;
-  const prevSync = process.env.ENABLE_LP_CHAIN_SYNC;
+  const prevExternal = process.env.ENVIO_DISABLE_EXTERNAL_CALLS;
+  const prevEth = process.env.ENVIO_DISABLE_ETH_CALLS;
+  const prevSync = process.env.ENVIO_ENABLE_LP_CHAIN_SYNC;
 
   try {
-    process.env.DISABLE_EXTERNAL_CALLS = 'true';
-    process.env.DISABLE_ETH_CALLS = 'true';
-    process.env.ENABLE_LP_CHAIN_SYNC = 'true';
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'true';
+    process.env.ENVIO_DISABLE_ETH_CALLS = 'true';
+    process.env.ENVIO_ENABLE_LP_CHAIN_SYNC = 'true';
     const { context } = buildContext();
     await syncUserLPPositionsFromChain(context, ADDRESSES.userA, 0);
 
-    process.env.DISABLE_EXTERNAL_CALLS = 'false';
-    process.env.DISABLE_ETH_CALLS = 'false';
-    process.env.ENABLE_LP_CHAIN_SYNC = 'true';
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'false';
+    process.env.ENVIO_DISABLE_ETH_CALLS = 'false';
+    process.env.ENVIO_ENABLE_LP_CHAIN_SYNC = 'true';
     const contextMissing = { log: { debug: () => {} } } as unknown as handlerContext;
     await syncUserLPPositionsFromChain(contextMissing, ADDRESSES.userA, 0);
   } finally {
-    process.env.DISABLE_EXTERNAL_CALLS = prevExternal;
-    process.env.DISABLE_ETH_CALLS = prevEth;
-    process.env.ENABLE_LP_CHAIN_SYNC = prevSync;
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = prevExternal;
+    process.env.ENVIO_DISABLE_ETH_CALLS = prevEth;
+    process.env.ENVIO_ENABLE_LP_CHAIN_SYNC = prevSync;
   }
 });
 
 test('lp chain sync logs missing balance and tokens', async () => {
-  const prevExternal = process.env.DISABLE_EXTERNAL_CALLS;
-  const prevEth = process.env.DISABLE_ETH_CALLS;
-  const prevSync = process.env.ENABLE_LP_CHAIN_SYNC;
+  const prevExternal = process.env.ENVIO_DISABLE_EXTERNAL_CALLS;
+  const prevEth = process.env.ENVIO_DISABLE_ETH_CALLS;
+  const prevSync = process.env.ENVIO_ENABLE_LP_CHAIN_SYNC;
   const prevDebug = process.env.DEBUG_LP_POINTS;
 
   try {
-    process.env.DISABLE_EXTERNAL_CALLS = 'false';
-    process.env.DISABLE_ETH_CALLS = 'false';
-    process.env.ENABLE_LP_CHAIN_SYNC = 'true';
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'false';
+    process.env.ENVIO_DISABLE_ETH_CALLS = 'false';
+    process.env.ENVIO_ENABLE_LP_CHAIN_SYNC = 'true';
     process.env.DEBUG_LP_POINTS = 'true';
 
     const { context, stores, logs } = buildContext();
@@ -273,23 +273,23 @@ test('lp chain sync logs missing balance and tokens', async () => {
     setLPBalanceOverride(ADDRESSES.managerA, ADDRESSES.userA, undefined);
     setLPBalanceOverride(ADDRESSES.managerA, ADDRESSES.userB, undefined);
     setLPTokensOverride(ADDRESSES.managerA, ADDRESSES.userB, undefined);
-    process.env.DISABLE_EXTERNAL_CALLS = prevExternal;
-    process.env.DISABLE_ETH_CALLS = prevEth;
-    process.env.ENABLE_LP_CHAIN_SYNC = prevSync;
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = prevExternal;
+    process.env.ENVIO_DISABLE_ETH_CALLS = prevEth;
+    process.env.ENVIO_ENABLE_LP_CHAIN_SYNC = prevSync;
     process.env.DEBUG_LP_POINTS = prevDebug;
   }
 });
 
 test('lp chain sync handles missing position data and slot0 zero', async () => {
-  const prevExternal = process.env.DISABLE_EXTERNAL_CALLS;
-  const prevEth = process.env.DISABLE_ETH_CALLS;
-  const prevSync = process.env.ENABLE_LP_CHAIN_SYNC;
+  const prevExternal = process.env.ENVIO_DISABLE_EXTERNAL_CALLS;
+  const prevEth = process.env.ENVIO_DISABLE_ETH_CALLS;
+  const prevSync = process.env.ENVIO_ENABLE_LP_CHAIN_SYNC;
   const prevDebug = process.env.DEBUG_LP_POINTS;
 
   try {
-    process.env.DISABLE_EXTERNAL_CALLS = 'false';
-    process.env.DISABLE_ETH_CALLS = 'false';
-    process.env.ENABLE_LP_CHAIN_SYNC = 'true';
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'false';
+    process.env.ENVIO_DISABLE_ETH_CALLS = 'false';
+    process.env.ENVIO_ENABLE_LP_CHAIN_SYNC = 'true';
     process.env.DEBUG_LP_POINTS = 'true';
 
     const { context, stores } = buildContext();
@@ -327,22 +327,22 @@ test('lp chain sync handles missing position data and slot0 zero', async () => {
     setLPBalanceOverride(ADDRESSES.managerA, ADDRESSES.userA, undefined);
     setLPTokensOverride(ADDRESSES.managerA, ADDRESSES.userA, undefined);
     setLPPositionOverride(undefined);
-    process.env.DISABLE_EXTERNAL_CALLS = prevExternal;
-    process.env.DISABLE_ETH_CALLS = prevEth;
-    process.env.ENABLE_LP_CHAIN_SYNC = prevSync;
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = prevExternal;
+    process.env.ENVIO_DISABLE_ETH_CALLS = prevEth;
+    process.env.ENVIO_ENABLE_LP_CHAIN_SYNC = prevSync;
     process.env.DEBUG_LP_POINTS = prevDebug;
   }
 });
 
 test('lp chain sync creates positions and updates indices/prices', async () => {
-  const prevExternal = process.env.DISABLE_EXTERNAL_CALLS;
-  const prevEth = process.env.DISABLE_ETH_CALLS;
-  const prevSync = process.env.ENABLE_LP_CHAIN_SYNC;
+  const prevExternal = process.env.ENVIO_DISABLE_EXTERNAL_CALLS;
+  const prevEth = process.env.ENVIO_DISABLE_ETH_CALLS;
+  const prevSync = process.env.ENVIO_ENABLE_LP_CHAIN_SYNC;
 
   try {
-    process.env.DISABLE_EXTERNAL_CALLS = 'false';
-    process.env.DISABLE_ETH_CALLS = 'false';
-    process.env.ENABLE_LP_CHAIN_SYNC = 'true';
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'false';
+    process.env.ENVIO_DISABLE_ETH_CALLS = 'false';
+    process.env.ENVIO_ENABLE_LP_CHAIN_SYNC = 'true';
 
     const { context, stores } = buildContext();
     setActivePoolConfig(
@@ -407,21 +407,21 @@ test('lp chain sync creates positions and updates indices/prices', async () => {
     setLPBalanceOverride(ADDRESSES.managerA, ADDRESSES.userA, undefined);
     setLPTokensOverride(ADDRESSES.managerA, ADDRESSES.userA, undefined);
     setLPPositionOverride(undefined);
-    process.env.DISABLE_EXTERNAL_CALLS = prevExternal;
-    process.env.DISABLE_ETH_CALLS = prevEth;
-    process.env.ENABLE_LP_CHAIN_SYNC = prevSync;
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = prevExternal;
+    process.env.ENVIO_DISABLE_ETH_CALLS = prevEth;
+    process.env.ENVIO_ENABLE_LP_CHAIN_SYNC = prevSync;
   }
 });
 
 test('lp chain sync uses token1 ausd pricing', async () => {
-  const prevExternal = process.env.DISABLE_EXTERNAL_CALLS;
-  const prevEth = process.env.DISABLE_ETH_CALLS;
-  const prevSync = process.env.ENABLE_LP_CHAIN_SYNC;
+  const prevExternal = process.env.ENVIO_DISABLE_EXTERNAL_CALLS;
+  const prevEth = process.env.ENVIO_DISABLE_ETH_CALLS;
+  const prevSync = process.env.ENVIO_ENABLE_LP_CHAIN_SYNC;
 
   try {
-    process.env.DISABLE_EXTERNAL_CALLS = 'false';
-    process.env.DISABLE_ETH_CALLS = 'false';
-    process.env.ENABLE_LP_CHAIN_SYNC = 'true';
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'false';
+    process.env.ENVIO_DISABLE_ETH_CALLS = 'false';
+    process.env.ENVIO_ENABLE_LP_CHAIN_SYNC = 'true';
 
     const { context, stores } = buildContext();
     setActivePoolConfig(
@@ -481,21 +481,21 @@ test('lp chain sync uses token1 ausd pricing', async () => {
     setLPBalanceOverride(ADDRESSES.managerA, ADDRESSES.userB, undefined);
     setLPTokensOverride(ADDRESSES.managerA, ADDRESSES.userB, undefined);
     setLPPositionOverride(undefined);
-    process.env.DISABLE_EXTERNAL_CALLS = prevExternal;
-    process.env.DISABLE_ETH_CALLS = prevEth;
-    process.env.ENABLE_LP_CHAIN_SYNC = prevSync;
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = prevExternal;
+    process.env.ENVIO_DISABLE_ETH_CALLS = prevEth;
+    process.env.ENVIO_ENABLE_LP_CHAIN_SYNC = prevSync;
   }
 });
 
 test('lp chain sync uses token1 ausd pricing with higher token0 decimals', async () => {
-  const prevExternal = process.env.DISABLE_EXTERNAL_CALLS;
-  const prevEth = process.env.DISABLE_ETH_CALLS;
-  const prevSync = process.env.ENABLE_LP_CHAIN_SYNC;
+  const prevExternal = process.env.ENVIO_DISABLE_EXTERNAL_CALLS;
+  const prevEth = process.env.ENVIO_DISABLE_ETH_CALLS;
+  const prevSync = process.env.ENVIO_ENABLE_LP_CHAIN_SYNC;
 
   try {
-    process.env.DISABLE_EXTERNAL_CALLS = 'false';
-    process.env.DISABLE_ETH_CALLS = 'false';
-    process.env.ENABLE_LP_CHAIN_SYNC = 'true';
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'false';
+    process.env.ENVIO_DISABLE_ETH_CALLS = 'false';
+    process.env.ENVIO_ENABLE_LP_CHAIN_SYNC = 'true';
 
     const { context, stores } = buildContext();
     setActivePoolConfig(
@@ -559,21 +559,21 @@ test('lp chain sync uses token1 ausd pricing with higher token0 decimals', async
     setLPBalanceOverride(ADDRESSES.managerA, ADDRESSES.userA, undefined);
     setLPTokensOverride(ADDRESSES.managerA, ADDRESSES.userA, undefined);
     setLPPositionOverride(undefined);
-    process.env.DISABLE_EXTERNAL_CALLS = prevExternal;
-    process.env.DISABLE_ETH_CALLS = prevEth;
-    process.env.ENABLE_LP_CHAIN_SYNC = prevSync;
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = prevExternal;
+    process.env.ENVIO_DISABLE_ETH_CALLS = prevEth;
+    process.env.ENVIO_ENABLE_LP_CHAIN_SYNC = prevSync;
   }
 });
 
 test('lp chain sync updates existing position indices', async () => {
-  const prevExternal = process.env.DISABLE_EXTERNAL_CALLS;
-  const prevEth = process.env.DISABLE_ETH_CALLS;
-  const prevSync = process.env.ENABLE_LP_CHAIN_SYNC;
+  const prevExternal = process.env.ENVIO_DISABLE_EXTERNAL_CALLS;
+  const prevEth = process.env.ENVIO_DISABLE_ETH_CALLS;
+  const prevSync = process.env.ENVIO_ENABLE_LP_CHAIN_SYNC;
 
   try {
-    process.env.DISABLE_EXTERNAL_CALLS = 'false';
-    process.env.DISABLE_ETH_CALLS = 'false';
-    process.env.ENABLE_LP_CHAIN_SYNC = 'true';
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'false';
+    process.env.ENVIO_DISABLE_ETH_CALLS = 'false';
+    process.env.ENVIO_ENABLE_LP_CHAIN_SYNC = 'true';
 
     const { context, stores } = buildContext();
     setActivePoolConfig(
@@ -639,9 +639,9 @@ test('lp chain sync updates existing position indices', async () => {
   } finally {
     setLPBalanceOverride(ADDRESSES.managerA, ADDRESSES.userC, undefined);
     setLPTokensOverride(ADDRESSES.managerA, ADDRESSES.userC, undefined);
-    process.env.DISABLE_EXTERNAL_CALLS = prevExternal;
-    process.env.DISABLE_ETH_CALLS = prevEth;
-    process.env.ENABLE_LP_CHAIN_SYNC = prevSync;
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = prevExternal;
+    process.env.ENVIO_DISABLE_ETH_CALLS = prevEth;
+    process.env.ENVIO_ENABLE_LP_CHAIN_SYNC = prevSync;
   }
 });
 
@@ -948,14 +948,14 @@ test('swap fee stats handle missing stores and windowed volume', async () => {
 });
 
 test('lp chain sync skips when pool fee mismatches', async () => {
-  const prevExternal = process.env.DISABLE_EXTERNAL_CALLS;
-  const prevEth = process.env.DISABLE_ETH_CALLS;
-  const prevSync = process.env.ENABLE_LP_CHAIN_SYNC;
+  const prevExternal = process.env.ENVIO_DISABLE_EXTERNAL_CALLS;
+  const prevEth = process.env.ENVIO_DISABLE_ETH_CALLS;
+  const prevSync = process.env.ENVIO_ENABLE_LP_CHAIN_SYNC;
 
   try {
-    process.env.DISABLE_EXTERNAL_CALLS = 'false';
-    process.env.DISABLE_ETH_CALLS = 'false';
-    process.env.ENABLE_LP_CHAIN_SYNC = 'true';
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'false';
+    process.env.ENVIO_DISABLE_ETH_CALLS = 'false';
+    process.env.ENVIO_ENABLE_LP_CHAIN_SYNC = 'true';
 
     const { context, stores } = buildContext();
     setActivePoolConfig(
@@ -993,21 +993,21 @@ test('lp chain sync skips when pool fee mismatches', async () => {
     setLPBalanceOverride(ADDRESSES.managerA, ADDRESSES.userA, undefined);
     setLPTokensOverride(ADDRESSES.managerA, ADDRESSES.userA, undefined);
     setLPPositionOverride(undefined);
-    process.env.DISABLE_EXTERNAL_CALLS = prevExternal;
-    process.env.DISABLE_ETH_CALLS = prevEth;
-    process.env.ENABLE_LP_CHAIN_SYNC = prevSync;
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = prevExternal;
+    process.env.ENVIO_DISABLE_ETH_CALLS = prevEth;
+    process.env.ENVIO_ENABLE_LP_CHAIN_SYNC = prevSync;
   }
 });
 
 test('lp chain sync skips when multiple configs do not match fee', async () => {
-  const prevExternal = process.env.DISABLE_EXTERNAL_CALLS;
-  const prevEth = process.env.DISABLE_ETH_CALLS;
-  const prevSync = process.env.ENABLE_LP_CHAIN_SYNC;
+  const prevExternal = process.env.ENVIO_DISABLE_EXTERNAL_CALLS;
+  const prevEth = process.env.ENVIO_DISABLE_ETH_CALLS;
+  const prevSync = process.env.ENVIO_ENABLE_LP_CHAIN_SYNC;
 
   try {
-    process.env.DISABLE_EXTERNAL_CALLS = 'false';
-    process.env.DISABLE_ETH_CALLS = 'false';
-    process.env.ENABLE_LP_CHAIN_SYNC = 'true';
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'false';
+    process.env.ENVIO_DISABLE_ETH_CALLS = 'false';
+    process.env.ENVIO_ENABLE_LP_CHAIN_SYNC = 'true';
 
     const { context, stores } = buildContext();
     stores.LPPoolRegistry.set({
@@ -1071,9 +1071,9 @@ test('lp chain sync skips when multiple configs do not match fee', async () => {
     setLPBalanceOverride(ADDRESSES.managerA, ADDRESSES.userA, undefined);
     setLPTokensOverride(ADDRESSES.managerA, ADDRESSES.userA, undefined);
     setLPPositionOverride(undefined);
-    process.env.DISABLE_EXTERNAL_CALLS = prevExternal;
-    process.env.DISABLE_ETH_CALLS = prevEth;
-    process.env.ENABLE_LP_CHAIN_SYNC = prevSync;
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = prevExternal;
+    process.env.ENVIO_DISABLE_ETH_CALLS = prevEth;
+    process.env.ENVIO_ENABLE_LP_CHAIN_SYNC = prevSync;
   }
 });
 
@@ -1143,15 +1143,15 @@ test('settleAllLPPoolPositions skips stats when store missing', async () => {
 });
 
 test('lp chain sync falls back when token decimals read fails', async () => {
-  const prevExternal = process.env.DISABLE_EXTERNAL_CALLS;
-  const prevEth = process.env.DISABLE_ETH_CALLS;
-  const prevSync = process.env.ENABLE_LP_CHAIN_SYNC;
+  const prevExternal = process.env.ENVIO_DISABLE_EXTERNAL_CALLS;
+  const prevEth = process.env.ENVIO_DISABLE_ETH_CALLS;
+  const prevSync = process.env.ENVIO_ENABLE_LP_CHAIN_SYNC;
   const originalRead = publicClient.readContract;
 
   try {
-    process.env.DISABLE_EXTERNAL_CALLS = 'false';
-    process.env.DISABLE_ETH_CALLS = 'false';
-    process.env.ENABLE_LP_CHAIN_SYNC = 'true';
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'false';
+    process.env.ENVIO_DISABLE_ETH_CALLS = 'false';
+    process.env.ENVIO_ENABLE_LP_CHAIN_SYNC = 'true';
 
     publicClient.readContract = async params => {
       if (params.functionName === 'decimals') {
@@ -1200,22 +1200,22 @@ test('lp chain sync falls back when token decimals read fails', async () => {
     setLPBalanceOverride(ADDRESSES.managerA, ADDRESSES.userA, undefined);
     setLPTokensOverride(ADDRESSES.managerA, ADDRESSES.userA, undefined);
     setLPPositionOverride(undefined);
-    process.env.DISABLE_EXTERNAL_CALLS = prevExternal;
-    process.env.DISABLE_ETH_CALLS = prevEth;
-    process.env.ENABLE_LP_CHAIN_SYNC = prevSync;
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = prevExternal;
+    process.env.ENVIO_DISABLE_ETH_CALLS = prevEth;
+    process.env.ENVIO_ENABLE_LP_CHAIN_SYNC = prevSync;
   }
 });
 
 test('lp chain sync logs when slot0 is unavailable', async () => {
-  const prevExternal = process.env.DISABLE_EXTERNAL_CALLS;
-  const prevEth = process.env.DISABLE_ETH_CALLS;
-  const prevSync = process.env.ENABLE_LP_CHAIN_SYNC;
+  const prevExternal = process.env.ENVIO_DISABLE_EXTERNAL_CALLS;
+  const prevEth = process.env.ENVIO_DISABLE_ETH_CALLS;
+  const prevSync = process.env.ENVIO_ENABLE_LP_CHAIN_SYNC;
   const originalRead = publicClient.readContract;
 
   try {
-    process.env.DISABLE_EXTERNAL_CALLS = 'false';
-    process.env.DISABLE_ETH_CALLS = 'false';
-    process.env.ENABLE_LP_CHAIN_SYNC = 'true';
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'false';
+    process.env.ENVIO_DISABLE_ETH_CALLS = 'false';
+    process.env.ENVIO_ENABLE_LP_CHAIN_SYNC = 'true';
 
     publicClient.readContract = async params => {
       if (params.functionName === 'slot0') {
@@ -1261,9 +1261,9 @@ test('lp chain sync logs when slot0 is unavailable', async () => {
     setLPBalanceOverride(ADDRESSES.managerA, ADDRESSES.userA, undefined);
     setLPTokensOverride(ADDRESSES.managerA, ADDRESSES.userA, undefined);
     setLPPositionOverride(undefined);
-    process.env.DISABLE_EXTERNAL_CALLS = prevExternal;
-    process.env.DISABLE_ETH_CALLS = prevEth;
-    process.env.ENABLE_LP_CHAIN_SYNC = prevSync;
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = prevExternal;
+    process.env.ENVIO_DISABLE_ETH_CALLS = prevEth;
+    process.env.ENVIO_ENABLE_LP_CHAIN_SYNC = prevSync;
   }
 });
 

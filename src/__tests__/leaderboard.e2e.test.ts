@@ -13,8 +13,8 @@ const RAY = 10n ** 27n;
 const DECIMALS = 6;
 const UNIT = 10n ** 6n;
 
-process.env.DISABLE_EXTERNAL_CALLS = 'true';
-process.env.DISABLE_ETH_CALLS = 'true';
+process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'true';
+process.env.ENVIO_DISABLE_ETH_CALLS = 'true';
 
 const ADDRESSES = {
   user: '0x0000000000000000000000000000000000000001',

@@ -46,16 +46,17 @@ const VP_DECIMALS = 1e18;
 const RAY = 10n ** 27n;
 export function shouldUseEthCalls(): boolean {
   return !(
-    process.env.DISABLE_EXTERNAL_CALLS === 'true' || process.env.DISABLE_ETH_CALLS === 'true'
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS === 'true' ||
+    process.env.ENVIO_DISABLE_ETH_CALLS === 'true'
   );
 }
 
 function shouldSyncNFTOwnershipFromChain(): boolean {
-  return shouldUseEthCalls() && process.env.ENABLE_NFT_CHAIN_SYNC === 'true';
+  return shouldUseEthCalls() && process.env.ENVIO_ENABLE_NFT_CHAIN_SYNC === 'true';
 }
 
 function shouldSyncLPPositionsFromChain(): boolean {
-  return shouldUseEthCalls() && process.env.ENABLE_LP_CHAIN_SYNC === 'true';
+  return shouldUseEthCalls() && process.env.ENVIO_ENABLE_LP_CHAIN_SYNC === 'true';
 }
 
 // ============================================

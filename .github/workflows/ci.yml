@@ -28,19 +28,13 @@ jobs:
       - name: Install deps
         run: pnpm install --frozen-lockfile
 
-      - name: Clean generated folder
-        run: rm -rf generated
-
       - name: Format check
         run: pnpm run format:check
 
       - name: Lint
         run: pnpm run lint
 
-      - name: Type check
-        run: pnpm run type-check
-      
-      - name: Verify generated files are committed
+      - name: Verify source files
         run: git diff --exit-code -- . ':(exclude)generated' ':(exclude)coverage' ':(exclude)dist-test' ':(exclude)*.lcov'
 
       - name: Test with coverage

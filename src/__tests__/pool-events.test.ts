@@ -6,8 +6,8 @@ import { test } from 'node:test';
 import { createDefaultReserve } from '../helpers/entityHelpers';
 import type { t as MockDb } from '../../generated/src/TestHelpers_MockDb.gen';
 
-process.env.DISABLE_EXTERNAL_CALLS = 'true';
-process.env.DISABLE_ETH_CALLS = 'true';
+process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'true';
+process.env.ENVIO_DISABLE_ETH_CALLS = 'true';
 
 const RAY = 10n ** 27n;
 const DECIMALS = 6;

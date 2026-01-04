@@ -5,8 +5,8 @@ import { test } from 'node:test';
 
 import { DUST_LOCK_START_BLOCK, ZERO_ADDRESS } from '../helpers/constants';
 
-process.env.DISABLE_EXTERNAL_CALLS = 'true';
-process.env.DISABLE_ETH_CALLS = 'true';
+process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'true';
+process.env.ENVIO_DISABLE_ETH_CALLS = 'true';
 
 const ADDRESSES = {
   dustLock: '0x000000000000000000000000000000000000a001',

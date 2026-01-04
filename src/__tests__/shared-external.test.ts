@@ -130,12 +130,12 @@ function createStore<T extends { readonly id: string }>(): StoreEntity<T> {
 }
 
 test('settlements sync NFT ownership from chain when enabled', async () => {
-  const previousExternal = process.env.DISABLE_EXTERNAL_CALLS;
-  const previousEth = process.env.DISABLE_ETH_CALLS;
-  const previousChainSync = process.env.ENABLE_NFT_CHAIN_SYNC;
-  process.env.DISABLE_EXTERNAL_CALLS = 'false';
-  process.env.DISABLE_ETH_CALLS = 'false';
-  process.env.ENABLE_NFT_CHAIN_SYNC = 'true';
+  const previousExternal = process.env.ENVIO_DISABLE_EXTERNAL_CALLS;
+  const previousEth = process.env.ENVIO_DISABLE_ETH_CALLS;
+  const previousChainSync = process.env.ENVIO_ENABLE_NFT_CHAIN_SYNC;
+  process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'false';
+  process.env.ENVIO_DISABLE_ETH_CALLS = 'false';
+  process.env.ENVIO_ENABLE_NFT_CHAIN_SYNC = 'true';
   installViemMock();
 
   try {
@@ -283,19 +283,19 @@ test('settlements sync NFT ownership from chain when enabled', async () => {
       undefined
     );
   } finally {
-    process.env.DISABLE_EXTERNAL_CALLS = previousExternal;
-    process.env.DISABLE_ETH_CALLS = previousEth;
-    process.env.ENABLE_NFT_CHAIN_SYNC = previousChainSync;
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = previousExternal;
+    process.env.ENVIO_DISABLE_ETH_CALLS = previousEth;
+    process.env.ENVIO_ENABLE_NFT_CHAIN_SYNC = previousChainSync;
   }
 });
 
 test('settlements sync LP positions from chain when enabled', async () => {
-  const previousExternal = process.env.DISABLE_EXTERNAL_CALLS;
-  const previousEth = process.env.DISABLE_ETH_CALLS;
-  const previousChainSync = process.env.ENABLE_LP_CHAIN_SYNC;
-  process.env.DISABLE_EXTERNAL_CALLS = 'false';
-  process.env.DISABLE_ETH_CALLS = 'false';
-  process.env.ENABLE_LP_CHAIN_SYNC = 'true';
+  const previousExternal = process.env.ENVIO_DISABLE_EXTERNAL_CALLS;
+  const previousEth = process.env.ENVIO_DISABLE_ETH_CALLS;
+  const previousChainSync = process.env.ENVIO_ENABLE_LP_CHAIN_SYNC;
+  process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'false';
+  process.env.ENVIO_DISABLE_ETH_CALLS = 'false';
+  process.env.ENVIO_ENABLE_LP_CHAIN_SYNC = 'true';
   installViemMock();
 
   setLPBalanceOverride(ADDRESSES.positionManager, ADDRESSES.user, 1n);
@@ -451,9 +451,9 @@ test('settlements sync LP positions from chain when enabled', async () => {
     const baseline = await userLPBaseline.get(`${ADDRESSES.user}:${ADDRESSES.positionManager}`);
     assert.ok(baseline);
   } finally {
-    process.env.DISABLE_EXTERNAL_CALLS = previousExternal;
-    process.env.DISABLE_ETH_CALLS = previousEth;
-    process.env.ENABLE_LP_CHAIN_SYNC = previousChainSync;
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = previousExternal;
+    process.env.ENVIO_DISABLE_ETH_CALLS = previousEth;
+    process.env.ENVIO_ENABLE_LP_CHAIN_SYNC = previousChainSync;
     setLPBalanceOverride(ADDRESSES.positionManager, ADDRESSES.user, undefined);
     setLPTokensOverride(ADDRESSES.positionManager, ADDRESSES.user, undefined);
     setLPPositionOverride(undefined);
@@ -461,12 +461,12 @@ test('settlements sync LP positions from chain when enabled', async () => {
 });
 
 test('settlements skip NFT sync when no active partnerships', async () => {
-  const previousExternal = process.env.DISABLE_EXTERNAL_CALLS;
-  const previousEth = process.env.DISABLE_ETH_CALLS;
-  const previousChainSync = process.env.ENABLE_NFT_CHAIN_SYNC;
-  process.env.DISABLE_EXTERNAL_CALLS = 'false';
-  process.env.DISABLE_ETH_CALLS = 'false';
-  process.env.ENABLE_NFT_CHAIN_SYNC = 'true';
+  const previousExternal = process.env.ENVIO_DISABLE_EXTERNAL_CALLS;
+  const previousEth = process.env.ENVIO_DISABLE_ETH_CALLS;
+  const previousChainSync = process.env.ENVIO_ENABLE_NFT_CHAIN_SYNC;
+  process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'false';
+  process.env.ENVIO_DISABLE_ETH_CALLS = 'false';
+  process.env.ENVIO_ENABLE_NFT_CHAIN_SYNC = 'true';
   installViemMock();
 
   try {
@@ -509,19 +509,19 @@ test('settlements skip NFT sync when no active partnerships', async () => {
       undefined
     );
   } finally {
-    process.env.DISABLE_EXTERNAL_CALLS = previousExternal;
-    process.env.DISABLE_ETH_CALLS = previousEth;
-    process.env.ENABLE_NFT_CHAIN_SYNC = previousChainSync;
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = previousExternal;
+    process.env.ENVIO_DISABLE_ETH_CALLS = previousEth;
+    process.env.ENVIO_ENABLE_NFT_CHAIN_SYNC = previousChainSync;
   }
 });
 
 test('settlements skip nft sync when baseline exists', async () => {
-  const previousExternal = process.env.DISABLE_EXTERNAL_CALLS;
-  const previousEth = process.env.DISABLE_ETH_CALLS;
-  const previousChainSync = process.env.ENABLE_NFT_CHAIN_SYNC;
-  process.env.DISABLE_EXTERNAL_CALLS = 'false';
-  process.env.DISABLE_ETH_CALLS = 'false';
-  process.env.ENABLE_NFT_CHAIN_SYNC = 'true';
+  const previousExternal = process.env.ENVIO_DISABLE_EXTERNAL_CALLS;
+  const previousEth = process.env.ENVIO_DISABLE_ETH_CALLS;
+  const previousChainSync = process.env.ENVIO_ENABLE_NFT_CHAIN_SYNC;
+  process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'false';
+  process.env.ENVIO_DISABLE_ETH_CALLS = 'false';
+  process.env.ENVIO_ENABLE_NFT_CHAIN_SYNC = 'true';
   installViemMock();
 
   try {
@@ -572,19 +572,19 @@ test('settlements skip nft sync when baseline exists', async () => {
       undefined
     );
   } finally {
-    process.env.DISABLE_EXTERNAL_CALLS = previousExternal;
-    process.env.DISABLE_ETH_CALLS = previousEth;
-    process.env.ENABLE_NFT_CHAIN_SYNC = previousChainSync;
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = previousExternal;
+    process.env.ENVIO_DISABLE_ETH_CALLS = previousEth;
+    process.env.ENVIO_ENABLE_NFT_CHAIN_SYNC = previousChainSync;
   }
 });
 
 test('settlements skip nft sync when registry state is missing', async () => {
-  const previousExternal = process.env.DISABLE_EXTERNAL_CALLS;
-  const previousEth = process.env.DISABLE_ETH_CALLS;
-  const previousChainSync = process.env.ENABLE_NFT_CHAIN_SYNC;
-  process.env.DISABLE_EXTERNAL_CALLS = 'false';
-  process.env.DISABLE_ETH_CALLS = 'false';
-  process.env.ENABLE_NFT_CHAIN_SYNC = 'true';
+  const previousExternal = process.env.ENVIO_DISABLE_EXTERNAL_CALLS;
+  const previousEth = process.env.ENVIO_DISABLE_ETH_CALLS;
+  const previousChainSync = process.env.ENVIO_ENABLE_NFT_CHAIN_SYNC;
+  process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'false';
+  process.env.ENVIO_DISABLE_ETH_CALLS = 'false';
+  process.env.ENVIO_ENABLE_NFT_CHAIN_SYNC = 'true';
   installViemMock();
 
   try {
@@ -623,19 +623,19 @@ test('settlements skip nft sync when registry state is missing', async () => {
       undefined
     );
   } finally {
-    process.env.DISABLE_EXTERNAL_CALLS = previousExternal;
-    process.env.DISABLE_ETH_CALLS = previousEth;
-    process.env.ENABLE_NFT_CHAIN_SYNC = previousChainSync;
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = previousExternal;
+    process.env.ENVIO_DISABLE_ETH_CALLS = previousEth;
+    process.env.ENVIO_ENABLE_NFT_CHAIN_SYNC = previousChainSync;
   }
 });
 
 test('settlements baseline uses zero checked block when no change and block missing', async () => {
-  const previousExternal = process.env.DISABLE_EXTERNAL_CALLS;
-  const previousEth = process.env.DISABLE_ETH_CALLS;
-  const previousChainSync = process.env.ENABLE_NFT_CHAIN_SYNC;
-  process.env.DISABLE_EXTERNAL_CALLS = 'false';
-  process.env.DISABLE_ETH_CALLS = 'false';
-  process.env.ENABLE_NFT_CHAIN_SYNC = 'true';
+  const previousExternal = process.env.ENVIO_DISABLE_EXTERNAL_CALLS;
+  const previousEth = process.env.ENVIO_DISABLE_ETH_CALLS;
+  const previousChainSync = process.env.ENVIO_ENABLE_NFT_CHAIN_SYNC;
+  process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'false';
+  process.env.ENVIO_DISABLE_ETH_CALLS = 'false';
+  process.env.ENVIO_ENABLE_NFT_CHAIN_SYNC = 'true';
   installViemMock();
 
   try {
@@ -697,19 +697,19 @@ test('settlements baseline uses zero checked block when no change and block miss
     const baseline = await userNFTBaseline.get(`${ADDRESSES.user}:${VIEM_NO_NFT_ADDRESS}`);
     assert.equal(baseline?.checkedBlock, 0n);
   } finally {
-    process.env.DISABLE_EXTERNAL_CALLS = previousExternal;
-    process.env.DISABLE_ETH_CALLS = previousEth;
-    process.env.ENABLE_NFT_CHAIN_SYNC = previousChainSync;
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = previousExternal;
+    process.env.ENVIO_DISABLE_ETH_CALLS = previousEth;
+    process.env.ENVIO_ENABLE_NFT_CHAIN_SYNC = previousChainSync;
   }
 });
 
 test('settlements default lastCheckedBlock when block number is missing', async () => {
-  const previousExternal = process.env.DISABLE_EXTERNAL_CALLS;
-  const previousEth = process.env.DISABLE_ETH_CALLS;
-  const previousChainSync = process.env.ENABLE_NFT_CHAIN_SYNC;
-  process.env.DISABLE_EXTERNAL_CALLS = 'false';
-  process.env.DISABLE_ETH_CALLS = 'false';
-  process.env.ENABLE_NFT_CHAIN_SYNC = 'true';
+  const previousExternal = process.env.ENVIO_DISABLE_EXTERNAL_CALLS;
+  const previousEth = process.env.ENVIO_DISABLE_ETH_CALLS;
+  const previousChainSync = process.env.ENVIO_ENABLE_NFT_CHAIN_SYNC;
+  process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'false';
+  process.env.ENVIO_DISABLE_ETH_CALLS = 'false';
+  process.env.ENVIO_ENABLE_NFT_CHAIN_SYNC = 'true';
   installViemMock();
 
   try {
@@ -773,19 +773,19 @@ test('settlements default lastCheckedBlock when block number is missing', async 
     const baseline = await userNFTBaseline.get(`${ADDRESSES.user}:${VIEM_PARTIAL_ADDRESS}`);
     assert.equal(baseline?.checkedBlock, 0n);
   } finally {
-    process.env.DISABLE_EXTERNAL_CALLS = previousExternal;
-    process.env.DISABLE_ETH_CALLS = previousEth;
-    process.env.ENABLE_NFT_CHAIN_SYNC = previousChainSync;
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = previousExternal;
+    process.env.ENVIO_DISABLE_ETH_CALLS = previousEth;
+    process.env.ENVIO_ENABLE_NFT_CHAIN_SYNC = previousChainSync;
   }
 });
 
 test('settlements clamp nft count when removing last nft', async () => {
-  const previousExternal = process.env.DISABLE_EXTERNAL_CALLS;
-  const previousEth = process.env.DISABLE_ETH_CALLS;
-  const previousChainSync = process.env.ENABLE_NFT_CHAIN_SYNC;
-  process.env.DISABLE_EXTERNAL_CALLS = 'false';
-  process.env.DISABLE_ETH_CALLS = 'false';
-  process.env.ENABLE_NFT_CHAIN_SYNC = 'true';
+  const previousExternal = process.env.ENVIO_DISABLE_EXTERNAL_CALLS;
+  const previousEth = process.env.ENVIO_DISABLE_ETH_CALLS;
+  const previousChainSync = process.env.ENVIO_ENABLE_NFT_CHAIN_SYNC;
+  process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'false';
+  process.env.ENVIO_DISABLE_ETH_CALLS = 'false';
+  process.env.ENVIO_ENABLE_NFT_CHAIN_SYNC = 'true';
   installViemMock();
 
   try {
@@ -881,8 +881,8 @@ test('settlements clamp nft count when removing last nft', async () => {
       undefined
     );
   } finally {
-    process.env.DISABLE_EXTERNAL_CALLS = previousExternal;
-    process.env.DISABLE_ETH_CALLS = previousEth;
-    process.env.ENABLE_NFT_CHAIN_SYNC = previousChainSync;
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = previousExternal;
+    process.env.ENVIO_DISABLE_ETH_CALLS = previousEth;
+    process.env.ENVIO_ENABLE_NFT_CHAIN_SYNC = previousChainSync;
   }
 });

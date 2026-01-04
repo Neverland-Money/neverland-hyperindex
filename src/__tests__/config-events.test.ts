@@ -13,8 +13,8 @@ import {
   installViemMock,
 } from './viem-mock';
 
-process.env.DISABLE_EXTERNAL_CALLS = 'true';
-process.env.DISABLE_ETH_CALLS = 'true';
+process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'true';
+process.env.ENVIO_DISABLE_ETH_CALLS = 'true';
 installViemMock();
 
 const ADDRESSES = {

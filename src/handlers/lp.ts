@@ -278,7 +278,7 @@ export async function syncUserLPPositionsFromChain(
   blockNumber?: bigint,
   options?: { forceRescan?: boolean; managers?: string[] }
 ): Promise<void> {
-  if (!shouldUseEthCalls() || process.env.ENABLE_LP_CHAIN_SYNC !== 'true') {
+  if (!shouldUseEthCalls() || process.env.ENVIO_ENABLE_LP_CHAIN_SYNC !== 'true') {
     return;
   }
 

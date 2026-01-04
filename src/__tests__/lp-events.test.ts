@@ -6,8 +6,8 @@ import { test } from 'node:test';
 import { AUSD_ADDRESS, ZERO_ADDRESS } from '../helpers/constants';
 import { installViemMock, setLPPositionOverride } from './viem-mock';
 
-process.env.DISABLE_EXTERNAL_CALLS = 'true';
-process.env.DISABLE_ETH_CALLS = 'true';
+process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'true';
+process.env.ENVIO_DISABLE_ETH_CALLS = 'true';
 installViemMock();
 
 const TOKEN_ID = 1n;
@@ -77,10 +77,10 @@ function createEventDataFactory() {
 }
 
 test('increase liquidity before transfer uses cached mint amounts', async () => {
-  const prevDisableExternal = process.env.DISABLE_EXTERNAL_CALLS;
-  const prevDisableEth = process.env.DISABLE_ETH_CALLS;
-  process.env.DISABLE_EXTERNAL_CALLS = 'false';
-  process.env.DISABLE_ETH_CALLS = 'false';
+  const prevDisableExternal = process.env.ENVIO_DISABLE_EXTERNAL_CALLS;
+  const prevDisableEth = process.env.ENVIO_DISABLE_ETH_CALLS;
+  process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'false';
+  process.env.ENVIO_DISABLE_ETH_CALLS = 'false';
   try {
     setLPPositionOverride([
       0n,
@@ -200,8 +200,8 @@ test('increase liquidity before transfer uses cached mint amounts', async () => 
 
     setLPPositionOverride(undefined);
   } finally {
-    process.env.DISABLE_EXTERNAL_CALLS = prevDisableExternal;
-    process.env.DISABLE_ETH_CALLS = prevDisableEth;
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = prevDisableExternal;
+    process.env.ENVIO_DISABLE_ETH_CALLS = prevDisableEth;
   }
 });
 
@@ -328,10 +328,10 @@ test('increase liquidity uses pool mint data when eth_call is unavailable', asyn
 });
 
 test('swap accrues lp points when position stays in range', async () => {
-  const prevDisableExternal = process.env.DISABLE_EXTERNAL_CALLS;
-  const prevDisableEth = process.env.DISABLE_ETH_CALLS;
-  process.env.DISABLE_EXTERNAL_CALLS = 'false';
-  process.env.DISABLE_ETH_CALLS = 'false';
+  const prevDisableExternal = process.env.ENVIO_DISABLE_EXTERNAL_CALLS;
+  const prevDisableEth = process.env.ENVIO_DISABLE_ETH_CALLS;
+  process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'false';
+  process.env.ENVIO_DISABLE_ETH_CALLS = 'false';
   try {
     setLPPositionOverride([
       0n,
@@ -471,8 +471,8 @@ test('swap accrues lp points when position stays in range', async () => {
 
     setLPPositionOverride(undefined);
   } finally {
-    process.env.DISABLE_EXTERNAL_CALLS = prevDisableExternal;
-    process.env.DISABLE_ETH_CALLS = prevDisableEth;
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = prevDisableExternal;
+    process.env.ENVIO_DISABLE_ETH_CALLS = prevDisableEth;
   }
 });
 

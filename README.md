@@ -62,12 +62,12 @@ ENVIO_API_TOKEN=your-envio-api-token
 # METRICS_PORT=9090
 
 # Optional: External read controls
-# DISABLE_EXTERNAL_CALLS=true
-# DISABLE_ETH_CALLS=true
+# ENVIO_DISABLE_EXTERNAL_CALLS=true
+# ENVIO_DISABLE_ETH_CALLS=true
 
 # Optional: One-time chain baselines during settlement
-# ENABLE_NFT_CHAIN_SYNC=true
-# ENABLE_LP_CHAIN_SYNC=true
+# ENVIO_ENABLE_NFT_CHAIN_SYNC=true
+# ENVIO_ENABLE_LP_CHAIN_SYNC=true
 
 # Optional: LP debug logging
 # DEBUG_LP_POINTS=true

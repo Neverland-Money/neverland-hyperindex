@@ -5,8 +5,8 @@ import { test } from 'node:test';
 
 import { installViemMock } from './viem-mock';
 
-process.env.DISABLE_EXTERNAL_CALLS = 'true';
-process.env.DISABLE_ETH_CALLS = 'true';
+process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'true';
+process.env.ENVIO_DISABLE_ETH_CALLS = 'true';
 
 const ADDRESSES = {
   epochManager: '0x000000000000000000000000000000000000c001',
@@ -308,10 +308,10 @@ test('epoch end initializes missing epoch state', async () => {
 });
 
 test('lp pool config handlers register pools and rates', async () => {
-  const previousExternal = process.env.DISABLE_EXTERNAL_CALLS;
-  const previousEth = process.env.DISABLE_ETH_CALLS;
-  process.env.DISABLE_EXTERNAL_CALLS = 'false';
-  process.env.DISABLE_ETH_CALLS = 'false';
+  const previousExternal = process.env.ENVIO_DISABLE_EXTERNAL_CALLS;
+  const previousEth = process.env.ENVIO_DISABLE_ETH_CALLS;
+  process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'false';
+  process.env.ENVIO_DISABLE_ETH_CALLS = 'false';
   installViemMock();
 
   try {
@@ -382,8 +382,8 @@ test('lp pool config handlers register pools and rates', async () => {
     const config = mockDb.entities.LeaderboardConfig.get('global');
     assert.equal(config?.lpRateBps, 1500n);
   } finally {
-    process.env.DISABLE_EXTERNAL_CALLS = previousExternal;
-    process.env.DISABLE_ETH_CALLS = previousEth;
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = previousExternal;
+    process.env.ENVIO_DISABLE_ETH_CALLS = previousEth;
   }
 });
 
