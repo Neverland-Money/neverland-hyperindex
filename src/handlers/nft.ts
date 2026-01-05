@@ -16,6 +16,29 @@
  * - No missed holdings from before partnership activation
  * - Automatic accurate tracking after bootstrap
  * - Users accumulate points from held NFTs without needing to transfer
+ *
+ * ## NFT Multiplier System:
+ *
+ * Each partnership can use one of two multiplier types:
+ *
+ * 1. **Static Boost** (staticBoostBps > 0):
+ *    - Fixed percentage boost per collection owned
+ *    - Example: 10k Squad provides +2000 bps (20%) flat boost
+ *    - Does not decay with additional NFTs
+ *
+ * 2. **Geometric Decay** (staticBoostBps = null or 0):
+ *    - First NFT: +firstBonus (e.g., 1000 bps = 10%)
+ *    - Each additional: previous * decayRatio / 10000 (e.g., 90%)
+ *    - Example progression: 10%, 9%, 8.1%, 7.29%...
+ *
+ * Total multiplier = base (10000) + sum of static boosts + sum of decay boosts
+ * Capped at MAX_NFT_MULTIPLIER (50000 = 5x)
+ *
+ * ## Event Handling for staticBoostBps:
+ *
+ * - undefined in event = preserve existing value (old contracts, resync-safe)
+ * - 0 in event = explicitly decay-based NFT
+ * - >0 in event = static boost value in basis points
  */
 
 import {

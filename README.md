@@ -9,7 +9,7 @@ The Neverland indexer provides real-time data aggregation for the Neverland DeFi
 - **Lending Protocol**: Track supplies, borrows, interest rates, and reserve dynamics
 - **Tokenomics**: Monitor DUST token emissions, veDUST voting escrow locks, and governance power
 - **Rewards System**: Monitor reward distributions, emission schedules, and configuration history
-- **NFT Partnerships**: Index partnership NFTs and their metadata
+- **NFT Partnerships**: Index partnership NFTs with static boost and geometric decay multipliers
 - **Leaderboard**: Track user points, rankings, and competitive metrics
 - **Protocol Configuration**: Capture parameter updates and governance changes
 
@@ -191,17 +191,172 @@ When modifying `schema.graphql`:
 
 ### Self-Hosting
 
-For self-hosted deployments, ensure:
+The project includes production-ready Docker Compose configurations for self-hosted deployments.
+
+#### Architecture
+
+The self-hosted stack includes:
+- **PostgreSQL 16**: Data storage with persistent volumes
+- **Hasura GraphQL Engine**: Auto-generated GraphQL API layer
+- **Envio Indexer**: Event processing and data aggregation
+- **Cloudflare Tunnel** (optional): Secure external access without exposing ports
+
+#### Quick Start
+
+1. **Create environment file** (`.env`):
 
 ```bash
-# Set required environment variables
-export ENVIO_API_TOKEN=your-token
-export POSTGRES_HOST=localhost
-export POSTGRES_PORT=5432
-export POSTGRES_DB=envio
-export POSTGRES_USER=postgres
-export POSTGRES_PASSWORD=postgres
+# Required
+ENVIO_API_TOKEN=your-envio-api-token
+
+# Database credentials
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=your-secure-password
+POSTGRES_DB=envio
+
+# Hasura admin secret
+HASURA_ADMIN_SECRET=your-admin-secret
+
+# RPC endpoint (optional, defaults to public Monad RPC)
+RPC_URL_143=https://rpc-mainnet.monadinfra.com
+
+# Cloudflare Tunnel token (optional, for external access)
+CLOUDFLARE_TUNNEL_TOKEN=your-tunnel-token
+
+# Optional: Feature flags
+ENVIO_ENABLE_NFT_CHAIN_SYNC=false
+ENVIO_ENABLE_LP_CHAIN_SYNC=false
+DEBUG_LP_POINTS=false
+
+# Optional: Logging
+LOG_LEVEL=info
+METRICS_PORT=9090
 ```
+
+2. **Deploy production stack**:
+
+```bash
+docker compose -f docker-compose.prod.yml up -d
+```
+
+3. **Verify deployment**:
+
+```bash
+# Check service health
+docker compose -f docker-compose.prod.yml ps
+
+# View logs
+docker compose -f docker-compose.prod.yml logs -f indexer
+
+# Access Hasura console (local only)
+open http://localhost:8080/console
+```
+
+#### Staging Environment
+
+For testing before production deployment:
+
+```bash
+# Deploy staging (uses separate database and ports)
+docker compose -f docker-compose.staging.yml up -d
+
+# Staging runs on:
+# - PostgreSQL: port 5433
+# - Hasura: port 8081
+# - Metrics: port 9091
+```
+
+#### Service Endpoints
+
+**Production:**
+- GraphQL API: `http://localhost:8080/v1/graphql`
+- Hasura Console: `http://localhost:8080/console`
+- Metrics: `http://localhost:9090`
+- PostgreSQL: `localhost:5432`
+
+**Staging:**
+- GraphQL API: `http://localhost:8081/v1/graphql`
+- Hasura Console: `http://localhost:8081/console`
+- Metrics: `http://localhost:9091`
+- PostgreSQL: `localhost:5433`
+
+#### External Access with Cloudflare Tunnel
+
+For secure public access without exposing ports:
+
+1. Create a Cloudflare Tunnel in your Cloudflare dashboard
+2. Configure tunnel to route to `http://hasura:8080`
+3. Add `CLOUDFLARE_TUNNEL_TOKEN` to `.env`
+4. Tunnel automatically starts with the stack
+
+#### Persistent Data
+
+Data is stored in Docker volumes:
+- `postgres_data`: Database files
+- `node_modules`: Cached dependencies
+- `pnpm_store`: pnpm package cache
+
+To backup database:
+```bash
+docker exec neverland-postgres pg_dump -U postgres envio > backup.sql
+```
+
+To restore:
+```bash
+cat backup.sql | docker exec -i neverland-postgres psql -U postgres envio
+```
+
+#### Updating the Indexer
+
+```bash
+# Pull latest code
+git pull origin main
+
+# Rebuild and restart (preserves data)
+docker compose -f docker-compose.prod.yml up -d --build
+
+# View startup logs
+docker compose -f docker-compose.prod.yml logs -f indexer
+```
+
+#### Full Reset (Clean Resync)
+
+To resync from genesis:
+
+```bash
+# Stop services
+docker compose -f docker-compose.prod.yml down
+
+# Remove database volume (WARNING: deletes all indexed data)
+docker volume rm neverland-envio_postgres_data
+
+# Restart
+docker compose -f docker-compose.prod.yml up -d
+```
+
+#### Troubleshooting
+
+**Indexer not starting:**
+```bash
+# Check logs
+docker compose -f docker-compose.prod.yml logs indexer
+
+# Verify Hasura is healthy
+docker compose -f docker-compose.prod.yml ps hasura
+
+# Check database connection
+docker exec neverland-postgres psql -U postgres -d envio -c "SELECT 1"
+```
+
+**Slow sync performance:**
+- Verify `ENVIO_API_TOKEN` is set correctly
+- Check RPC endpoint latency
+- Monitor system resources (CPU, RAM, disk I/O)
+- Review `LOG_LEVEL=debug` for bottlenecks
+
+**Out of memory:**
+- Increase Docker memory limit (Settings → Resources)
+- Adjust `ENVIO_THROTTLE_*` environment variables to reduce concurrency
 
 ## Querying the Indexer
 
@@ -270,6 +425,49 @@ query {
     isInRange
     valueUsd
     lastSettledAt
+  }
+}
+
+query {
+  # Get all active NFT partnerships with multiplier configuration
+  NFTPartnership(where: { active: { _eq: true } }) {
+    id
+    collection
+    name
+    active
+    staticBoostBps      # null = decay, 0 = decay, >0 = static boost (e.g., 2000 = 20%)
+    startTimestamp
+    endTimestamp
+  }
+  
+  # Get decay configuration for collections without static boost
+  NFTMultiplierConfig(where: { id: { _eq: "current" } }) {
+    firstBonus          # First NFT bonus (e.g., 1000 = 10%)
+    decayRatio          # Decay ratio (e.g., 9000 = 90% of previous)
+    lastUpdate
+  }
+  
+  # Get user's NFT holdings and calculated multiplier
+  UserLeaderboardState(where: { id: { _eq: "0x..." } }) {
+    nftCount
+    nftMultiplier       # Combined static + decay multiplier
+    vpMultiplier
+    combinedMultiplier  # (nftMultiplier * vpMultiplier) / 10000, capped at 100000
+    votingPower
+    lifetimePoints
+  }
+  
+  # Get user's specific NFT ownership
+  UserNFTOwnership(
+    where: { 
+      user_id: { _eq: "0x..." }
+      hasNFT: { _eq: true }
+    }
+  ) {
+    partnership_id
+    balance
+    hasNFT
+    lastCheckedAt
   }
 }
 ```
