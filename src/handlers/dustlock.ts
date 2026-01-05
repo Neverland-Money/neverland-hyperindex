@@ -64,11 +64,16 @@ DustLock.Deposit.handler(async ({ event, context }) => {
 
   const token = await getOrInitDustLockToken(context, tokenId, Number(event.block.timestamp));
   const lockedAmount = token.lockedAmount + event.params.value;
+  const locktime = Number(event.params.locktime);
+
+  // locktime = 0 indicates an infinite/permanent lock
+  const isPermanent = locktime === 0;
 
   context.DustLockToken.set({
     ...token,
     lockedAmount,
-    end: Number(event.params.locktime),
+    end: locktime,
+    isPermanent,
     lastDepositType: depositType,
     updatedAt: Number(event.block.timestamp),
   });

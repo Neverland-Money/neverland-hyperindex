@@ -154,6 +154,7 @@ test('keeper events update leaderboard state and ownership', async () => {
     lastRepayPointsDay: -1,
     lastWithdrawPointsDay: -1,
     lastVPPointsDay: -1,
+    lastVPAccrualTimestamp: 0,
     totalPoints: 0n,
     totalPointsWithMultiplier: 0n,
     totalMultiplierBps: 10000n,

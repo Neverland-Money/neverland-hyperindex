@@ -591,6 +591,7 @@ test('zero points update clears leaderboard buckets and totals', async () => {
     lastRepayPointsDay: -1,
     lastWithdrawPointsDay: -1,
     lastVPPointsDay: -1,
+    lastVPAccrualTimestamp: 0,
     totalPoints: 10n * 10n ** 18n,
     totalPointsWithMultiplier: 10n * 10n ** 18n,
     totalMultiplierBps: 10000n,

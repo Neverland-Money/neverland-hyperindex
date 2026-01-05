@@ -1206,6 +1206,7 @@ export async function getOrCreateUserEpochStats(
       lastRepayPointsDay: -1,
       lastWithdrawPointsDay: -1,
       lastVPPointsDay: -1,
+      lastVPAccrualTimestamp: 0,
       totalPoints: 0n,
       totalPointsWithMultiplier: 0n,
       totalMultiplierBps: BASIS_POINTS,
@@ -1857,6 +1858,7 @@ export async function accruePointsForUserReserve(
       lastRepayPointsDay: -1,
       lastWithdrawPointsDay: -1,
       lastVPPointsDay: -1,
+      lastVPAccrualTimestamp: 0,
       totalPoints: 0n,
       totalPointsWithMultiplier: 0n,
       totalMultiplierBps: BASIS_POINTS,
@@ -2140,8 +2142,8 @@ export async function settlePointsForUser(
 
   const ignoreCooldown = options?.ignoreCooldown ?? false;
   let inCooldown = false;
-  if (!ignoreCooldown && leaderboardState.isActive && epochStats.lastUpdatedAt > 0) {
-    const elapsed = timestamp - epochStats.lastUpdatedAt;
+  if (!ignoreCooldown && leaderboardState.isActive && previousEpochUpdatedAt > 0) {
+    const elapsed = timestamp - previousEpochUpdatedAt;
     if (elapsed < cooldownSeconds) {
       inCooldown = true;
     }
@@ -2241,7 +2243,7 @@ export async function settlePointsForUser(
   const shouldSettleVp = ignoreCooldown || !inCooldown || normalizedReserveId !== null;
   const vpRateBps = config?.vpRateBps ?? 0n;
   if (shouldSettleVp && vpRateBps > 0n) {
-    const vpAccrualStart = Math.max(epoch.startTime, previousEpochUpdatedAt);
+    const vpAccrualStart = Math.max(epoch.startTime, epochStats.lastVPAccrualTimestamp);
     const vpAccrualEnd = balanceTimestamp;
 
     if (vpAccrualEnd > vpAccrualStart) {
@@ -2281,6 +2283,7 @@ export async function settlePointsForUser(
             vpMultiplierBps: combinedMultiplierBps,
             totalMultiplierBps: combinedMultiplierBps,
             lastAppliedMultiplierBps: combinedMultiplierBps,
+            lastVPAccrualTimestamp: vpAccrualEnd,
             lastUpdatedAt: timestamp,
           };
 

@@ -1410,6 +1410,7 @@ type UserEpochStats {
   lastRepayPointsDay: Int!
   lastWithdrawPointsDay: Int!
   lastVPPointsDay: Int!
+  lastVPAccrualTimestamp: Int!
   totalPoints: BigInt!
   totalPointsWithMultiplier: BigInt!
   totalMultiplierBps: BigInt!
