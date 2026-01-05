@@ -31,53 +31,10 @@ import {
   ZERO_ADDRESS,
   recordProtocolTransaction,
   settlePointsForUser,
+  calculateNFTMultiplierFromUser,
 } from './shared';
-import { normalizeAddress, BOOTSTRAP_NFT_MULTIPLIER_CONFIG } from '../helpers/constants';
+import { normalizeAddress } from '../helpers/constants';
 import type { handlerContext } from '../../generated';
-
-/**
- * Calculate NFT multiplier based on collection count using geometric decay formula
- * Formula: BASE + bonus × (1 + decay + decay² + ... + decay^(n-1))
- *
- * Example with bonus=1000 (10%), decay=9000 (90%):
- * - 1 collection: 10000 + 1000 = 11000 (1.10x)
- * - 2 collections: 10000 + 1000 + 900 = 11900 (1.19x)
- * - 3 collections: 10000 + 1000 + 900 + 810 = 12710 (1.271x)
- */
-async function calculateNFTMultiplier(
-  context: handlerContext,
-  collectionCount: bigint
-): Promise<bigint> {
-  const MIN_MULTIPLIER_BPS = 10000n;
-
-  if (collectionCount <= 0n) {
-    return MIN_MULTIPLIER_BPS; // 1.0x for no NFTs
-  }
-
-  // Load NFT multiplier configuration (use bootstrap values if not yet configured)
-  const config = await context.NFTMultiplierConfig.get('current');
-  const firstBonus = config?.firstBonus ?? BOOTSTRAP_NFT_MULTIPLIER_CONFIG.firstBonus;
-  const decayRatio = config?.decayRatio ?? BOOTSTRAP_NFT_MULTIPLIER_CONFIG.decayRatio;
-
-  const BASIS_POINTS = 10000n;
-  let totalMultiplier = MIN_MULTIPLIER_BPS;
-  let currentBonus = firstBonus;
-
-  // Add decaying bonuses for each collection
-  for (let i = 0n; i < collectionCount; i++) {
-    totalMultiplier = totalMultiplier + currentBonus;
-    // Decay the bonus for next collection
-    currentBonus = (currentBonus * decayRatio) / BASIS_POINTS;
-  }
-
-  // Cap NFT multiplier at 5x (50000 basis points)
-  const MAX_NFT_MULTIPLIER = 50000n;
-  if (totalMultiplier > MAX_NFT_MULTIPLIER) {
-    totalMultiplier = MAX_NFT_MULTIPLIER;
-  }
-
-  return totalMultiplier;
-}
 
 async function getOrCreateRegistryState(context: handlerContext, timestamp: number) {
   let state = await context.NFTPartnershipRegistryState.get('current');
@@ -137,11 +94,27 @@ NFTPartnershipRegistry.PartnershipAdded.handler(async ({ event, context }) => {
   // The first settlement after a partnership is added can baseline ownership
   // via a one-time on-chain balance check per user.
 
+  // Extract staticBoostBps if present in event (future contract versions)
+  const paramsWithBoost = event.params as typeof event.params & { staticBoostBps?: bigint };
+
+  // Check if partnership already exists (for resync)
+  const existing = await context.NFTPartnership.get(id);
+
+  // Only update staticBoostBps if explicitly provided in event
+  // undefined = not in event (old contracts), preserve existing value
+  // 0 = explicitly decay-based NFT
+  // >0 = static boost value
+  const staticBoostBps =
+    paramsWithBoost.staticBoostBps !== undefined
+      ? paramsWithBoost.staticBoostBps
+      : existing?.staticBoostBps;
+
   context.NFTPartnership.set({
     id,
     collection: id,
     name: event.params.name,
     active: event.params.active,
+    staticBoostBps,
     startTimestamp: Number(event.params.startTimestamp),
     endTimestamp: event.params.endTimestamp > 0n ? Number(event.params.endTimestamp) : undefined,
     addedAt: timestamp,
@@ -170,10 +143,20 @@ NFTPartnershipRegistry.PartnershipUpdated.handler(async ({ event, context }) => 
 
   const partnership = await context.NFTPartnership.get(id);
   if (partnership) {
+    // Extract staticBoostBps if present in event
+    const paramsWithBoost = event.params as typeof event.params & { staticBoostBps?: bigint };
+
+    // Only update staticBoostBps if explicitly provided
+    const staticBoostBps =
+      paramsWithBoost.staticBoostBps !== undefined
+        ? paramsWithBoost.staticBoostBps
+        : partnership.staticBoostBps;
+
     context.NFTPartnership.set({
       ...partnership,
       name: event.params.name,
       active: event.params.active,
+      staticBoostBps,
       startTimestamp: Number(event.params.startTimestamp),
       endTimestamp: event.params.endTimestamp > 0n ? Number(event.params.endTimestamp) : undefined,
       lastUpdate: Number(event.block.timestamp),
@@ -305,7 +288,14 @@ PartnerNFT.Transfer.handler(async ({ event, context }) => {
         newNftCount = state.nftCount > 0n ? state.nftCount - 1n : 0n;
       }
 
-      const newNftMultiplier = await calculateNFTMultiplier(context, newNftCount);
+      // Update state first so calculateNFTMultiplierFromUser can read current ownership
+      context.UserLeaderboardState.set({
+        ...state,
+        nftCount: newNftCount,
+        lastUpdate: timestamp,
+      });
+
+      const newNftMultiplier = await calculateNFTMultiplierFromUser(context, normalizedUser);
 
       let combinedMultiplier = (newNftMultiplier * state.vpMultiplier) / 10000n;
       if (combinedMultiplier > 100000n) combinedMultiplier = 100000n;
@@ -456,7 +446,14 @@ async function handleNFTTransfer(
         newNftCount = state.nftCount > 0n ? state.nftCount - 1n : 0n;
       }
 
-      const newNftMultiplier = await calculateNFTMultiplier(context, newNftCount);
+      // Update state first so calculateNFTMultiplierFromUser can read current ownership
+      context.UserLeaderboardState.set({
+        ...state,
+        nftCount: newNftCount,
+        lastUpdate: timestamp,
+      });
+
+      const newNftMultiplier = await calculateNFTMultiplierFromUser(context, normalizedUser);
 
       let combinedMultiplier = (newNftMultiplier * state.vpMultiplier) / 10000n;
       if (combinedMultiplier > 100000n) combinedMultiplier = 100000n;

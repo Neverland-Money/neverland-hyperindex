@@ -183,6 +183,7 @@ export async function bootstrapLeaderboardIfNeeded(
       collection: id,
       name: partnership.name,
       active: true,
+      staticBoostBps: partnership.staticBoostBps,
       startTimestamp: partnership.startTimestamp,
       endTimestamp: partnership.endTimestamp,
       addedAt: EPOCH_1_START_TIME_OVERRIDE,
@@ -720,6 +721,75 @@ export async function findVPTierIndex(
   }
 
   return tierIndex;
+}
+
+export async function calculateNFTMultiplierFromUser(
+  context: handlerContext,
+  userId: string
+): Promise<bigint> {
+  const MIN_MULTIPLIER_BPS = BASIS_POINTS;
+  const normalizedUserId = normalizeAddress(userId);
+
+  // Check if NFTPartnershipRegistryState exists (may be missing in tests)
+  if (!context.NFTPartnershipRegistryState) {
+    const state = await context.UserLeaderboardState.get(normalizedUserId);
+    if (!state || state.nftCount === 0n) {
+      return MIN_MULTIPLIER_BPS;
+    }
+    return calculateNFTMultiplierFromCount(context, state.nftCount);
+  }
+
+  const registryState = await context.NFTPartnershipRegistryState.get('current');
+  const activeCollections = registryState?.activeCollections ?? [];
+  if (activeCollections.length === 0) {
+    // Fallback: use nftCount from UserLeaderboardState when no active collections
+    const state = await context.UserLeaderboardState.get(normalizedUserId);
+    if (!state || state.nftCount === 0n) {
+      return MIN_MULTIPLIER_BPS;
+    }
+    return calculateNFTMultiplierFromCount(context, state.nftCount);
+  }
+
+  let staticBoostTotal = 0n;
+  let decayCollectionCount = 0n;
+
+  for (const collection of activeCollections) {
+    const normalizedCollection = normalizeAddress(collection);
+    const ownershipId = `${normalizedUserId}:${normalizedCollection}`;
+    const ownership = await context.UserNFTOwnership.get(ownershipId);
+
+    if (!ownership || !ownership.hasNFT) continue;
+
+    const partnership = await context.NFTPartnership.get(normalizedCollection);
+    if (!partnership || !partnership.active) continue;
+
+    if (partnership.staticBoostBps && partnership.staticBoostBps > 0n) {
+      staticBoostTotal += partnership.staticBoostBps;
+    } else {
+      decayCollectionCount++;
+    }
+  }
+
+  const config = await context.NFTMultiplierConfig.get('current');
+  const firstBonus = config?.firstBonus ?? BOOTSTRAP_NFT_MULTIPLIER_CONFIG.firstBonus;
+  const decayRatio = config?.decayRatio ?? BOOTSTRAP_NFT_MULTIPLIER_CONFIG.decayRatio;
+
+  let decayBoostTotal = 0n;
+  let currentBonus = firstBonus;
+
+  for (let i = 0n; i < decayCollectionCount; i++) {
+    decayBoostTotal += currentBonus;
+    currentBonus = (currentBonus * decayRatio) / BASIS_POINTS;
+  }
+
+  let totalMultiplier = MIN_MULTIPLIER_BPS + staticBoostTotal + decayBoostTotal;
+
+  const MAX_NFT_MULTIPLIER = 50000n;
+  if (totalMultiplier > MAX_NFT_MULTIPLIER) {
+    totalMultiplier = MAX_NFT_MULTIPLIER;
+  }
+
+  return totalMultiplier;
 }
 
 export async function calculateNFTMultiplierFromCount(
@@ -1405,8 +1475,8 @@ export async function refreshUserVotingPowerState(
   const vpMultiplier = await calculateVPMultiplier(context, currentVP);
   const vpTierIndex = await findVPTierIndex(context, currentVP);
 
-  // Recalculate NFT multiplier from nftCount to fix any stale values
-  const nftMultiplier = await calculateNFTMultiplierFromCount(context, state.nftCount);
+  // Recalculate NFT multiplier from actual ownership to handle static boosts
+  const nftMultiplier = await calculateNFTMultiplierFromUser(context, normalizedUserId);
 
   let combinedMultiplierBps = (nftMultiplier * vpMultiplier) / BASIS_POINTS;
   if (combinedMultiplierBps > MAX_COMBINED_MULTIPLIER) {
@@ -1446,7 +1516,6 @@ export async function calculateAverageCombinedMultiplierBps(
   endTimestamp: number
 ): Promise<bigint> {
   const normalizedUserId = normalizeAddress(userId);
-  const state = await getOrCreateUserLeaderboardState(context, normalizedUserId, endTimestamp);
   const averageVP = await calculateAverageVPFromStorage(
     context,
     normalizedUserId,
@@ -1455,8 +1524,8 @@ export async function calculateAverageCombinedMultiplierBps(
   );
   const vpMultiplier = await calculateVPMultiplier(context, averageVP);
 
-  // Recalculate NFT multiplier from nftCount to ensure accuracy
-  const nftMultiplier = await calculateNFTMultiplierFromCount(context, state.nftCount);
+  // Recalculate NFT multiplier from actual ownership to handle static boosts
+  const nftMultiplier = await calculateNFTMultiplierFromUser(context, userId);
 
   let combinedMultiplierBps = (nftMultiplier * vpMultiplier) / BASIS_POINTS;
   if (combinedMultiplierBps > MAX_COMBINED_MULTIPLIER) {

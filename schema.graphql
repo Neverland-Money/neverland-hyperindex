@@ -1266,6 +1266,7 @@ type NFTPartnership {
   collection: String! @index
   name: String!
   active: Boolean!
+  staticBoostBps: BigInt
   startTimestamp: Int!
   endTimestamp: Int
   addedAt: Int!

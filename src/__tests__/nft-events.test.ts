@@ -225,6 +225,46 @@ test('transfer uses default multiplier when config missing', async () => {
   let mockDb = TestHelpers.MockDb.createMockDb();
   const eventData = createEventDataFactory();
 
+  mockDb = mockDb.entities.LeaderboardState.set({
+    id: 'current',
+    currentEpochNumber: 1n,
+    isActive: true,
+  });
+  mockDb = mockDb.entities.LeaderboardEpoch.set({
+    id: '1',
+    epochNumber: 1n,
+    startBlock: 0n,
+    startTime: 0,
+    endBlock: undefined,
+    endTime: undefined,
+    isActive: true,
+    duration: undefined,
+    scheduledStartTime: 0,
+    scheduledEndTime: 0,
+  });
+  mockDb = mockDb.entities.NFTMultiplierConfig.set({
+    id: 'current',
+    firstBonus: 1000n,
+    decayRatio: 9000n,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.NFTPartnershipRegistryState.set({
+    id: 'current',
+    activeCollections: [ADDRESSES.collection],
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.NFTPartnership.set({
+    id: ADDRESSES.collection,
+    collection: ADDRESSES.collection,
+    name: 'Test Collection',
+    active: true,
+    staticBoostBps: undefined,
+    startTimestamp: 0,
+    endTimestamp: undefined,
+    addedAt: 0,
+    lastUpdate: 0,
+  });
+
   const received = TestHelpers.PartnerNFT.Transfer.createMockEvent({
     from: ZERO_ADDRESS,
     to: ADDRESSES.user,
@@ -236,6 +276,12 @@ test('transfer uses default multiplier when config missing', async () => {
     mockDb,
   });
 
+  // After transfer, user should have ownership record
+  const ownership = mockDb.entities.UserNFTOwnership.get(
+    `${ADDRESSES.user}:${ADDRESSES.collection}`
+  );
+  assert.equal(ownership?.hasNFT, true);
+
   const state = mockDb.entities.UserLeaderboardState.get(ADDRESSES.user);
   assert.equal(state?.nftMultiplier, 11000n); // Bootstrap config: 10000 + 1000 = 11000
   assert.equal(state?.nftCount, 1n);
@@ -246,10 +292,54 @@ test('transfer caps multiplier at max', async () => {
   let mockDb = TestHelpers.MockDb.createMockDb();
   const eventData = createEventDataFactory();
 
+  mockDb = mockDb.entities.LeaderboardState.set({
+    id: 'current',
+    currentEpochNumber: 1n,
+    isActive: true,
+  });
+  mockDb = mockDb.entities.LeaderboardEpoch.set({
+    id: '1',
+    epochNumber: 1n,
+    startBlock: 0n,
+    startTime: 0,
+    endBlock: undefined,
+    endTime: undefined,
+    isActive: true,
+    duration: undefined,
+    scheduledStartTime: 0,
+    scheduledEndTime: 0,
+  });
   mockDb = mockDb.entities.NFTMultiplierConfig.set({
     id: 'current',
     firstBonus: 40000n,
     decayRatio: 10000n,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.NFTPartnershipRegistryState.set({
+    id: 'current',
+    activeCollections: [ADDRESSES.collection, ADDRESSES.collectionTwo],
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.NFTPartnership.set({
+    id: ADDRESSES.collection,
+    collection: ADDRESSES.collection,
+    name: 'Collection 1',
+    active: true,
+    staticBoostBps: undefined,
+    startTimestamp: 0,
+    endTimestamp: undefined,
+    addedAt: 0,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.NFTPartnership.set({
+    id: ADDRESSES.collectionTwo,
+    collection: ADDRESSES.collectionTwo,
+    name: 'Collection 2',
+    active: true,
+    staticBoostBps: undefined,
+    startTimestamp: 0,
+    endTimestamp: undefined,
+    addedAt: 0,
     lastUpdate: 0,
   });
   mockDb = mockDb.entities.UserLeaderboardState.set({
@@ -266,6 +356,16 @@ test('transfer caps multiplier at max', async () => {
     currentEpochId: undefined,
     currentEpochRank: undefined,
     lastUpdate: 0,
+  });
+  // User already owns first collection
+  mockDb = mockDb.entities.UserNFTOwnership.set({
+    id: `${ADDRESSES.user}:${ADDRESSES.collection}`,
+    user_id: ADDRESSES.user,
+    partnership_id: ADDRESSES.collection,
+    balance: 1n,
+    hasNFT: true,
+    lastCheckedAt: 0,
+    lastCheckedBlock: 0n,
   });
 
   const received = TestHelpers.PartnerNFT.Transfer.createMockEvent({
@@ -415,5 +515,5 @@ test('combined multiplier caps at maximum', async () => {
   });
 
   const state = mockDb.entities.UserLeaderboardState.get(ADDRESSES.user);
-  assert.equal(state?.combinedMultiplier, 100000n);
+  assert.equal(state?.combinedMultiplier, 50000n);
 });

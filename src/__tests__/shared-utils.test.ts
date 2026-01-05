@@ -43,6 +43,7 @@ import type {
   LeaderboardEpoch_t,
   LeaderboardState_t,
   NFTMultiplierConfig_t,
+  NFTPartnershipRegistryState_t,
   PriceOracleAsset_t,
   ProtocolStatsSnapshot_t,
   ProtocolStats_t,
@@ -1148,12 +1149,14 @@ test('average combined multiplier caps at maximum', async () => {
   const dustLockToken = createStore<DustLockToken_t>();
   const votingPowerTier = createStore<VotingPowerTier_t>();
   const nftMultiplierConfig = createStore<NFTMultiplierConfig_t>();
+  const registryState = createStore<NFTPartnershipRegistryState_t>();
   const context = {
     UserLeaderboardState: userState,
     UserTokenList: userTokenList,
     DustLockToken: dustLockToken,
     VotingPowerTier: votingPowerTier,
     NFTMultiplierConfig: nftMultiplierConfig,
+    NFTPartnershipRegistryState: registryState,
   } as unknown as handlerContext;
 
   // Set NFT config with high firstBonus to create a 5x NFT multiplier (50000)
@@ -1208,7 +1211,7 @@ test('average combined multiplier caps at maximum', async () => {
   });
 
   const combined = await calculateAverageCombinedMultiplierBps(context, '0xuser', 0, 500);
-  assert.equal(combined, 100000n);
+  assert.equal(combined, 100000n); // MAX_COMBINED_MULTIPLIER is 10x
 });
 
 test('average combined multiplier uses current vp when end before start', async () => {
@@ -1216,11 +1219,13 @@ test('average combined multiplier uses current vp when end before start', async 
   const userTokenList = createStore<UserTokenList_t>();
   const dustLockToken = createStore<DustLockToken_t>();
   const votingPowerTier = createStore<VotingPowerTier_t>();
+  const registryState = createStore<NFTPartnershipRegistryState_t>();
   const context = {
     UserLeaderboardState: userState,
     UserTokenList: userTokenList,
     DustLockToken: dustLockToken,
     VotingPowerTier: votingPowerTier,
+    NFTPartnershipRegistryState: registryState,
   } as unknown as handlerContext;
 
   userState.set({
@@ -1275,11 +1280,13 @@ test('average combined multiplier skips missing dust lock tokens', async () => {
   const userTokenList = createStore<UserTokenList_t>();
   const dustLockToken = createStore<DustLockToken_t>();
   const votingPowerTier = createStore<VotingPowerTier_t>();
+  const registryState = createStore<NFTPartnershipRegistryState_t>();
   const context = {
     UserLeaderboardState: userState,
     UserTokenList: userTokenList,
     DustLockToken: dustLockToken,
     VotingPowerTier: votingPowerTier,
+    NFTPartnershipRegistryState: registryState,
   } as unknown as handlerContext;
 
   userState.set({

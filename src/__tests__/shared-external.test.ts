@@ -31,6 +31,7 @@ import type {
   LPPoolRegistry_t,
   LPPoolState_t,
   NFTMultiplierConfig_t,
+  NFTPartnership_t,
   NFTPartnershipRegistryState_t,
   TokenInfo_t,
   UserEpochStats_t,
@@ -730,6 +731,7 @@ test('settlements default lastCheckedBlock when block number is missing', async 
     const leaderboardConfig = createStore<LeaderboardConfig_t>();
     const nftMultiplierConfig = createStore<NFTMultiplierConfig_t>();
     const registryState = createStore<NFTPartnershipRegistryState_t>();
+    const nftPartnership = createStore<NFTPartnership_t>();
 
     leaderboardState.set({
       id: 'current',
@@ -768,6 +770,7 @@ test('settlements default lastCheckedBlock when block number is missing', async 
       LeaderboardConfig: leaderboardConfig,
       NFTMultiplierConfig: nftMultiplierConfig,
       NFTPartnershipRegistryState: registryState,
+      NFTPartnership: nftPartnership,
     } as unknown as handlerContext;
 
     await settlePointsForUser(context, ADDRESSES.user, null, 1000, undefined as unknown as bigint);

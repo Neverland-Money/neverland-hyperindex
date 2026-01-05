@@ -42,14 +42,15 @@ export const BOOTSTRAP_VP_TIERS: Array<[bigint, bigint]> = [
 export interface BootstrapNFTPartnership {
   collection: string;
   name: string;
+  staticBoostBps?: bigint;
   startTimestamp: number;
   endTimestamp?: number;
 }
 export const BOOTSTRAP_NFT_PARTNERSHIPS: BootstrapNFTPartnership[] = [
-  // Example:
   {
     collection: '0x818030837e8350ba63e64d7dc01a547fa73c8279',
     name: 'The 10k Squad',
+    staticBoostBps: 2000n,
     startTimestamp: 0,
   },
   { collection: '0xfb5ba4061f5c50b1daa6c067bb2dfb0a8ebf6a8d', name: 'Overnads', startTimestamp: 0 },
