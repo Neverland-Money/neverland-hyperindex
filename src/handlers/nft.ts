@@ -295,18 +295,6 @@ PartnerNFT.Transfer.handler(async ({ event, context }) => {
 
     // Update multiplier only if collection ownership changed (0 <-> >0)
     if (wasOwning !== hasNFT) {
-      await settlePointsForUser(
-        context,
-        normalizedUser,
-        null,
-        timestamp,
-        BigInt(event.block.number),
-        {
-          ignoreCooldown: true,
-          skipNftSync: true,
-        }
-      );
-
       const state = await getOrCreateUserLeaderboardState(context, normalizedUser, timestamp);
       const oldMultiplier = state.nftMultiplier;
 
@@ -317,7 +305,6 @@ PartnerNFT.Transfer.handler(async ({ event, context }) => {
         newNftCount = state.nftCount > 0n ? state.nftCount - 1n : 0n;
       }
 
-      // Calculate NFT multiplier using geometric decay formula (matching subgraphs)
       const newNftMultiplier = await calculateNFTMultiplier(context, newNftCount);
 
       let combinedMultiplier = (newNftMultiplier * state.vpMultiplier) / 10000n;
@@ -330,6 +317,18 @@ PartnerNFT.Transfer.handler(async ({ event, context }) => {
         combinedMultiplier,
         lastUpdate: timestamp,
       });
+
+      await settlePointsForUser(
+        context,
+        normalizedUser,
+        null,
+        timestamp,
+        BigInt(event.block.number),
+        {
+          ignoreCooldown: true,
+          skipNftSync: true,
+        }
+      );
 
       if (oldMultiplier !== newNftMultiplier) {
         const changeReason = hasNFT
@@ -447,18 +446,6 @@ async function handleNFTTransfer(
 
     // Update multiplier only if collection ownership changed (0 <-> >0)
     if (wasOwning !== hasNFT) {
-      await settlePointsForUser(
-        context,
-        normalizedUser,
-        null,
-        timestamp,
-        BigInt(event.block.number),
-        {
-          ignoreCooldown: true,
-          skipNftSync: true,
-        }
-      );
-
       const state = await getOrCreateUserLeaderboardState(context, normalizedUser, timestamp);
       const oldMultiplier = state.nftMultiplier;
 
@@ -481,6 +468,18 @@ async function handleNFTTransfer(
         combinedMultiplier,
         lastUpdate: timestamp,
       });
+
+      await settlePointsForUser(
+        context,
+        normalizedUser,
+        null,
+        timestamp,
+        BigInt(event.block.number),
+        {
+          ignoreCooldown: true,
+          skipNftSync: true,
+        }
+      );
 
       if (oldMultiplier !== newNftMultiplier) {
         const changeReason = hasNFT
