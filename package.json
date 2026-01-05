@@ -36,7 +36,13 @@
     "prod:db": "docker exec -it neverland-postgres psql -U postgres -d envio",
     "prod:db:backup": "docker exec neverland-postgres pg_dump -U postgres envio > backup-$(date +%Y%m%d-%H%M%S).sql",
     "prod:update": "git pull && docker-compose -f docker-compose.prod.yml up -d --build indexer",
-    "prod:resync": "docker-compose -f docker-compose.prod.yml down -v && docker-compose -f docker-compose.prod.yml up -d"
+    "prod:resync": "docker-compose -f docker-compose.prod.yml down -v && docker-compose -f docker-compose.prod.yml up -d",
+    "staging:up": "docker-compose -f docker-compose.staging.yml up -d",
+    "staging:down": "docker-compose -f docker-compose.staging.yml down -v",
+    "staging:logs": "docker-compose -f docker-compose.staging.yml logs -f indexer-staging",
+    "staging:status": "docker-compose -f docker-compose.staging.yml ps",
+    "staging:health": "curl -X POST http://localhost:8081/v1/graphql -H \"x-hasura-admin-secret: $HASURA_ADMIN_SECRET\" -H 'Content-Type: application/json' -d '{\"query\": \"{ User(limit: 1) { id } }\"}'",
+    "prod:upgrade": "./zero-downtime-update.sh"
   },
   "c8": {
     "all": true,
