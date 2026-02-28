@@ -286,6 +286,7 @@ test('viem helpers log non-error failures', async () => {
       null
     );
     assert.equal(await readLPPosition(VIEM_ERROR_ADDRESS, 1n, undefined, logger), null);
+    assert.equal(await readLPPosition(VIEM_ERROR_ADDRESS, 1n, 12n, logger), null);
     assert.equal(await readPoolSlot0(VIEM_ERROR_ADDRESS, undefined, logger), null);
     assert.equal(await readPoolFee(VIEM_ERROR_ADDRESS, undefined, logger), null);
     assert.equal(await readLPBalance(VIEM_ERROR_ADDRESS, TEST_ADDRESS, 12n, logger), null);

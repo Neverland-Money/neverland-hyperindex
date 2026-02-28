@@ -270,6 +270,8 @@ export async function recordProtocolTransaction(
   // Bootstrap leaderboard on first event if epoch 1 override is set
   if (blockNumber !== undefined) {
     await bootstrapLeaderboardIfNeeded(context, timestamp, blockNumber);
+    const { applyStaticLPPoolCutover } = await import('./lp');
+    await applyStaticLPPoolCutover(context, timestamp, blockNumber);
   }
 
   await applyScheduledEpochTransitions(context, timestamp, blockNumber);
@@ -2161,7 +2163,12 @@ export async function settlePointsForUser(
   reserveId: string | null,
   timestamp: number,
   blockNumber: bigint,
-  options?: { ignoreCooldown?: boolean; skipNftSync?: boolean; skipLPSync?: boolean }
+  options?: {
+    ignoreCooldown?: boolean;
+    skipNftSync?: boolean;
+    skipLPSync?: boolean;
+    skipLPChainSync?: boolean;
+  }
 ): Promise<void> {
   const normalizedUserId = normalizeAddress(userId);
   const normalizedReserveId = reserveId ? reserveId.toLowerCase() : null;
@@ -2188,7 +2195,7 @@ export async function settlePointsForUser(
   if (!options?.skipNftSync) {
     await syncUserNFTOwnershipFromChain(context, normalizedUserId, timestamp, blockNumber);
   }
-  if (!options?.skipLPSync && shouldSyncLPPositionsFromChain()) {
+  if (!options?.skipLPSync && !options?.skipLPChainSync && shouldSyncLPPositionsFromChain()) {
     const { syncUserLPPositionsFromChain } = await import('./lp');
     await syncUserLPPositionsFromChain(context, normalizedUserId, timestamp, blockNumber);
   }
@@ -2389,7 +2396,12 @@ export async function settlePointsForAllReserves(
   userId: string,
   timestamp: number,
   blockNumber: bigint,
-  options?: { ignoreCooldown?: boolean; skipNftSync?: boolean; skipLPSync?: boolean }
+  options?: {
+    ignoreCooldown?: boolean;
+    skipNftSync?: boolean;
+    skipLPSync?: boolean;
+    skipLPChainSync?: boolean;
+  }
 ): Promise<void> {
   await settlePointsForUser(
     context,

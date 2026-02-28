@@ -3,4 +3,5 @@ packages:
   - generated
 
 onlyBuiltDependencies:
+  - esbuild
   - rescript

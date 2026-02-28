@@ -598,8 +598,14 @@ VotingPowerMultiplier.TierRemoved.handler(async ({ event, context }) => {
 // ============================================
 
 LeaderboardConfigContract.LPPoolConfigured.contractRegister(({ event, context }) => {
-  context.addNonfungiblePositionManager(normalizeAddress(event.params.positionManager));
-  context.addUniswapV3Pool(normalizeAddress(event.params.pool));
+  const pool = normalizeAddress(event.params.pool);
+  const positionManager = normalizeAddress(event.params.positionManager);
+  if (pool === positionManager) {
+    context.addUniswapV2Pair(pool);
+    return;
+  }
+  context.addNonfungiblePositionManager(positionManager);
+  context.addUniswapV3Pool(pool);
 });
 
 LeaderboardConfigContract.LPPoolConfigured.handler(async ({ event, context }) => {

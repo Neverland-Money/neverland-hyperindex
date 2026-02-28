@@ -6,6 +6,7 @@ process.env.ENVIO_DISABLE_BOOTSTRAP = 'true';
 
 import {
   AUSD_ADDRESS,
+  BOOTSTRAP_VP_TIERS,
   DUST_LOCK_START_BLOCK,
   EARNAUSD_ADDRESS,
   MAX_LOCK_TIME,
@@ -19,12 +20,14 @@ import {
 import {
   addReserveToUserList,
   applyScheduledEpochTransitions,
+  bootstrapLeaderboardIfNeeded,
   applyCombinedMultiplierScaled,
   applyMultipliersForUser,
   calculateAverageCombinedMultiplierBps,
   calculateAverageTokenVotingPower,
   calculateCurrentVPFromStorage,
   calculateNFTMultiplierFromCount,
+  calculateNFTMultiplierFromUser,
   calculateVPMultiplier,
   createMultiplierSnapshot,
   computeTotalPointsWithMultiplier,
@@ -41,8 +44,12 @@ import type { handlerContext } from '../../generated';
 import type {
   DustLockToken_t,
   LeaderboardEpoch_t,
+  LeaderboardConfig_t,
+  LPPoolConfig_t,
+  LPPoolRegistry_t,
   LeaderboardState_t,
   NFTMultiplierConfig_t,
+  NFTPartnership_t,
   NFTPartnershipRegistryState_t,
   PriceOracleAsset_t,
   ProtocolStatsSnapshot_t,
@@ -52,6 +59,7 @@ import type {
   UserMultiplierSnapshot_t,
   UserPoints_t,
   UserReserveList_t,
+  UserNFTOwnership_t,
   UserTokenList_t,
   UserVotingPowerHistory_t,
   User_t,
@@ -303,6 +311,135 @@ test('NFT multiplier returns base when config missing', async () => {
   const multiplier = await calculateNFTMultiplierFromCount(context, 2n);
   // Bootstrap config fallback: 10000 + 1000 + 900 = 11900
   assert.equal(multiplier, 11900n);
+});
+
+test('NFT multiplier falls back to user state when registry store is missing', async () => {
+  const user = '0x0000000000000000000000000000000000000abc';
+  const userState = createStore<UserLeaderboardState_t>();
+  const nftConfig = createStore<NFTMultiplierConfig_t>();
+
+  userState.set({
+    id: user,
+    user_id: user,
+    nftCount: 2n,
+    nftMultiplier: 10000n,
+    votingPower: 0n,
+    vpTierIndex: 0n,
+    vpMultiplier: 10000n,
+    combinedMultiplier: 10000n,
+    totalEpochsParticipated: 0n,
+    lifetimePoints: 0n,
+    currentEpochId: undefined,
+    currentEpochRank: undefined,
+    lastUpdate: 0,
+  });
+  nftConfig.set({
+    id: 'current',
+    firstBonus: 1000n,
+    decayRatio: 9000n,
+    lastUpdate: 0,
+  });
+
+  const context = {
+    UserLeaderboardState: userState,
+    NFTMultiplierConfig: nftConfig,
+  } as unknown as handlerContext;
+
+  const multiplier = await calculateNFTMultiplierFromUser(context, user);
+  assert.equal(multiplier, 11900n);
+});
+
+test('NFT multiplier applies static boost from active collection ownership', async () => {
+  const user = '0x0000000000000000000000000000000000000abd';
+  const collection = '0x0000000000000000000000000000000000000abe';
+  const registryState = createStore<NFTPartnershipRegistryState_t>();
+  const ownershipStore = createStore<UserNFTOwnership_t>();
+  const partnershipStore = createStore<NFTPartnership_t>();
+  const nftConfig = createStore<NFTMultiplierConfig_t>();
+
+  registryState.set({
+    id: 'current',
+    activeCollections: [collection],
+    lastUpdate: 0,
+  });
+  ownershipStore.set({
+    id: `${user}:${collection}`,
+    user_id: user,
+    partnership_id: collection,
+    balance: 1n,
+    hasNFT: true,
+    lastCheckedAt: 0,
+    lastCheckedBlock: 0n,
+  });
+  partnershipStore.set({
+    id: collection,
+    collection,
+    name: 'Static Boost NFT',
+    active: true,
+    staticBoostBps: 1500n,
+    startTimestamp: 0,
+    endTimestamp: undefined,
+    addedAt: 0,
+    lastUpdate: 0,
+  });
+  nftConfig.set({
+    id: 'current',
+    firstBonus: 1000n,
+    decayRatio: 9000n,
+    lastUpdate: 0,
+  });
+
+  const context = {
+    NFTPartnershipRegistryState: registryState,
+    UserNFTOwnership: ownershipStore,
+    NFTPartnership: partnershipStore,
+    NFTMultiplierConfig: nftConfig,
+  } as unknown as handlerContext;
+
+  const multiplier = await calculateNFTMultiplierFromUser(context, user);
+  assert.equal(multiplier, 11500n);
+});
+
+test('bootstrap leaderboard seeds voting power tiers when provided', async () => {
+  const previousBootstrap = process.env.ENVIO_DISABLE_BOOTSTRAP;
+  const originalTierLength = BOOTSTRAP_VP_TIERS.length;
+
+  process.env.ENVIO_DISABLE_BOOTSTRAP = 'false';
+  BOOTSTRAP_VP_TIERS.push([42n, 12345n]);
+
+  try {
+    const leaderboardState = createStore<LeaderboardState_t>();
+    const leaderboardEpoch = createStore<LeaderboardEpoch_t>();
+    const votingPowerTier = createStore<VotingPowerTier_t>();
+    const nftPartnership = createStore<NFTPartnership_t>();
+    const nftRegistry = createStore<NFTPartnershipRegistryState_t>();
+    const nftConfig = createStore<NFTMultiplierConfig_t>();
+    const lpPoolConfig = createStore<LPPoolConfig_t>();
+    const lpPoolRegistry = createStore<LPPoolRegistry_t>();
+    const leaderboardConfig = createStore<LeaderboardConfig_t>();
+
+    const context = {
+      LeaderboardState: leaderboardState,
+      LeaderboardEpoch: leaderboardEpoch,
+      VotingPowerTier: votingPowerTier,
+      NFTPartnership: nftPartnership,
+      NFTPartnershipRegistryState: nftRegistry,
+      NFTMultiplierConfig: nftConfig,
+      LPPoolConfig: lpPoolConfig,
+      LPPoolRegistry: lpPoolRegistry,
+      LeaderboardConfig: leaderboardConfig,
+    } as unknown as handlerContext;
+
+    await bootstrapLeaderboardIfNeeded(context, 1767434401, 46264051n);
+
+    const seededTier = await votingPowerTier.get(originalTierLength.toString());
+    assert.ok(seededTier);
+    assert.equal(seededTier?.minVotingPower, 42n);
+    assert.equal(seededTier?.multiplierBps, 12345n);
+  } finally {
+    BOOTSTRAP_VP_TIERS.splice(originalTierLength);
+    process.env.ENVIO_DISABLE_BOOTSTRAP = previousBootstrap;
+  }
 });
 
 test('recalculateUserTotalVP returns early before dust lock start block', async () => {

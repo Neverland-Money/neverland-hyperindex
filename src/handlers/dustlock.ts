@@ -430,9 +430,13 @@ DustLock.Transfer.handler(async ({ event, context }) => {
   const to = normalizeAddress(event.params.to);
 
   const token = await getOrInitDustLockToken(context, tokenId, Number(event.block.timestamp));
+  const isBurn = to === ZERO_ADDRESS;
   context.DustLockToken.set({
     ...token,
-    owner: to === ZERO_ADDRESS ? '' : to,
+    owner: isBurn ? '' : to,
+    lockedAmount: isBurn ? 0n : token.lockedAmount,
+    end: isBurn ? 0 : token.end,
+    isPermanent: isBurn ? false : token.isPermanent,
     updatedAt: Number(event.block.timestamp),
   });
 

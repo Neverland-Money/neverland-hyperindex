@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 
-import { AUSD_ADDRESS, ZERO_ADDRESS } from '../helpers/constants';
+import { AUSD_ADDRESS, USDC_ADDRESS, ZERO_ADDRESS } from '../helpers/constants';
 import { installViemMock, setLPPositionOverride } from './viem-mock';
 
 process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'true';
@@ -20,6 +20,11 @@ const PRICE_E8 = 100000000n;
 const AMOUNT0 = 1000n * UNIT;
 const AMOUNT1 = 2000n * UNIT;
 const EXPECTED_VALUE_USD = 3000n * 10n ** 8n;
+const DUST_DECIMALS = 18;
+const LEGACY_V3_POOL = '0xd15965968fe8bf2babbe39b2fc5de1ab6749141f';
+const LEGACY_V3_POSITION_MANAGER = '0x7197e214c0b767cfb76fb734ab638e2c192f4e53';
+const LP_V2_CUTOVER_BLOCK = 56436798;
+const LP_V2_CUTOVER_TIMESTAMP = 1771517877;
 
 const ADDRESSES = {
   positionManager: '0x000000000000000000000000000000000000a001',
@@ -1613,4 +1618,1337 @@ test('swap leaves out-of-range positions untouched', async () => {
   assert.ok(stats);
   assert.equal(stats?.totalPositions, 1);
   assert.equal(stats?.inRangePositions, 0);
+});
+
+test('uniswap v2 transfer + sync creates and values synthetic lp position', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  const v2Pool = '0x000000000000000000000000000000000000b200';
+  const user = ADDRESSES.user;
+
+  mockDb = mockDb.entities.LPPoolRegistry.set({
+    id: 'global',
+    poolIds: [v2Pool],
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolConfig.set({
+    id: v2Pool,
+    pool: v2Pool,
+    positionManager: v2Pool,
+    token0: USDC_ADDRESS,
+    token1: ADDRESSES.token1,
+    fee: 3000,
+    lpRateBps: 0n,
+    isActive: true,
+    enabledAtEpoch: 1n,
+    enabledAtTimestamp: 0,
+    disabledAtEpoch: undefined,
+    disabledAtTimestamp: undefined,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolState.set({
+    id: v2Pool,
+    pool: v2Pool,
+    currentTick: 0,
+    sqrtPriceX96: 0n,
+    token0Price: 0n,
+    token1Price: 0n,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolV2State.set({
+    id: v2Pool,
+    pool: v2Pool,
+    reserve0: 0n,
+    reserve1: 0n,
+    lpTotalSupply: 0n,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.TokenInfo.set({
+    id: USDC_ADDRESS,
+    address: USDC_ADDRESS,
+    decimals: DECIMALS,
+    symbol: 'USDC',
+    name: 'USD Coin',
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.TokenInfo.set({
+    id: ADDRESSES.token1,
+    address: ADDRESSES.token1,
+    decimals: DUST_DECIMALS,
+    symbol: 'DUST',
+    name: 'Dust',
+    lastUpdate: 0,
+  });
+
+  const mintTransfer = TestHelpers.UniswapV2Pair.Transfer.createMockEvent({
+    from: ZERO_ADDRESS,
+    to: user,
+    value: 1_000n,
+    ...eventData(56436798, 2000, v2Pool),
+  });
+  mockDb = await TestHelpers.UniswapV2Pair.Transfer.processEvent({
+    event: mintTransfer,
+    mockDb,
+  });
+
+  const sync = TestHelpers.UniswapV2Pair.Sync.createMockEvent({
+    reserve0: 1_000_000n * 10n ** 6n,
+    reserve1: 500_000n * 10n ** 18n,
+    ...eventData(56436799, 2600, v2Pool),
+  });
+  mockDb = await TestHelpers.UniswapV2Pair.Sync.processEvent({
+    event: sync,
+    mockDb,
+  });
+
+  const positionId = `v2:${v2Pool}:${user}`;
+  const position = mockDb.entities.UserLPPosition.get(positionId);
+  assert.ok(position);
+  assert.equal(position?.liquidity, 1_000n);
+  assert.equal(position?.isInRange, true);
+  assert.equal(position?.tickLower, -887272);
+  assert.equal(position?.tickUpper, 887272);
+  assert.ok((position?.valueUsd ?? 0n) > 0n);
+
+  const v2State = mockDb.entities.LPPoolV2State.get(v2Pool);
+  assert.equal(v2State?.lpTotalSupply, 1_000n);
+  assert.equal(v2State?.reserve0, 1_000_000n * 10n ** 6n);
+  assert.equal(v2State?.reserve1, 500_000n * 10n ** 18n);
+});
+
+test('uniswap v2 swap updates fee apr stats', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  const v2Pool = '0x000000000000000000000000000000000000b201';
+  const tvlUsd = 1_000n * 10n ** 8n;
+
+  mockDb = mockDb.entities.LPPoolConfig.set({
+    id: v2Pool,
+    pool: v2Pool,
+    positionManager: v2Pool,
+    token0: USDC_ADDRESS,
+    token1: ADDRESSES.token0,
+    fee: 3000,
+    lpRateBps: 0n,
+    isActive: true,
+    enabledAtEpoch: 1n,
+    enabledAtTimestamp: 0,
+    disabledAtEpoch: undefined,
+    disabledAtTimestamp: undefined,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolState.set({
+    id: v2Pool,
+    pool: v2Pool,
+    currentTick: 0,
+    sqrtPriceX96: 0n,
+    token0Price: PRICE_E8,
+    token1Price: PRICE_E8,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolStats.set({
+    id: v2Pool,
+    pool: v2Pool,
+    totalPositions: 1,
+    inRangePositions: 1,
+    totalValueUsd: tvlUsd,
+    inRangeValueUsd: tvlUsd,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.TokenInfo.set({
+    id: USDC_ADDRESS,
+    address: USDC_ADDRESS,
+    decimals: DECIMALS,
+    symbol: 'USDC',
+    name: 'USD Coin',
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.TokenInfo.set({
+    id: ADDRESSES.token0,
+    address: ADDRESSES.token0,
+    decimals: DECIMALS,
+    symbol: 'TK0',
+    name: 'Token0',
+    lastUpdate: 0,
+  });
+
+  const swap = TestHelpers.UniswapV2Pair.Swap.createMockEvent({
+    sender: ADDRESSES.user,
+    amount0In: 1_000_000n,
+    amount1In: 0n,
+    amount0Out: 0n,
+    amount1Out: 2_000_000n,
+    to: ADDRESSES.user,
+    ...eventData(200, 4000, v2Pool),
+  });
+  mockDb = await TestHelpers.UniswapV2Pair.Swap.processEvent({
+    event: swap,
+    mockDb,
+  });
+
+  const feeStats = mockDb.entities.LPPoolFeeStats.get(v2Pool);
+  assert.ok(feeStats);
+  assert.equal(feeStats?.volumeUsd24h, 150000000n);
+  assert.equal(feeStats?.feesUsd24h, 450000n);
+  assert.equal(feeStats?.feeAprBps, 16n);
+});
+
+test('legacy uniswap v3 swap hardstops after cutover', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  mockDb = mockDb.entities.LPPoolConfig.set({
+    id: LEGACY_V3_POOL,
+    pool: LEGACY_V3_POOL,
+    positionManager: LEGACY_V3_POSITION_MANAGER,
+    token0: AUSD_ADDRESS,
+    token1: ADDRESSES.token1,
+    fee: 10000,
+    lpRateBps: 0n,
+    isActive: true,
+    enabledAtEpoch: 1n,
+    enabledAtTimestamp: 0,
+    disabledAtEpoch: undefined,
+    disabledAtTimestamp: undefined,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolState.set({
+    id: LEGACY_V3_POOL,
+    pool: LEGACY_V3_POOL,
+    currentTick: 0,
+    sqrtPriceX96: 0n,
+    token0Price: PRICE_E8,
+    token1Price: PRICE_E8,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
+    lastUpdate: 0,
+  });
+
+  const swap = TestHelpers.UniswapV3Pool.Swap.createMockEvent({
+    sender: ADDRESSES.user,
+    recipient: ADDRESSES.user,
+    amount0: -1_000_000n,
+    amount1: 2_000_000n,
+    sqrtPriceX96: 1n,
+    liquidity: 0n,
+    tick: 10n,
+    ...eventData(LP_V2_CUTOVER_BLOCK + 1, LP_V2_CUTOVER_TIMESTAMP + 60, LEGACY_V3_POOL),
+  });
+  mockDb = await TestHelpers.UniswapV3Pool.Swap.processEvent({
+    event: swap,
+    mockDb,
+  });
+
+  const poolState = mockDb.entities.LPPoolState.get(LEGACY_V3_POOL);
+  assert.equal(poolState?.currentTick, 0);
+  assert.equal(poolState?.lastUpdate, 0);
+  const feeStats = mockDb.entities.LPPoolFeeStats.get(LEGACY_V3_POOL);
+  assert.equal(feeStats, undefined);
+});
+
+test('legacy position manager transfer hardstops after cutover', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  mockDb = mockDb.entities.UserLPPosition.set({
+    id: TOKEN_ID.toString(),
+    tokenId: TOKEN_ID,
+    user_id: ADDRESSES.user,
+    pool: LEGACY_V3_POOL,
+    positionManager: LEGACY_V3_POSITION_MANAGER,
+    tickLower: TICK_LOWER,
+    tickUpper: TICK_UPPER,
+    liquidity: 100n,
+    amount0: AMOUNT0,
+    amount1: AMOUNT1,
+    isInRange: true,
+    valueUsd: EXPECTED_VALUE_USD,
+    lastInRangeTimestamp: 1000,
+    accumulatedInRangeSeconds: 0n,
+    lastSettledAt: 1000,
+    settledLpPoints: 0n,
+    createdAt: 1000,
+    lastUpdate: 1000,
+  });
+
+  const transfer = TestHelpers.NonfungiblePositionManager.Transfer.createMockEvent({
+    from: ADDRESSES.user,
+    to: ADDRESSES.token0,
+    tokenId: TOKEN_ID,
+    ...eventData(
+      LP_V2_CUTOVER_BLOCK + 5,
+      LP_V2_CUTOVER_TIMESTAMP + 3600,
+      LEGACY_V3_POSITION_MANAGER
+    ),
+  });
+  mockDb = await TestHelpers.NonfungiblePositionManager.Transfer.processEvent({
+    event: transfer,
+    mockDb,
+  });
+
+  const position = mockDb.entities.UserLPPosition.get(TOKEN_ID.toString());
+  assert.equal(position?.user_id, ADDRESSES.user);
+  assert.equal(position?.lastUpdate, 1000);
+});
+
+test('uniswap v2 transfer between users updates both synthetic positions', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  const v2Pool = '0x000000000000000000000000000000000000b202';
+  const userA = ADDRESSES.user;
+  const userB = '0x000000000000000000000000000000000000a006';
+  const positionAId = `v2:${v2Pool}:${userA}`;
+
+  mockDb = mockDb.entities.LPPoolConfig.set({
+    id: v2Pool,
+    pool: v2Pool,
+    positionManager: v2Pool,
+    token0: USDC_ADDRESS,
+    token1: ADDRESSES.token1,
+    fee: 3000,
+    lpRateBps: 0n,
+    isActive: true,
+    enabledAtEpoch: 1n,
+    enabledAtTimestamp: 0,
+    disabledAtEpoch: undefined,
+    disabledAtTimestamp: undefined,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolState.set({
+    id: v2Pool,
+    pool: v2Pool,
+    currentTick: 0,
+    sqrtPriceX96: 0n,
+    token0Price: PRICE_E8,
+    token1Price: PRICE_E8,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolV2State.set({
+    id: v2Pool,
+    pool: v2Pool,
+    reserve0: 1_000_000n * 10n ** 6n,
+    reserve1: 500_000n * 10n ** 18n,
+    lpTotalSupply: 1_000n,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.TokenInfo.set({
+    id: USDC_ADDRESS,
+    address: USDC_ADDRESS,
+    decimals: DECIMALS,
+    symbol: 'USDC',
+    name: 'USD Coin',
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.TokenInfo.set({
+    id: ADDRESSES.token1,
+    address: ADDRESSES.token1,
+    decimals: DUST_DECIMALS,
+    symbol: 'DUST',
+    name: 'Dust',
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.UserLPPosition.set({
+    id: positionAId,
+    tokenId: BigInt(userA),
+    user_id: userA,
+    pool: v2Pool,
+    positionManager: v2Pool,
+    tickLower: -887272,
+    tickUpper: 887272,
+    liquidity: 1_000n,
+    amount0: 0n,
+    amount1: 0n,
+    isInRange: true,
+    valueUsd: 0n,
+    lastInRangeTimestamp: 2000,
+    accumulatedInRangeSeconds: 0n,
+    lastSettledAt: 2000,
+    settledLpPoints: 0n,
+    createdAt: 2000,
+    lastUpdate: 2000,
+  });
+  mockDb = mockDb.entities.UserLPPositionIndex.set({
+    id: userA,
+    user_id: userA,
+    positionIds: [positionAId],
+    lastUpdate: 2000,
+  });
+  mockDb = mockDb.entities.LPPoolPositionIndex.set({
+    id: v2Pool,
+    pool: v2Pool,
+    positionIds: [positionAId],
+    lastUpdate: 2000,
+  });
+
+  const transfer = TestHelpers.UniswapV2Pair.Transfer.createMockEvent({
+    from: userA,
+    to: userB,
+    value: 250n,
+    ...eventData(56436810, 5000, v2Pool),
+  });
+  mockDb = await TestHelpers.UniswapV2Pair.Transfer.processEvent({
+    event: transfer,
+    mockDb,
+  });
+
+  const updatedA = mockDb.entities.UserLPPosition.get(positionAId);
+  assert.equal(updatedA?.liquidity, 750n);
+
+  const positionBId = `v2:${v2Pool}:${userB}`;
+  const updatedB = mockDb.entities.UserLPPosition.get(positionBId);
+  assert.equal(updatedB?.liquidity, 250n);
+});
+
+test('uniswap v2 swap uses stablecoin fallback pricing when pool prices are zero', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  const v2Pool = '0x000000000000000000000000000000000000b203';
+  const tvlUsd = 1_000n * 10n ** 8n;
+
+  mockDb = mockDb.entities.LPPoolConfig.set({
+    id: v2Pool,
+    pool: v2Pool,
+    positionManager: v2Pool,
+    token0: USDC_ADDRESS,
+    token1: AUSD_ADDRESS,
+    fee: 3000,
+    lpRateBps: 0n,
+    isActive: true,
+    enabledAtEpoch: 1n,
+    enabledAtTimestamp: 0,
+    disabledAtEpoch: undefined,
+    disabledAtTimestamp: undefined,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolState.set({
+    id: v2Pool,
+    pool: v2Pool,
+    currentTick: 0,
+    sqrtPriceX96: 0n,
+    token0Price: 0n,
+    token1Price: 0n,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolStats.set({
+    id: v2Pool,
+    pool: v2Pool,
+    totalPositions: 1,
+    inRangePositions: 1,
+    totalValueUsd: tvlUsd,
+    inRangeValueUsd: tvlUsd,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.TokenInfo.set({
+    id: USDC_ADDRESS,
+    address: USDC_ADDRESS,
+    decimals: DECIMALS,
+    symbol: 'USDC',
+    name: 'USD Coin',
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.TokenInfo.set({
+    id: AUSD_ADDRESS,
+    address: AUSD_ADDRESS,
+    decimals: DECIMALS,
+    symbol: 'AUSD',
+    name: 'AUSD',
+    lastUpdate: 0,
+  });
+
+  const swap = TestHelpers.UniswapV2Pair.Swap.createMockEvent({
+    sender: ADDRESSES.user,
+    amount0In: 1_000_000n,
+    amount1In: 0n,
+    amount0Out: 0n,
+    amount1Out: 1_000_000n,
+    to: ADDRESSES.user,
+    ...eventData(56436811, 6000, v2Pool),
+  });
+  mockDb = await TestHelpers.UniswapV2Pair.Swap.processEvent({
+    event: swap,
+    mockDb,
+  });
+
+  const feeStats = mockDb.entities.LPPoolFeeStats.get(v2Pool);
+  assert.ok(feeStats);
+  assert.equal(feeStats?.volumeUsd24h, 100000000n);
+  assert.equal(feeStats?.feesUsd24h, 300000n);
+  assert.equal(feeStats?.feeAprBps, 10n);
+});
+
+test('uniswap v2 sync with no positions still updates pool stats', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  const v2Pool = '0x000000000000000000000000000000000000b204';
+
+  mockDb = mockDb.entities.LPPoolConfig.set({
+    id: v2Pool,
+    pool: v2Pool,
+    positionManager: v2Pool,
+    token0: USDC_ADDRESS,
+    token1: ADDRESSES.token1,
+    fee: 3000,
+    lpRateBps: 0n,
+    isActive: true,
+    enabledAtEpoch: 1n,
+    enabledAtTimestamp: 0,
+    disabledAtEpoch: undefined,
+    disabledAtTimestamp: undefined,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolState.set({
+    id: v2Pool,
+    pool: v2Pool,
+    currentTick: 0,
+    sqrtPriceX96: 0n,
+    token0Price: PRICE_E8,
+    token1Price: PRICE_E8,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolV2State.set({
+    id: v2Pool,
+    pool: v2Pool,
+    reserve0: 0n,
+    reserve1: 0n,
+    lpTotalSupply: 0n,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.TokenInfo.set({
+    id: USDC_ADDRESS,
+    address: USDC_ADDRESS,
+    decimals: DECIMALS,
+    symbol: 'USDC',
+    name: 'USD Coin',
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.TokenInfo.set({
+    id: ADDRESSES.token1,
+    address: ADDRESSES.token1,
+    decimals: DUST_DECIMALS,
+    symbol: 'DUST',
+    name: 'Dust',
+    lastUpdate: 0,
+  });
+
+  const sync = TestHelpers.UniswapV2Pair.Sync.createMockEvent({
+    reserve0: 100n,
+    reserve1: 200n,
+    ...eventData(56436812, 7000, v2Pool),
+  });
+  mockDb = await TestHelpers.UniswapV2Pair.Sync.processEvent({
+    event: sync,
+    mockDb,
+  });
+
+  const poolStats = mockDb.entities.LPPoolStats.get(v2Pool);
+  assert.ok(poolStats);
+  assert.equal(poolStats?.totalPositions, 0);
+  assert.equal(poolStats?.inRangePositions, 0);
+});
+
+test('uniswap v2 sync settles and writes epoch lp points when earned', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  const v2Pool = '0x000000000000000000000000000000000000b205';
+  const user = ADDRESSES.user;
+  const positionId = `v2:${v2Pool}:${user}`;
+
+  mockDb = mockDb.entities.LeaderboardState.set({
+    id: 'current',
+    currentEpochNumber: 1n,
+    isActive: true,
+  });
+  mockDb = mockDb.entities.LeaderboardEpoch.set({
+    id: '1',
+    epochNumber: 1n,
+    startBlock: 0n,
+    startTime: 1000,
+    endBlock: undefined,
+    endTime: undefined,
+    isActive: true,
+    duration: undefined,
+    scheduledStartTime: 0,
+    scheduledEndTime: 0,
+  });
+  mockDb = mockDb.entities.LPPoolConfig.set({
+    id: v2Pool,
+    pool: v2Pool,
+    positionManager: v2Pool,
+    token0: USDC_ADDRESS,
+    token1: ADDRESSES.token1,
+    fee: 3000,
+    lpRateBps: 2500n,
+    isActive: true,
+    enabledAtEpoch: 1n,
+    enabledAtTimestamp: 0,
+    disabledAtEpoch: undefined,
+    disabledAtTimestamp: undefined,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolState.set({
+    id: v2Pool,
+    pool: v2Pool,
+    currentTick: 0,
+    sqrtPriceX96: 0n,
+    token0Price: PRICE_E8,
+    token1Price: PRICE_E8,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolV2State.set({
+    id: v2Pool,
+    pool: v2Pool,
+    reserve0: 1_000_000n * 10n ** 6n,
+    reserve1: 500_000n * 10n ** 18n,
+    lpTotalSupply: 1_000n,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.TokenInfo.set({
+    id: USDC_ADDRESS,
+    address: USDC_ADDRESS,
+    decimals: DECIMALS,
+    symbol: 'USDC',
+    name: 'USD Coin',
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.TokenInfo.set({
+    id: ADDRESSES.token1,
+    address: ADDRESSES.token1,
+    decimals: DUST_DECIMALS,
+    symbol: 'DUST',
+    name: 'Dust',
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.UserLPPosition.set({
+    id: positionId,
+    tokenId: BigInt(user),
+    user_id: user,
+    pool: v2Pool,
+    positionManager: v2Pool,
+    tickLower: -887272,
+    tickUpper: 887272,
+    liquidity: 1_000n,
+    amount0: 0n,
+    amount1: 0n,
+    isInRange: true,
+    valueUsd: 100n * 10n ** 8n,
+    lastInRangeTimestamp: 1000,
+    accumulatedInRangeSeconds: 0n,
+    lastSettledAt: 1000,
+    settledLpPoints: 0n,
+    createdAt: 1000,
+    lastUpdate: 1000,
+  });
+  mockDb = mockDb.entities.UserLPPositionIndex.set({
+    id: user,
+    user_id: user,
+    positionIds: [positionId],
+    lastUpdate: 1000,
+  });
+  mockDb = mockDb.entities.LPPoolPositionIndex.set({
+    id: v2Pool,
+    pool: v2Pool,
+    positionIds: [positionId],
+    lastUpdate: 1000,
+  });
+
+  const sync = TestHelpers.UniswapV2Pair.Sync.createMockEvent({
+    reserve0: 1_000_000n * 10n ** 6n,
+    reserve1: 500_000n * 10n ** 18n,
+    ...eventData(56436813, 4600, v2Pool),
+  });
+  mockDb = await TestHelpers.UniswapV2Pair.Sync.processEvent({
+    event: sync,
+    mockDb,
+  });
+
+  const epochStats = mockDb.entities.UserEpochStats.get(`${user}:1`);
+  assert.ok(epochStats);
+  assert.ok((epochStats?.lpPoints ?? 0n) > 0n);
+});
+
+test('uniswap v2 burn transfer clamps total supply at zero', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  const v2Pool = '0x000000000000000000000000000000000000b206';
+  const user = ADDRESSES.user;
+  const positionId = `v2:${v2Pool}:${user}`;
+
+  mockDb = mockDb.entities.LPPoolConfig.set({
+    id: v2Pool,
+    pool: v2Pool,
+    positionManager: v2Pool,
+    token0: USDC_ADDRESS,
+    token1: ADDRESSES.token1,
+    fee: 3000,
+    lpRateBps: 0n,
+    isActive: true,
+    enabledAtEpoch: 1n,
+    enabledAtTimestamp: 0,
+    disabledAtEpoch: undefined,
+    disabledAtTimestamp: undefined,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolState.set({
+    id: v2Pool,
+    pool: v2Pool,
+    currentTick: 0,
+    sqrtPriceX96: 0n,
+    token0Price: PRICE_E8,
+    token1Price: PRICE_E8,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolV2State.set({
+    id: v2Pool,
+    pool: v2Pool,
+    reserve0: 1_000_000n * 10n ** 6n,
+    reserve1: 500_000n * 10n ** 18n,
+    lpTotalSupply: 1_000n,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.TokenInfo.set({
+    id: USDC_ADDRESS,
+    address: USDC_ADDRESS,
+    decimals: DECIMALS,
+    symbol: 'USDC',
+    name: 'USD Coin',
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.TokenInfo.set({
+    id: ADDRESSES.token1,
+    address: ADDRESSES.token1,
+    decimals: DUST_DECIMALS,
+    symbol: 'DUST',
+    name: 'Dust',
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.UserLPPosition.set({
+    id: positionId,
+    tokenId: BigInt(user),
+    user_id: user,
+    pool: v2Pool,
+    positionManager: v2Pool,
+    tickLower: -887272,
+    tickUpper: 887272,
+    liquidity: 1_000n,
+    amount0: 0n,
+    amount1: 0n,
+    isInRange: true,
+    valueUsd: 0n,
+    lastInRangeTimestamp: 2000,
+    accumulatedInRangeSeconds: 0n,
+    lastSettledAt: 2000,
+    settledLpPoints: 0n,
+    createdAt: 2000,
+    lastUpdate: 2000,
+  });
+  mockDb = mockDb.entities.UserLPPositionIndex.set({
+    id: user,
+    user_id: user,
+    positionIds: [positionId],
+    lastUpdate: 2000,
+  });
+  mockDb = mockDb.entities.LPPoolPositionIndex.set({
+    id: v2Pool,
+    pool: v2Pool,
+    positionIds: [positionId],
+    lastUpdate: 2000,
+  });
+
+  const burnTransfer = TestHelpers.UniswapV2Pair.Transfer.createMockEvent({
+    from: user,
+    to: ZERO_ADDRESS,
+    value: 2_000n,
+    ...eventData(56436814, 8000, v2Pool),
+  });
+  mockDb = await TestHelpers.UniswapV2Pair.Transfer.processEvent({
+    event: burnTransfer,
+    mockDb,
+  });
+
+  const v2State = mockDb.entities.LPPoolV2State.get(v2Pool);
+  assert.equal(v2State?.lpTotalSupply, 0n);
+});
+
+test('uniswap v3 initialize seeds tracked ausd pool state', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  const pool = '0x000000000000000000000000000000000000b301';
+  mockDb = mockDb.entities.LPPoolRegistry.set({
+    id: 'global',
+    poolIds: [pool],
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolConfig.set({
+    id: pool,
+    pool,
+    positionManager: ADDRESSES.positionManager,
+    token0: AUSD_ADDRESS,
+    token1: ADDRESSES.token1,
+    fee: 3000,
+    lpRateBps: 0n,
+    isActive: true,
+    enabledAtEpoch: 1n,
+    enabledAtTimestamp: 0,
+    disabledAtEpoch: undefined,
+    disabledAtTimestamp: undefined,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.TokenInfo.set({
+    id: AUSD_ADDRESS,
+    address: AUSD_ADDRESS,
+    decimals: DECIMALS,
+    symbol: 'AUSD',
+    name: 'AUSD',
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.TokenInfo.set({
+    id: ADDRESSES.token1,
+    address: ADDRESSES.token1,
+    decimals: DUST_DECIMALS,
+    symbol: 'DUST',
+    name: 'Dust',
+    lastUpdate: 0,
+  });
+
+  const initialized = TestHelpers.UniswapV3Pool.Initialize.createMockEvent({
+    sqrtPriceX96: 2n ** 96n,
+    tick: 0n,
+    ...eventData(1000, 1700000000, pool),
+  });
+  mockDb = await TestHelpers.UniswapV3Pool.Initialize.processEvent({
+    event: initialized,
+    mockDb,
+  });
+
+  const state = mockDb.entities.LPPoolState.get(pool);
+  assert.ok(state);
+  assert.equal(state?.currentTick, 0);
+  assert.equal(state?.token0Price, PRICE_E8);
+  assert.ok((state?.token1Price ?? 0n) > 0n);
+});
+
+test('uniswap v3 set fee protocol updates pool state', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  const pool = '0x000000000000000000000000000000000000b302';
+  mockDb = mockDb.entities.LPPoolRegistry.set({
+    id: 'global',
+    poolIds: [pool],
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolConfig.set({
+    id: pool,
+    pool,
+    positionManager: ADDRESSES.positionManager,
+    token0: ADDRESSES.token0,
+    token1: ADDRESSES.token1,
+    fee: 3000,
+    lpRateBps: 0n,
+    isActive: true,
+    enabledAtEpoch: 1n,
+    enabledAtTimestamp: 0,
+    disabledAtEpoch: undefined,
+    disabledAtTimestamp: undefined,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolState.set({
+    id: pool,
+    pool,
+    currentTick: 1,
+    sqrtPriceX96: 2n ** 96n,
+    token0Price: PRICE_E8,
+    token1Price: PRICE_E8,
+    feeProtocol0: 1,
+    feeProtocol1: 2,
+    lastUpdate: 0,
+  });
+
+  const event = TestHelpers.UniswapV3Pool.SetFeeProtocol.createMockEvent({
+    feeProtocol0Old: 1n,
+    feeProtocol1Old: 2n,
+    feeProtocol0New: 6n,
+    feeProtocol1New: 7n,
+    ...eventData(1001, 1700000010, pool),
+  });
+  mockDb = await TestHelpers.UniswapV3Pool.SetFeeProtocol.processEvent({
+    event,
+    mockDb,
+  });
+
+  const state = mockDb.entities.LPPoolState.get(pool);
+  assert.equal(state?.feeProtocol0, 6);
+  assert.equal(state?.feeProtocol1, 7);
+});
+
+test('legacy uniswap v3 mint before cutover keeps hardcoded config path', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  const poolMint = TestHelpers.UniswapV3Pool.Mint.createMockEvent({
+    sender: ADDRESSES.user,
+    owner: ADDRESSES.user,
+    tickLower: BigInt(TICK_LOWER),
+    tickUpper: BigInt(TICK_UPPER),
+    amount: 111n,
+    amount0: AMOUNT0,
+    amount1: AMOUNT1,
+    ...eventData(LP_V2_CUTOVER_BLOCK - 1, LP_V2_CUTOVER_TIMESTAMP - 1, LEGACY_V3_POOL),
+  });
+  mockDb = await TestHelpers.UniswapV3Pool.Mint.processEvent({ event: poolMint, mockDb });
+
+  const legacyConfig = mockDb.entities.LPPoolConfig.get(LEGACY_V3_POOL);
+  assert.ok(legacyConfig);
+
+  const mintKey = `${LEGACY_V3_POOL}:${TICK_LOWER}:${TICK_UPPER}:${poolMint.transaction.hash}`;
+  const cachedMint = mockDb.entities.LPMintData.get(mintKey);
+  assert.ok(cachedMint);
+});
+
+test('uniswap v2 sync keeps fallback prices for non-stable pairs', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  const v2Pool = '0x000000000000000000000000000000000000b303';
+  mockDb = mockDb.entities.LPPoolConfig.set({
+    id: v2Pool,
+    pool: v2Pool,
+    positionManager: v2Pool,
+    token0: ADDRESSES.token0,
+    token1: ADDRESSES.token1,
+    fee: 3000,
+    lpRateBps: 0n,
+    isActive: true,
+    enabledAtEpoch: 1n,
+    enabledAtTimestamp: 0,
+    disabledAtEpoch: undefined,
+    disabledAtTimestamp: undefined,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolState.set({
+    id: v2Pool,
+    pool: v2Pool,
+    currentTick: 0,
+    sqrtPriceX96: 0n,
+    token0Price: 111n,
+    token1Price: 222n,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolV2State.set({
+    id: v2Pool,
+    pool: v2Pool,
+    reserve0: 0n,
+    reserve1: 0n,
+    lpTotalSupply: 1000n,
+    lastUpdate: 0,
+  });
+
+  const sync = TestHelpers.UniswapV2Pair.Sync.createMockEvent({
+    reserve0: 5000n,
+    reserve1: 7000n,
+    ...eventData(1002, 1700000020, v2Pool),
+  });
+  mockDb = await TestHelpers.UniswapV2Pair.Sync.processEvent({
+    event: sync,
+    mockDb,
+  });
+
+  const poolState = mockDb.entities.LPPoolState.get(v2Pool);
+  assert.equal(poolState?.token0Price, 111n);
+  assert.equal(poolState?.token1Price, 222n);
+});
+
+test('uniswap v2 sync derives prices when stable token is token1', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  const v2Pool = '0x000000000000000000000000000000000000b304';
+  mockDb = mockDb.entities.LPPoolConfig.set({
+    id: v2Pool,
+    pool: v2Pool,
+    positionManager: v2Pool,
+    token0: ADDRESSES.token0,
+    token1: USDC_ADDRESS,
+    fee: 3000,
+    lpRateBps: 0n,
+    isActive: true,
+    enabledAtEpoch: 1n,
+    enabledAtTimestamp: 0,
+    disabledAtEpoch: undefined,
+    disabledAtTimestamp: undefined,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolState.set({
+    id: v2Pool,
+    pool: v2Pool,
+    currentTick: 0,
+    sqrtPriceX96: 0n,
+    token0Price: 0n,
+    token1Price: 0n,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolV2State.set({
+    id: v2Pool,
+    pool: v2Pool,
+    reserve0: 0n,
+    reserve1: 0n,
+    lpTotalSupply: 1000n,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.TokenInfo.set({
+    id: ADDRESSES.token0,
+    address: ADDRESSES.token0,
+    decimals: DUST_DECIMALS,
+    symbol: 'DUST',
+    name: 'Dust',
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.TokenInfo.set({
+    id: USDC_ADDRESS,
+    address: USDC_ADDRESS,
+    decimals: DECIMALS,
+    symbol: 'USDC',
+    name: 'USDC',
+    lastUpdate: 0,
+  });
+
+  const sync = TestHelpers.UniswapV2Pair.Sync.createMockEvent({
+    reserve0: 500n * 10n ** 18n,
+    reserve1: 1000n * 10n ** 6n,
+    ...eventData(1003, 1700000030, v2Pool),
+  });
+  mockDb = await TestHelpers.UniswapV2Pair.Sync.processEvent({
+    event: sync,
+    mockDb,
+  });
+
+  const poolState = mockDb.entities.LPPoolState.get(v2Pool);
+  assert.equal(poolState?.token1Price, PRICE_E8);
+  assert.ok((poolState?.token0Price ?? 0n) > 0n);
+});
+
+test('increase liquidity on legacy manager applies ausd-derived pricing path', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  const txHash = '0x' + '9'.repeat(64);
+  const blockNumber = LP_V2_CUTOVER_BLOCK - 1;
+  const timestamp = LP_V2_CUTOVER_TIMESTAMP - 1;
+  const legacyDustToken = '0xad96c3dffcd6374294e2573a7fbba96097cc8d7c';
+
+  mockDb = mockDb.entities.TokenInfo.set({
+    id: AUSD_ADDRESS,
+    address: AUSD_ADDRESS,
+    decimals: DECIMALS,
+    symbol: 'AUSD',
+    name: 'AUSD',
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.TokenInfo.set({
+    id: legacyDustToken,
+    address: legacyDustToken,
+    decimals: DUST_DECIMALS,
+    symbol: 'DUST',
+    name: 'Dust',
+    lastUpdate: 0,
+  });
+
+  const poolMint = TestHelpers.UniswapV3Pool.Mint.createMockEvent({
+    sender: ADDRESSES.user,
+    owner: ADDRESSES.user,
+    tickLower: BigInt(TICK_LOWER),
+    tickUpper: BigInt(TICK_UPPER),
+    amount: 123n,
+    amount0: AMOUNT0,
+    amount1: AMOUNT1,
+    mockEventData: {
+      block: { number: blockNumber, timestamp },
+      logIndex: 1,
+      srcAddress: LEGACY_V3_POOL,
+      transaction: { hash: txHash },
+    },
+  });
+  mockDb = await TestHelpers.UniswapV3Pool.Mint.processEvent({ event: poolMint, mockDb });
+
+  const increase = TestHelpers.NonfungiblePositionManager.IncreaseLiquidity.createMockEvent({
+    tokenId: TOKEN_ID,
+    liquidity: 123n,
+    amount0: AMOUNT0,
+    amount1: AMOUNT1,
+    mockEventData: {
+      block: { number: blockNumber, timestamp },
+      logIndex: 2,
+      srcAddress: LEGACY_V3_POSITION_MANAGER,
+      transaction: { hash: txHash, from: ADDRESSES.user },
+    },
+  });
+  mockDb = await TestHelpers.NonfungiblePositionManager.IncreaseLiquidity.processEvent({
+    event: increase,
+    mockDb,
+  });
+
+  const position = mockDb.entities.UserLPPosition.get(TOKEN_ID.toString());
+  assert.ok(position);
+  assert.equal(position?.pool, LEGACY_V3_POOL);
+});
+
+test('transfer mint resolves pool config from eth_call position data', async () => {
+  const prevDisableExternal = process.env.ENVIO_DISABLE_EXTERNAL_CALLS;
+  const prevDisableEth = process.env.ENVIO_DISABLE_ETH_CALLS;
+  process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'false';
+  process.env.ENVIO_DISABLE_ETH_CALLS = 'false';
+
+  try {
+    setLPPositionOverride([
+      0n,
+      ADDRESSES.positionManager,
+      ADDRESSES.token0,
+      ADDRESSES.token1,
+      3000,
+      TICK_LOWER,
+      TICK_UPPER,
+      0n,
+      0n,
+      0n,
+      0n,
+      0n,
+    ]);
+
+    const TestHelpers = loadTestHelpers();
+    let mockDb = TestHelpers.MockDb.createMockDb();
+    const eventData = createEventDataFactory();
+
+    mockDb = mockDb.entities.LPPoolRegistry.set({
+      id: 'global',
+      poolIds: [ADDRESSES.pool],
+      lastUpdate: 0,
+    });
+    mockDb = mockDb.entities.LPPoolConfig.set({
+      id: ADDRESSES.pool,
+      pool: ADDRESSES.pool,
+      positionManager: ADDRESSES.positionManager,
+      token0: ADDRESSES.token0,
+      token1: ADDRESSES.token1,
+      fee: 3000,
+      lpRateBps: 0n,
+      isActive: true,
+      enabledAtEpoch: 1n,
+      enabledAtTimestamp: 0,
+      disabledAtEpoch: undefined,
+      disabledAtTimestamp: undefined,
+      lastUpdate: 0,
+    });
+    mockDb = mockDb.entities.LPPoolState.set({
+      id: ADDRESSES.pool,
+      pool: ADDRESSES.pool,
+      currentTick: 0,
+      sqrtPriceX96: 2n ** 96n,
+      token0Price: PRICE_E8,
+      token1Price: PRICE_E8,
+      feeProtocol0: 0,
+      feeProtocol1: 0,
+      lastUpdate: 0,
+    });
+    mockDb = mockDb.entities.TokenInfo.set({
+      id: ADDRESSES.token0,
+      address: ADDRESSES.token0,
+      decimals: DECIMALS,
+      symbol: 'TK0',
+      name: 'Token0',
+      lastUpdate: 0,
+    });
+    mockDb = mockDb.entities.TokenInfo.set({
+      id: ADDRESSES.token1,
+      address: ADDRESSES.token1,
+      decimals: DECIMALS,
+      symbol: 'TK1',
+      name: 'Token1',
+      lastUpdate: 0,
+    });
+
+    const transfer = TestHelpers.NonfungiblePositionManager.Transfer.createMockEvent({
+      from: ZERO_ADDRESS,
+      to: ADDRESSES.user,
+      tokenId: TOKEN_ID,
+      ...eventData(1004, 1700000040, ADDRESSES.positionManager),
+    });
+    mockDb = await TestHelpers.NonfungiblePositionManager.Transfer.processEvent({
+      event: transfer,
+      mockDb,
+    });
+
+    const position = mockDb.entities.UserLPPosition.get(TOKEN_ID.toString());
+    assert.ok(position);
+    assert.equal(position?.pool, ADDRESSES.pool);
+  } finally {
+    setLPPositionOverride(undefined);
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = prevDisableExternal;
+    process.env.ENVIO_DISABLE_ETH_CALLS = prevDisableEth;
+  }
+});
+
+test('uniswap v2 transfer settles existing synthetic position points', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  const v2Pool = '0x000000000000000000000000000000000000b305';
+  const user = ADDRESSES.user;
+  const positionId = `v2:${v2Pool}:${user}`;
+
+  mockDb = mockDb.entities.LeaderboardState.set({
+    id: 'current',
+    currentEpochNumber: 1n,
+    isActive: true,
+  });
+  mockDb = mockDb.entities.LeaderboardEpoch.set({
+    id: '1',
+    epochNumber: 1n,
+    startBlock: 0n,
+    startTime: 0,
+    endBlock: undefined,
+    endTime: undefined,
+    isActive: true,
+    duration: undefined,
+    scheduledStartTime: 0,
+    scheduledEndTime: 0,
+  });
+  mockDb = mockDb.entities.LPPoolConfig.set({
+    id: v2Pool,
+    pool: v2Pool,
+    positionManager: v2Pool,
+    token0: USDC_ADDRESS,
+    token1: ADDRESSES.token1,
+    fee: 3000,
+    lpRateBps: 2500n,
+    isActive: true,
+    enabledAtEpoch: 1n,
+    enabledAtTimestamp: 0,
+    disabledAtEpoch: undefined,
+    disabledAtTimestamp: undefined,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolState.set({
+    id: v2Pool,
+    pool: v2Pool,
+    currentTick: 0,
+    sqrtPriceX96: 0n,
+    token0Price: PRICE_E8,
+    token1Price: PRICE_E8,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolV2State.set({
+    id: v2Pool,
+    pool: v2Pool,
+    reserve0: 1_000_000n * 10n ** 6n,
+    reserve1: 500_000n * 10n ** 18n,
+    lpTotalSupply: 1_000n,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.TokenInfo.set({
+    id: USDC_ADDRESS,
+    address: USDC_ADDRESS,
+    decimals: DECIMALS,
+    symbol: 'USDC',
+    name: 'USDC',
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.TokenInfo.set({
+    id: ADDRESSES.token1,
+    address: ADDRESSES.token1,
+    decimals: DUST_DECIMALS,
+    symbol: 'DUST',
+    name: 'Dust',
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.UserLPPosition.set({
+    id: positionId,
+    tokenId: BigInt(user),
+    user_id: user,
+    pool: v2Pool,
+    positionManager: v2Pool,
+    tickLower: -887272,
+    tickUpper: 887272,
+    liquidity: 1_000n,
+    amount0: 0n,
+    amount1: 0n,
+    isInRange: true,
+    valueUsd: 100n * 10n ** 8n,
+    lastInRangeTimestamp: 1000,
+    accumulatedInRangeSeconds: 0n,
+    lastSettledAt: 1000,
+    settledLpPoints: 0n,
+    createdAt: 1000,
+    lastUpdate: 1000,
+  });
+  mockDb = mockDb.entities.UserLPPositionIndex.set({
+    id: user,
+    user_id: user,
+    positionIds: [positionId],
+    lastUpdate: 1000,
+  });
+  mockDb = mockDb.entities.LPPoolPositionIndex.set({
+    id: v2Pool,
+    pool: v2Pool,
+    positionIds: [positionId],
+    lastUpdate: 1000,
+  });
+
+  const mintTransfer = TestHelpers.UniswapV2Pair.Transfer.createMockEvent({
+    from: ZERO_ADDRESS,
+    to: user,
+    value: 100n,
+    ...eventData(1005, 5000, v2Pool),
+  });
+  mockDb = await TestHelpers.UniswapV2Pair.Transfer.processEvent({
+    event: mintTransfer,
+    mockDb,
+  });
+
+  const epochStats = mockDb.entities.UserEpochStats.get(`${user}:1`);
+  assert.ok(epochStats);
+  assert.ok((epochStats?.lpPoints ?? 0n) > 0n);
 });

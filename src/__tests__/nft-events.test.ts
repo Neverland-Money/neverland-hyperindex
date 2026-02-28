@@ -517,3 +517,158 @@ test('combined multiplier caps at maximum', async () => {
   const state = mockDb.entities.UserLeaderboardState.get(ADDRESSES.user);
   assert.equal(state?.combinedMultiplier, 50000n);
 });
+
+test('partnership added creates registry state when none exists', async () => {
+  const previousBootstrap = process.env.ENVIO_DISABLE_BOOTSTRAP;
+  process.env.ENVIO_DISABLE_BOOTSTRAP = 'true';
+
+  try {
+    const TestHelpers = loadTestHelpers();
+    let mockDb = TestHelpers.MockDb.createMockDb();
+    const eventData = createEventDataFactory();
+
+    const added = TestHelpers.NFTPartnershipRegistry.PartnershipAdded.createMockEvent({
+      collection: ADDRESSES.collection,
+      name: 'Partner',
+      active: true,
+      startTimestamp: 100n,
+      endTimestamp: 0n,
+      currentFirstBonus: 1000n,
+      currentDecayRatio: 9000n,
+      ...eventData(20, 400, ADDRESSES.registry),
+    });
+    mockDb = await TestHelpers.NFTPartnershipRegistry.PartnershipAdded.processEvent({
+      event: added,
+      mockDb,
+    });
+
+    const registry = mockDb.entities.NFTPartnershipRegistryState.get('current');
+    assert.ok(registry);
+    assert.deepEqual(registry?.activeCollections, [ADDRESSES.collection]);
+  } finally {
+    process.env.ENVIO_DISABLE_BOOTSTRAP = previousBootstrap;
+  }
+});
+
+test('static nft collection handlers reuse shared transfer logic', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  mockDb = mockDb.entities.LeaderboardState.set({
+    id: 'current',
+    currentEpochNumber: 1n,
+    isActive: true,
+  });
+  mockDb = mockDb.entities.LeaderboardEpoch.set({
+    id: '1',
+    epochNumber: 1n,
+    startBlock: 0n,
+    startTime: 0,
+    endBlock: undefined,
+    endTime: undefined,
+    isActive: true,
+    duration: undefined,
+    scheduledStartTime: 0,
+    scheduledEndTime: 0,
+  });
+  mockDb = mockDb.entities.NFTMultiplierConfig.set({
+    id: 'current',
+    firstBonus: 1000n,
+    decayRatio: 9000n,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.NFTPartnershipRegistryState.set({
+    id: 'current',
+    activeCollections: [ADDRESSES.collection, ADDRESSES.collectionTwo],
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.NFTPartnership.set({
+    id: ADDRESSES.collection,
+    collection: ADDRESSES.collection,
+    name: 'Collection 1',
+    active: true,
+    staticBoostBps: undefined,
+    startTimestamp: 0,
+    endTimestamp: undefined,
+    addedAt: 0,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.NFTPartnership.set({
+    id: ADDRESSES.collectionTwo,
+    collection: ADDRESSES.collectionTwo,
+    name: 'Collection 2',
+    active: true,
+    staticBoostBps: undefined,
+    startTimestamp: 0,
+    endTimestamp: undefined,
+    addedAt: 0,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.UserNFTOwnership.set({
+    id: `${ADDRESSES.user}:${ADDRESSES.collection}`,
+    user_id: ADDRESSES.user,
+    partnership_id: ADDRESSES.collection,
+    balance: 1n,
+    hasNFT: true,
+    lastCheckedAt: 0,
+    lastCheckedBlock: 0n,
+  });
+  mockDb = mockDb.entities.UserLeaderboardState.set({
+    id: ADDRESSES.user,
+    user_id: ADDRESSES.user,
+    nftCount: 1n,
+    nftMultiplier: 11000n,
+    votingPower: 0n,
+    vpTierIndex: 0n,
+    vpMultiplier: 10000n,
+    combinedMultiplier: 11000n,
+    totalEpochsParticipated: 0n,
+    lifetimePoints: 0n,
+    currentEpochId: undefined,
+    currentEpochRank: undefined,
+    lastUpdate: 0,
+  });
+
+  const selfTransfer = TestHelpers.The10kSquad.Transfer.createMockEvent({
+    from: ADDRESSES.user,
+    to: ADDRESSES.user,
+    id: 1n,
+    ...eventData(21, 410, ADDRESSES.collection),
+  });
+  mockDb = await TestHelpers.The10kSquad.Transfer.processEvent({
+    event: selfTransfer,
+    mockDb,
+  });
+
+  const minted = TestHelpers.Overnads.Transfer.createMockEvent({
+    from: ZERO_ADDRESS,
+    to: ADDRESSES.user,
+    id: 2n,
+    ...eventData(22, 420, ADDRESSES.collectionTwo),
+  });
+  mockDb = await TestHelpers.Overnads.Transfer.processEvent({
+    event: minted,
+    mockDb,
+  });
+
+  const burned = TestHelpers.SolveilPass.Transfer.createMockEvent({
+    from: ADDRESSES.user,
+    to: ZERO_ADDRESS,
+    id: 3n,
+    ...eventData(23, 430, ADDRESSES.collectionTwo),
+  });
+  mockDb = await TestHelpers.SolveilPass.Transfer.processEvent({
+    event: burned,
+    mockDb,
+  });
+
+  const keptOwnership = mockDb.entities.UserNFTOwnership.get(
+    `${ADDRESSES.user}:${ADDRESSES.collection}`
+  );
+  assert.equal(keptOwnership?.lastCheckedAt, 410);
+  assert.equal(
+    mockDb.entities.UserNFTOwnership.get(`${ADDRESSES.user}:${ADDRESSES.collectionTwo}`),
+    undefined
+  );
+});

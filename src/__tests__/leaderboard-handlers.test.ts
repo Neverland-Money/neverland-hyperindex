@@ -388,6 +388,95 @@ test('lp pool config handlers register pools and rates', async () => {
   }
 });
 
+test('lp pool config contract register supports v2 pools', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  mockDb = mockDb.entities.LeaderboardState.set({
+    id: 'current',
+    currentEpochNumber: 1n,
+    isActive: true,
+  });
+
+  const v2Pool = '0x000000000000000000000000000000000000c020';
+  const configured = TestHelpers.LeaderboardConfig.LPPoolConfigured.createMockEvent({
+    pool: v2Pool,
+    positionManager: v2Pool,
+    token0: ADDRESSES.token0,
+    token1: ADDRESSES.token1,
+    lpRateBps: 900n,
+    timestamp: 260n,
+    ...eventData(33, 260, ADDRESSES.config),
+  });
+  mockDb = await TestHelpers.LeaderboardConfig.LPPoolConfigured.processEvent({
+    event: configured,
+    mockDb,
+  });
+
+  const poolConfig = mockDb.entities.LPPoolConfig.get(v2Pool);
+  assert.ok(poolConfig);
+  assert.equal(poolConfig?.pool, v2Pool);
+  assert.equal(poolConfig?.positionManager, v2Pool);
+});
+
+test('lp pool config keeps previous fee when eth calls are disabled', async () => {
+  const previousExternal = process.env.ENVIO_DISABLE_EXTERNAL_CALLS;
+  const previousEth = process.env.ENVIO_DISABLE_ETH_CALLS;
+  process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'true';
+  process.env.ENVIO_DISABLE_ETH_CALLS = 'true';
+
+  try {
+    const TestHelpers = loadTestHelpers();
+    let mockDb = TestHelpers.MockDb.createMockDb();
+    const eventData = createEventDataFactory();
+    const pool = '0x000000000000000000000000000000000000c021';
+
+    mockDb = mockDb.entities.LeaderboardState.set({
+      id: 'current',
+      currentEpochNumber: 3n,
+      isActive: true,
+    });
+    mockDb = mockDb.entities.LPPoolConfig.set({
+      id: pool,
+      pool,
+      positionManager: ADDRESSES.positionManager,
+      token0: ADDRESSES.token0,
+      token1: ADDRESSES.token1,
+      fee: 1234,
+      lpRateBps: 100n,
+      isActive: true,
+      enabledAtEpoch: 1n,
+      enabledAtTimestamp: 0,
+      disabledAtEpoch: undefined,
+      disabledAtTimestamp: undefined,
+      lastUpdate: 0,
+    });
+
+    const configured = TestHelpers.LeaderboardConfig.LPPoolConfigured.createMockEvent({
+      pool,
+      positionManager: ADDRESSES.positionManager,
+      token0: ADDRESSES.token0,
+      token1: ADDRESSES.token1,
+      lpRateBps: 500n,
+      timestamp: 270n,
+      ...eventData(34, 270, ADDRESSES.config),
+    });
+    mockDb = await TestHelpers.LeaderboardConfig.LPPoolConfigured.processEvent({
+      event: configured,
+      mockDb,
+    });
+
+    const updated = mockDb.entities.LPPoolConfig.get(pool);
+    assert.ok(updated);
+    assert.equal(updated?.fee, 1234);
+    assert.equal(updated?.enabledAtEpoch, 3n);
+  } finally {
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = previousExternal;
+    process.env.ENVIO_DISABLE_ETH_CALLS = previousEth;
+  }
+});
+
 test('config updates initialize missing leaderboard config', async () => {
   const TestHelpers = loadTestHelpers();
   let mockDb = TestHelpers.MockDb.createMockDb();

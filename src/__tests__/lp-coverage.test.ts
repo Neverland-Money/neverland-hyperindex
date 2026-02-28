@@ -5,6 +5,7 @@ process.env.ENVIO_DISABLE_BOOTSTRAP = 'true';
 
 import { AUSD_ADDRESS } from '../helpers/constants';
 import {
+  applyStaticLPPoolCutover,
   getOrCreateLPPoolState,
   getOrCreateLPPoolStats,
   settleAllLPPoolPositions,
@@ -33,6 +34,7 @@ import type {
   LPPoolPositionIndex_t,
   LPPoolRegistry_t,
   LPPoolState_t,
+  LPPoolV2State_t,
   LPPoolStats_t,
   LPPoolVolumeBucket_t,
   ScoreBucket_t,
@@ -87,6 +89,7 @@ function buildContext() {
     UserLPPositionIndex: createStore<UserLPPositionIndex_t>(),
     LPPoolPositionIndex: createStore<LPPoolPositionIndex_t>(),
     LPPoolState: createStore<LPPoolState_t>(),
+    LPPoolV2State: createStore<LPPoolV2State_t>(),
     TokenInfo: createStore<TokenInfo_t>(),
     UserLPStats: createStore<UserLPStats_t>(),
     LPPoolStats: createStore<LPPoolStats_t>(),
@@ -1364,4 +1367,387 @@ test('settleUserLPPositions uses single active pool config fallback', async () =
 
   const epochStats = await stores.UserEpochStats.get(`${ADDRESSES.userA}:1`);
   assert.ok(epochStats);
+});
+
+test('applyStaticLPPoolCutover reactivates legacy v3 pool before cutover', async () => {
+  const { context, stores } = buildContext();
+  const legacyPool = '0xd15965968fe8bf2babbe39b2fc5de1ab6749141f';
+  const legacyManager = '0x7197e214c0b767cfb76fb734ab638e2c192f4e53';
+  const dustToken = '0xad96c3dffcd6374294e2573a7fbba96097cc8d7c';
+
+  stores.LPPoolConfig.set({
+    id: legacyPool,
+    pool: legacyPool,
+    positionManager: legacyManager,
+    token0: AUSD_ADDRESS,
+    token1: dustToken,
+    fee: 10000,
+    lpRateBps: 2500n,
+    isActive: false,
+    enabledAtEpoch: 1n,
+    enabledAtTimestamp: 0,
+    disabledAtEpoch: 1n,
+    disabledAtTimestamp: 1,
+    lastUpdate: 0,
+  });
+
+  await applyStaticLPPoolCutover(context, 1771517876, 56436797n);
+
+  const updated = await stores.LPPoolConfig.get(legacyPool);
+  assert.equal(updated?.isActive, true);
+  assert.equal(updated?.disabledAtEpoch, undefined);
+  assert.equal(updated?.disabledAtTimestamp, undefined);
+});
+
+test('updatePoolLPStats skips zeroed positions when price context exists', async () => {
+  const { context, stores } = buildContext();
+
+  setActivePoolConfig(
+    stores,
+    ADDRESSES.poolA,
+    ADDRESSES.managerA,
+    ADDRESSES.token0,
+    ADDRESSES.token1,
+    3000,
+    0n
+  );
+
+  stores.TokenInfo.set({
+    id: ADDRESSES.token0,
+    address: ADDRESSES.token0,
+    decimals: 6,
+    symbol: 'TK0',
+    name: 'Token0',
+    lastUpdate: 0,
+  });
+  stores.TokenInfo.set({
+    id: ADDRESSES.token1,
+    address: ADDRESSES.token1,
+    decimals: 6,
+    symbol: 'TK1',
+    name: 'Token1',
+    lastUpdate: 0,
+  });
+  stores.LPPoolState.set({
+    id: ADDRESSES.poolA,
+    pool: ADDRESSES.poolA,
+    currentTick: 0,
+    sqrtPriceX96: 2n ** 96n,
+    token0Price: 100000000n,
+    token1Price: 100000000n,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
+    lastUpdate: 0,
+  });
+  stores.UserLPPosition.set({
+    id: POSITION.tokenId.toString(),
+    tokenId: POSITION.tokenId,
+    user_id: ADDRESSES.userA,
+    pool: ADDRESSES.poolA,
+    positionManager: ADDRESSES.managerA,
+    tickLower: POSITION.tickLower,
+    tickUpper: POSITION.tickUpper,
+    liquidity: 0n,
+    amount0: 0n,
+    amount1: 0n,
+    isInRange: false,
+    valueUsd: 0n,
+    lastInRangeTimestamp: 0,
+    accumulatedInRangeSeconds: 0n,
+    lastSettledAt: 0,
+    settledLpPoints: 0n,
+    createdAt: 0,
+    lastUpdate: 0,
+  });
+  stores.LPPoolPositionIndex.set({
+    id: ADDRESSES.poolA,
+    pool: ADDRESSES.poolA,
+    positionIds: [POSITION.tokenId.toString()],
+    lastUpdate: 0,
+  });
+
+  await updatePoolLPStats(context, ADDRESSES.poolA, 100);
+
+  const stats = await stores.LPPoolStats.get(ADDRESSES.poolA);
+  assert.ok(stats);
+  assert.equal(stats?.totalPositions, 0);
+  assert.equal(stats?.totalValueUsd, 0n);
+});
+
+test('updatePoolFeeStats applies protocol fee share reduction', async () => {
+  const { context, stores } = buildContext();
+  const volumeUsd = 1_000_000_000n;
+
+  setActivePoolConfig(
+    stores,
+    ADDRESSES.poolA,
+    ADDRESSES.managerA,
+    ADDRESSES.token0,
+    ADDRESSES.token1,
+    10000,
+    0n
+  );
+  stores.LPPoolState.set({
+    id: ADDRESSES.poolA,
+    pool: ADDRESSES.poolA,
+    currentTick: 0,
+    sqrtPriceX96: 2n ** 96n,
+    token0Price: 100000000n,
+    token1Price: 100000000n,
+    feeProtocol0: 4,
+    feeProtocol1: 0,
+    lastUpdate: 0,
+  });
+  stores.LPPoolStats.set({
+    id: ADDRESSES.poolA,
+    pool: ADDRESSES.poolA,
+    totalPositions: 1,
+    inRangePositions: 1,
+    totalValueUsd: 1_000_000_000n,
+    inRangeValueUsd: 1_000_000_000n,
+    lastUpdate: 0,
+  });
+
+  const poolConfig = await stores.LPPoolConfig.get(ADDRESSES.poolA);
+  assert.ok(poolConfig);
+  await updatePoolFeeStats(context, poolConfig!, volumeUsd, 3600);
+
+  const feeStats = await stores.LPPoolFeeStats.get(ADDRESSES.poolA);
+  assert.ok(feeStats);
+  assert.equal(feeStats?.volumeUsd24h, volumeUsd);
+  assert.equal(feeStats?.feesUsd24h, 7_500_000n);
+});
+
+test('lp chain sync supports manager filtering and force rescan logs', async () => {
+  const prevExternal = process.env.ENVIO_DISABLE_EXTERNAL_CALLS;
+  const prevEth = process.env.ENVIO_DISABLE_ETH_CALLS;
+  const prevSync = process.env.ENVIO_ENABLE_LP_CHAIN_SYNC;
+  const prevDebug = process.env.DEBUG_LP_POINTS;
+
+  try {
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'false';
+    process.env.ENVIO_DISABLE_ETH_CALLS = 'false';
+    process.env.ENVIO_ENABLE_LP_CHAIN_SYNC = 'true';
+    process.env.DEBUG_LP_POINTS = 'true';
+
+    const { context, stores, logs } = buildContext();
+    setActivePoolConfig(
+      stores,
+      ADDRESSES.poolA,
+      ADDRESSES.managerA,
+      ADDRESSES.token0,
+      ADDRESSES.token1,
+      3000,
+      0n
+    );
+    stores.UserLPBaseline.set({
+      id: `${ADDRESSES.userA}:${ADDRESSES.managerA}`,
+      user_id: ADDRESSES.userA,
+      positionManager: ADDRESSES.managerA,
+      checkedAt: 0,
+      checkedBlock: 0n,
+    });
+    setLPBalanceOverride(ADDRESSES.managerA, ADDRESSES.userA, 0n);
+
+    await syncUserLPPositionsFromChain(context, ADDRESSES.userA, 101, 1n, {
+      managers: [ADDRESSES.poolB],
+    });
+    await syncUserLPPositionsFromChain(context, ADDRESSES.userA, 102, 1n, {
+      managers: [ADDRESSES.managerA],
+      forceRescan: true,
+    });
+
+    assert.ok(logs.some(entry => entry.includes('force rescan')));
+  } finally {
+    setLPBalanceOverride(ADDRESSES.managerA, ADDRESSES.userA, undefined);
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = prevExternal;
+    process.env.ENVIO_DISABLE_ETH_CALLS = prevEth;
+    process.env.ENVIO_ENABLE_LP_CHAIN_SYNC = prevSync;
+    process.env.DEBUG_LP_POINTS = prevDebug;
+  }
+});
+
+test('lp chain sync resolves pool config when multiple pools share manager and tokens', async () => {
+  const prevExternal = process.env.ENVIO_DISABLE_EXTERNAL_CALLS;
+  const prevEth = process.env.ENVIO_DISABLE_ETH_CALLS;
+  const prevSync = process.env.ENVIO_ENABLE_LP_CHAIN_SYNC;
+
+  try {
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'false';
+    process.env.ENVIO_DISABLE_ETH_CALLS = 'false';
+    process.env.ENVIO_ENABLE_LP_CHAIN_SYNC = 'true';
+
+    const { context, stores } = buildContext();
+    stores.LPPoolRegistry.set({
+      id: 'global',
+      poolIds: [ADDRESSES.poolA, ADDRESSES.poolB],
+      lastUpdate: 0,
+    });
+    stores.LPPoolConfig.set({
+      id: ADDRESSES.poolA,
+      pool: ADDRESSES.poolA,
+      positionManager: ADDRESSES.managerA,
+      token0: ADDRESSES.token0,
+      token1: ADDRESSES.token1,
+      fee: 500,
+      lpRateBps: 0n,
+      isActive: true,
+      enabledAtEpoch: 1n,
+      enabledAtTimestamp: 0,
+      disabledAtEpoch: undefined,
+      disabledAtTimestamp: undefined,
+      lastUpdate: 0,
+    });
+    stores.LPPoolConfig.set({
+      id: ADDRESSES.poolB,
+      pool: ADDRESSES.poolB,
+      positionManager: ADDRESSES.managerA,
+      token0: ADDRESSES.token0,
+      token1: ADDRESSES.token1,
+      fee: 3000,
+      lpRateBps: 0n,
+      isActive: true,
+      enabledAtEpoch: 1n,
+      enabledAtTimestamp: 0,
+      disabledAtEpoch: undefined,
+      disabledAtTimestamp: undefined,
+      lastUpdate: 0,
+    });
+    stores.LPPoolState.set({
+      id: ADDRESSES.poolB,
+      pool: ADDRESSES.poolB,
+      currentTick: 0,
+      sqrtPriceX96: 2n ** 96n,
+      token0Price: 100000000n,
+      token1Price: 100000000n,
+      feeProtocol0: 0,
+      feeProtocol1: 0,
+      lastUpdate: 0,
+    });
+    stores.TokenInfo.set({
+      id: ADDRESSES.token0,
+      address: ADDRESSES.token0,
+      decimals: 6,
+      symbol: 'TK0',
+      name: 'Token0',
+      lastUpdate: 0,
+    });
+    stores.TokenInfo.set({
+      id: ADDRESSES.token1,
+      address: ADDRESSES.token1,
+      decimals: 6,
+      symbol: 'TK1',
+      name: 'Token1',
+      lastUpdate: 0,
+    });
+
+    setLPBalanceOverride(ADDRESSES.managerA, ADDRESSES.userA, 1n);
+    setLPTokensOverride(ADDRESSES.managerA, ADDRESSES.userA, [POSITION.tokenId]);
+    setLPPositionOverride([
+      0n,
+      ADDRESSES.managerA,
+      ADDRESSES.token0,
+      ADDRESSES.token1,
+      3000,
+      POSITION.tickLower,
+      POSITION.tickUpper,
+      POSITION.liquidity,
+      0n,
+      0n,
+      0n,
+      0n,
+    ]);
+
+    await syncUserLPPositionsFromChain(context, ADDRESSES.userA, 103, 1n);
+
+    const position = await stores.UserLPPosition.get(POSITION.tokenId.toString());
+    assert.ok(position);
+    assert.equal(position?.pool, ADDRESSES.poolB);
+  } finally {
+    setLPBalanceOverride(ADDRESSES.managerA, ADDRESSES.userA, undefined);
+    setLPTokensOverride(ADDRESSES.managerA, ADDRESSES.userA, undefined);
+    setLPPositionOverride(undefined);
+    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = prevExternal;
+    process.env.ENVIO_DISABLE_ETH_CALLS = prevEth;
+    process.env.ENVIO_ENABLE_LP_CHAIN_SYNC = prevSync;
+  }
+});
+
+test('settleUserLPPositions clamps legacy pool settlement at cutover timestamp', async () => {
+  const { context, stores } = buildContext();
+  const legacyPool = '0xd15965968fe8bf2babbe39b2fc5de1ab6749141f';
+  const legacyManager = '0x7197e214c0b767cfb76fb734ab638e2c192f4e53';
+  const legacyDust = '0xad96c3dffcd6374294e2573a7fbba96097cc8d7c';
+  const cutoverTimestamp = 1771517877;
+
+  setLeaderboardState(stores, 1n, true, 0);
+  stores.LPPoolRegistry.set({
+    id: 'global',
+    poolIds: [legacyPool],
+    lastUpdate: 0,
+  });
+  stores.LPPoolConfig.set({
+    id: legacyPool,
+    pool: legacyPool,
+    positionManager: legacyManager,
+    token0: AUSD_ADDRESS,
+    token1: legacyDust,
+    fee: 10000,
+    lpRateBps: 2500n,
+    isActive: true,
+    enabledAtEpoch: 1n,
+    enabledAtTimestamp: 0,
+    disabledAtEpoch: undefined,
+    disabledAtTimestamp: undefined,
+    lastUpdate: 0,
+  });
+  stores.LPPoolState.set({
+    id: legacyPool,
+    pool: legacyPool,
+    currentTick: 0,
+    sqrtPriceX96: 2n ** 96n,
+    token0Price: 100000000n,
+    token1Price: 100000000n,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
+    lastUpdate: 0,
+  });
+  stores.UserLPPosition.set({
+    id: POSITION.tokenId.toString(),
+    tokenId: POSITION.tokenId,
+    user_id: ADDRESSES.userA,
+    pool: legacyPool,
+    positionManager: legacyManager,
+    tickLower: POSITION.tickLower,
+    tickUpper: POSITION.tickUpper,
+    liquidity: 1000n,
+    amount0: 1000n,
+    amount1: 1000n,
+    isInRange: true,
+    valueUsd: 1000n * 10n ** 8n,
+    lastInRangeTimestamp: cutoverTimestamp - 100,
+    accumulatedInRangeSeconds: 0n,
+    lastSettledAt: cutoverTimestamp - 100,
+    settledLpPoints: 0n,
+    createdAt: 0,
+    lastUpdate: 0,
+  });
+  stores.UserLPPositionIndex.set({
+    id: ADDRESSES.userA,
+    user_id: ADDRESSES.userA,
+    positionIds: [POSITION.tokenId.toString()],
+    lastUpdate: 0,
+  });
+  stores.LPPoolPositionIndex.set({
+    id: legacyPool,
+    pool: legacyPool,
+    positionIds: [POSITION.tokenId.toString()],
+    lastUpdate: 0,
+  });
+
+  await settleUserLPPositions(context, ADDRESSES.userA, cutoverTimestamp + 1000);
+
+  const position = await stores.UserLPPosition.get(POSITION.tokenId.toString());
+  assert.ok(position);
+  assert.equal(position?.lastSettledAt, cutoverTimestamp);
 });

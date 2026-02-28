@@ -7,6 +7,8 @@ export const SECONDS_PER_DAY = 86400;
 export const HOURS_PER_DAY = 24;
 export const LEADERBOARD_START_BLOCK = 46264051;
 export const DUST_LOCK_START_BLOCK = 39468872;
+export const LP_V2_CUTOVER_BLOCK = 56436798;
+export const LP_V2_CUTOVER_TIMESTAMP = 1771517877;
 
 // Override epoch 1 start time - set to a timestamp to ignore the EpochStart event for epoch 1
 // and use this timestamp instead. Set to 0 to use the on-chain event.

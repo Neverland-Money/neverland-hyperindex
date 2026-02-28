@@ -13,7 +13,7 @@
 
 import type { handlerContext } from '../../generated';
 import type { LPPoolConfig_t } from '../../generated/src/db/Entities.gen';
-import { NonfungiblePositionManager, UniswapV3Pool } from '../../generated';
+import { NonfungiblePositionManager, UniswapV2Pair, UniswapV3Pool } from '../../generated';
 import {
   applyCombinedMultiplierScaled,
   calculateAverageCombinedMultiplierBps,
@@ -28,9 +28,13 @@ import {
 import {
   AUSD_ADDRESS,
   BASIS_POINTS,
+  LP_V2_CUTOVER_BLOCK,
+  LP_V2_CUTOVER_TIMESTAMP,
   normalizeAddress,
   POINTS_SCALE,
   SECONDS_PER_DAY,
+  USDC_ADDRESS,
+  USDT0_ADDRESS,
 } from '../helpers/constants';
 import { getTestnetBonusBps } from '../helpers/testnetTiers';
 import {
@@ -50,13 +54,22 @@ const FEE_UNITS_DENOMINATOR = 1_000_000n;
 const VOLUME_BUCKET_SECONDS = 3600;
 const VOLUME_WINDOW_HOURS = 24;
 const DAYS_PER_YEAR = 365n;
-const HARDCODED_LP_POOL = normalizeAddress('0xd15965968fe8bf2babbe39b2fc5de1ab6749141f');
-const HARDCODED_LP_POSITION_MANAGER = normalizeAddress(
+const LEGACY_V3_LP_POOL = normalizeAddress('0xd15965968fe8bf2babbe39b2fc5de1ab6749141f');
+const LEGACY_V3_LP_POSITION_MANAGER = normalizeAddress(
   '0x7197e214c0b767cfb76fb734ab638e2c192f4e53'
 );
-const HARDCODED_LP_TOKEN0 = AUSD_ADDRESS;
-const HARDCODED_LP_TOKEN1 = normalizeAddress('0xad96c3dffcd6374294e2573a7fbba96097cc8d7c');
-const HARDCODED_LP_FEE = 10000;
+const DUST_TOKEN_ADDRESS = normalizeAddress('0xad96c3dffcd6374294e2573a7fbba96097cc8d7c');
+const LEGACY_V3_LP_TOKEN0 = AUSD_ADDRESS;
+const LEGACY_V3_LP_TOKEN1 = DUST_TOKEN_ADDRESS;
+const LEGACY_V3_LP_FEE = 10000;
+const V2_LP_POOL = normalizeAddress('0x86dbf00485871c901c5129bd525348db96c2eb2d');
+const V2_LP_POSITION_MANAGER = V2_LP_POOL;
+const V2_LP_TOKEN0 = USDC_ADDRESS;
+const V2_LP_TOKEN1 = DUST_TOKEN_ADDRESS;
+const V2_LP_FEE = 3000;
+const V2_TICK_LOWER = -887272;
+const V2_TICK_UPPER = 887272;
+const LEGACY_V3_LP_START_BLOCK = 41231451n;
 
 function logLpDebug(context: handlerContext, message: string) {
   if (process.env.DEBUG_LP_POINTS === 'true') {
@@ -115,6 +128,25 @@ type LPPoolFeeStatsRecord = {
   lastUpdate: number;
 };
 
+type CutoverStores = {
+  LPPoolConfig?: {
+    get: (id: string) => Promise<LPPoolConfigRecord | undefined>;
+    set: (value: LPPoolConfigRecord) => void;
+  };
+  LPPoolRegistry?: {
+    get: (id: string) => Promise<LPPoolRegistryRecord | undefined>;
+    set: (value: { id: string; poolIds: string[]; lastUpdate: number }) => void;
+  };
+  LPPoolState?: {
+    get: (id: string) => Promise<unknown>;
+    set: (value: unknown) => void;
+  };
+  LPPoolV2State?: {
+    get: (id: string) => Promise<unknown>;
+    set: (value: unknown) => void;
+  };
+};
+
 // For multi-pool scenarios, we track pools via LPPoolRegistry entity.
 async function listActiveLPPoolConfigs(context: handlerContext) {
   // Get the registry of tracked pools
@@ -146,8 +178,116 @@ async function getSingleActiveLPPoolConfig(context: handlerContext) {
   return configs.length === 1 ? configs[0] : null;
 }
 
-async function ensureHardcodedPoolConfig(context: handlerContext, timestamp: number) {
-  let config = await context.LPPoolConfig.get(HARDCODED_LP_POOL);
+function isV2PoolConfig(poolConfig: { pool: string; positionManager: string }): boolean {
+  return normalizeAddress(poolConfig.positionManager) === normalizeAddress(poolConfig.pool);
+}
+
+function isStableUsdToken(token: string): boolean {
+  const normalizedToken = normalizeAddress(token);
+  return (
+    normalizedToken === AUSD_ADDRESS ||
+    normalizedToken === USDC_ADDRESS ||
+    normalizedToken === USDT0_ADDRESS
+  );
+}
+
+function isPastLpV2Cutover(timestamp: number, blockNumber?: bigint): boolean {
+  if (timestamp >= LP_V2_CUTOVER_TIMESTAMP) return true;
+  if (blockNumber === undefined) return false;
+  return blockNumber >= BigInt(LP_V2_CUTOVER_BLOCK);
+}
+
+function isLegacyV3PoolHardStopped(pool: string, timestamp: number, blockNumber?: bigint): boolean {
+  return normalizeAddress(pool) === LEGACY_V3_LP_POOL && isPastLpV2Cutover(timestamp, blockNumber);
+}
+
+function isLegacyV3ManagerHardStopped(
+  positionManager: string,
+  timestamp: number,
+  blockNumber?: bigint
+): boolean {
+  return (
+    normalizeAddress(positionManager) === LEGACY_V3_LP_POSITION_MANAGER &&
+    isPastLpV2Cutover(timestamp, blockNumber)
+  );
+}
+
+function getV2PositionId(pool: string, userId: string): string {
+  return `v2:${normalizeAddress(pool)}:${normalizeAddress(userId)}`;
+}
+
+function getSyntheticTokenIdFromAddress(address: string): bigint {
+  return BigInt(normalizeAddress(address));
+}
+
+async function ensurePoolInRegistry(context: handlerContext, pool: string, timestamp: number) {
+  const poolId = normalizeAddress(pool);
+  const registry = await context.LPPoolRegistry.get('global');
+  const existingPoolIds = registry?.poolIds ?? [];
+  if (!existingPoolIds.includes(poolId)) {
+    context.LPPoolRegistry.set({
+      id: 'global',
+      poolIds: [...existingPoolIds, poolId],
+      lastUpdate: timestamp,
+    });
+  }
+}
+
+async function ensurePoolState(
+  context: handlerContext,
+  pool: string,
+  timestamp: number,
+  overrides?: Partial<{
+    currentTick: number;
+    sqrtPriceX96: bigint;
+    token0Price: bigint;
+    token1Price: bigint;
+    feeProtocol0: number;
+    feeProtocol1: number;
+    lastUpdate: number;
+  }>
+) {
+  const poolId = normalizeAddress(pool);
+  const existing = await context.LPPoolState.get(poolId);
+  if (existing) {
+    return existing;
+  }
+
+  const state = {
+    id: poolId,
+    pool: poolId,
+    currentTick: 0,
+    sqrtPriceX96: 0n,
+    token0Price: 0n,
+    token1Price: 0n,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
+    lastUpdate: timestamp,
+    ...(overrides ?? {}),
+  };
+  context.LPPoolState.set(state);
+  return state;
+}
+
+async function getOrCreateLPPoolV2State(context: handlerContext, pool: string, timestamp: number) {
+  const poolId = normalizeAddress(pool);
+  let state = await context.LPPoolV2State.get(poolId);
+  if (!state) {
+    state = {
+      id: poolId,
+      pool: poolId,
+      reserve0: 0n,
+      reserve1: 0n,
+      lpTotalSupply: 0n,
+      lastUpdate: timestamp,
+    };
+    context.LPPoolV2State.set(state);
+  }
+  return state;
+}
+
+async function ensureLegacyV3PoolConfigEntity(context: handlerContext, timestamp: number) {
+  let config = await context.LPPoolConfig.get(LEGACY_V3_LP_POOL);
   if (config) return config;
 
   const leaderboardState = await context.LeaderboardState.get('current');
@@ -156,12 +296,12 @@ async function ensureHardcodedPoolConfig(context: handlerContext, timestamp: num
   const lpRateBps = globalConfig?.lpRateBps ?? 0n;
 
   config = {
-    id: HARDCODED_LP_POOL,
-    pool: HARDCODED_LP_POOL,
-    positionManager: HARDCODED_LP_POSITION_MANAGER,
-    token0: HARDCODED_LP_TOKEN0,
-    token1: HARDCODED_LP_TOKEN1,
-    fee: HARDCODED_LP_FEE,
+    id: LEGACY_V3_LP_POOL,
+    pool: LEGACY_V3_LP_POOL,
+    positionManager: LEGACY_V3_LP_POSITION_MANAGER,
+    token0: LEGACY_V3_LP_TOKEN0,
+    token1: LEGACY_V3_LP_TOKEN1,
+    fee: LEGACY_V3_LP_FEE,
     lpRateBps,
     isActive: true,
     enabledAtEpoch: currentEpoch,
@@ -172,32 +312,118 @@ async function ensureHardcodedPoolConfig(context: handlerContext, timestamp: num
   };
   context.LPPoolConfig.set(config);
 
-  const registry = await context.LPPoolRegistry.get('global');
-  const existingPoolIds = registry?.poolIds ?? [];
-  if (!existingPoolIds.includes(HARDCODED_LP_POOL)) {
-    context.LPPoolRegistry.set({
-      id: 'global',
-      poolIds: [...existingPoolIds, HARDCODED_LP_POOL],
-      lastUpdate: timestamp,
-    });
-  }
-
-  const existingState = await context.LPPoolState.get(HARDCODED_LP_POOL);
-  if (!existingState) {
-    context.LPPoolState.set({
-      id: HARDCODED_LP_POOL,
-      pool: HARDCODED_LP_POOL,
-      currentTick: 0,
-      sqrtPriceX96: 0n,
-      token0Price: 0n,
-      token1Price: 0n,
-      feeProtocol0: 0,
-      feeProtocol1: 0,
-      lastUpdate: timestamp,
-    });
-  }
+  await ensurePoolInRegistry(context, LEGACY_V3_LP_POOL, timestamp);
+  await ensurePoolState(context, LEGACY_V3_LP_POOL, timestamp);
 
   return config;
+}
+
+async function ensureV2PoolConfigEntity(
+  context: handlerContext,
+  timestamp: number,
+  isActive: boolean
+) {
+  const leaderboardState = await context.LeaderboardState.get('current');
+  const currentEpoch = leaderboardState?.currentEpochNumber ?? 1n;
+  const globalConfig = await context.LeaderboardConfig.get('global');
+  const lpRateBps = globalConfig?.lpRateBps ?? 0n;
+
+  const existing = await context.LPPoolConfig.get(V2_LP_POOL);
+  const config = {
+    id: V2_LP_POOL,
+    pool: V2_LP_POOL,
+    positionManager: V2_LP_POSITION_MANAGER,
+    token0: V2_LP_TOKEN0,
+    token1: V2_LP_TOKEN1,
+    fee: V2_LP_FEE,
+    lpRateBps: existing?.lpRateBps ?? lpRateBps,
+    isActive,
+    enabledAtEpoch: existing?.enabledAtEpoch ?? currentEpoch,
+    enabledAtTimestamp: existing?.enabledAtTimestamp ?? LP_V2_CUTOVER_TIMESTAMP,
+    disabledAtEpoch: isActive ? undefined : existing?.disabledAtEpoch,
+    disabledAtTimestamp: isActive ? undefined : existing?.disabledAtTimestamp,
+    lastUpdate: timestamp,
+  };
+  context.LPPoolConfig.set(config);
+  await ensurePoolInRegistry(context, V2_LP_POOL, timestamp);
+  await ensurePoolState(context, V2_LP_POOL, timestamp, {
+    currentTick: 0,
+    sqrtPriceX96: 0n,
+  });
+  await getOrCreateLPPoolV2State(context, V2_LP_POOL, timestamp);
+  return config;
+}
+
+export async function applyStaticLPPoolCutover(
+  context: handlerContext,
+  timestamp: number,
+  blockNumber?: bigint
+) {
+  const stores = context as unknown as CutoverStores;
+  if (
+    !stores.LPPoolConfig ||
+    !stores.LPPoolRegistry ||
+    !stores.LPPoolState ||
+    !stores.LPPoolV2State
+  ) {
+    return;
+  }
+
+  if (blockNumber !== undefined && blockNumber < LEGACY_V3_LP_START_BLOCK) {
+    return;
+  }
+
+  const registry = await stores.LPPoolRegistry.get('global');
+  const trackedPoolIds = registry?.poolIds ?? [];
+  const hasTrackedPools = trackedPoolIds.length > 0;
+  const hasStaticPoolInRegistry =
+    trackedPoolIds.includes(LEGACY_V3_LP_POOL) || trackedPoolIds.includes(V2_LP_POOL);
+  const legacyConfig = await stores.LPPoolConfig.get(LEGACY_V3_LP_POOL);
+  const v2Config = await stores.LPPoolConfig.get(V2_LP_POOL);
+  const shouldBootstrapStaticPools =
+    blockNumber !== undefined ||
+    !hasTrackedPools ||
+    hasStaticPoolInRegistry ||
+    legacyConfig !== undefined ||
+    v2Config !== undefined;
+
+  if (!shouldBootstrapStaticPools) {
+    return;
+  }
+  const ensuredLegacyConfig = await ensureLegacyV3PoolConfigEntity(context, timestamp);
+  const hasPassedCutover = isPastLpV2Cutover(timestamp, blockNumber);
+  if (!hasPassedCutover) {
+    if (!ensuredLegacyConfig.isActive) {
+      context.LPPoolConfig.set({
+        ...ensuredLegacyConfig,
+        isActive: true,
+        disabledAtEpoch: undefined,
+        disabledAtTimestamp: undefined,
+        lastUpdate: timestamp,
+      });
+    }
+    return;
+  }
+
+  await ensureV2PoolConfigEntity(context, timestamp, true);
+
+  if (ensuredLegacyConfig.isActive) {
+    await settleLPPoolPositions(context, LEGACY_V3_LP_POOL, LP_V2_CUTOVER_TIMESTAMP);
+    const leaderboardState = await context.LeaderboardState.get('current');
+    const currentEpoch = leaderboardState?.currentEpochNumber ?? 1n;
+    context.LPPoolConfig.set({
+      ...ensuredLegacyConfig,
+      isActive: false,
+      disabledAtEpoch: currentEpoch,
+      disabledAtTimestamp: LP_V2_CUTOVER_TIMESTAMP,
+      lastUpdate: timestamp,
+    });
+  }
+}
+
+async function ensureHardcodedPoolConfig(context: handlerContext, timestamp: number) {
+  const config = await ensureLegacyV3PoolConfigEntity(context, timestamp);
+  return config.isActive ? config : null;
 }
 
 async function getEffectiveLPPoolConfig(context: handlerContext, pool: string) {
@@ -283,13 +509,18 @@ export async function syncUserLPPositionsFromChain(
   if (!shouldUseEthCalls() || process.env.ENVIO_ENABLE_LP_CHAIN_SYNC !== 'true') {
     return;
   }
+  await applyStaticLPPoolCutover(context, timestamp, blockNumber);
 
   const normalizedUserId = normalizeAddress(userId);
   const configs = await listActiveLPPoolConfigs(context);
   if (configs.length === 0) return;
 
   let uniqueManagers = Array.from(
-    new Set(configs.map(config => normalizeAddress(config.positionManager)))
+    new Set(
+      configs
+        .filter(config => !isV2PoolConfig(config))
+        .map(config => normalizeAddress(config.positionManager))
+    )
   );
   if (options?.managers && options.managers.length > 0) {
     const allowedManagers = new Set(options.managers.map(manager => normalizeAddress(manager)));
@@ -834,10 +1065,12 @@ async function getPoolTokenDecimals(
   poolConfig: { token0: string; token1: string },
   timestamp?: number
 ): Promise<{ token0Decimals: number; token1Decimals: number }> {
-  const token0Fallback =
-    poolConfig.token0 === AUSD_ADDRESS ? AUSD_DECIMALS_FALLBACK : DUST_DECIMALS;
-  const token1Fallback =
-    poolConfig.token1 === AUSD_ADDRESS ? AUSD_DECIMALS_FALLBACK : DUST_DECIMALS;
+  const token0Fallback = isStableUsdToken(poolConfig.token0)
+    ? AUSD_DECIMALS_FALLBACK
+    : DUST_DECIMALS;
+  const token1Fallback = isStableUsdToken(poolConfig.token1)
+    ? AUSD_DECIMALS_FALLBACK
+    : DUST_DECIMALS;
   const token0Decimals = await getTokenDecimals(
     context,
     poolConfig.token0,
@@ -1084,8 +1317,8 @@ async function listPoolLPPositions(context: handlerContext, pool: string) {
 }
 
 async function getConfiguredLPPoolCount(context: handlerContext): Promise<number> {
-  const registry = await context.LPPoolRegistry.get('global');
-  return registry?.poolIds?.length ?? 0;
+  const configs = await listActiveLPPoolConfigs(context);
+  return configs.length;
 }
 
 async function getEffectiveLpRateBps(
@@ -1205,6 +1438,81 @@ function derivePositionAmounts(
   return { amount0, amount1, usedLiquidity: true };
 }
 
+function calculateTokenPriceFromStableReserves(
+  stableReserve: bigint,
+  tokenReserve: bigint,
+  stableDecimals: number,
+  tokenDecimals: number
+): bigint {
+  if (stableReserve <= 0n || tokenReserve <= 0n) return 0n;
+  // tokenPriceUsd = stablePriceUsd * (stableReserve / tokenReserve) * 10^(tokenDecimals-stableDecimals)
+  const numerator = BigInt(1e8) * stableReserve * 10n ** BigInt(tokenDecimals);
+  const denominator = tokenReserve * 10n ** BigInt(stableDecimals);
+  if (denominator === 0n) return 0n;
+  return numerator / denominator;
+}
+
+function calculateV2TokenPricesFromReserves(
+  token0: string,
+  token1: string,
+  reserve0: bigint,
+  reserve1: bigint,
+  token0Decimals: number,
+  token1Decimals: number,
+  fallbackToken0Price: bigint,
+  fallbackToken1Price: bigint
+): { token0Price: bigint; token1Price: bigint } {
+  const normalizedToken0 = normalizeAddress(token0);
+  const normalizedToken1 = normalizeAddress(token1);
+  const token0Stable = isStableUsdToken(normalizedToken0);
+  const token1Stable = isStableUsdToken(normalizedToken1);
+
+  if (token0Stable && reserve0 > 0n && reserve1 > 0n) {
+    return {
+      token0Price: BigInt(1e8),
+      token1Price: calculateTokenPriceFromStableReserves(
+        reserve0,
+        reserve1,
+        token0Decimals,
+        token1Decimals
+      ),
+    };
+  }
+
+  if (token1Stable && reserve0 > 0n && reserve1 > 0n) {
+    return {
+      token0Price: calculateTokenPriceFromStableReserves(
+        reserve1,
+        reserve0,
+        token1Decimals,
+        token0Decimals
+      ),
+      token1Price: BigInt(1e8),
+    };
+  }
+
+  return {
+    token0Price: fallbackToken0Price,
+    token1Price: fallbackToken1Price,
+  };
+}
+
+function calculateV2PositionAmounts(
+  liquidity: bigint,
+  reserve0: bigint,
+  reserve1: bigint,
+  totalSupply: bigint
+): { amount0: bigint; amount1: bigint } {
+  if (liquidity <= 0n || reserve0 < 0n || reserve1 < 0n || totalSupply <= 0n) {
+    return { amount0: 0n, amount1: 0n };
+  }
+
+  return {
+    amount0: (reserve0 * liquidity) / totalSupply,
+    amount1: (reserve1 * liquidity) / totalSupply,
+  };
+}
+
 /**
  * Settle LP points for a position based on accumulated in-range time
  * Called before any position state change to capture earned points
@@ -1248,11 +1556,15 @@ async function settleLPPosition(
     epochStart = currentTimestamp;
   }
 
+  if (normalizeAddress(position.pool) === LEGACY_V3_LP_POOL) {
+    effectiveTimestamp = Math.min(effectiveTimestamp, LP_V2_CUTOVER_TIMESTAMP);
+  }
+
   let additionalInRangeSeconds = 0n;
 
   // If position was in range, accumulate the time since last update
   if (position.isInRange && position.lastInRangeTimestamp > 0) {
-    const secondsElapsed = currentTimestamp - position.lastInRangeTimestamp;
+    const secondsElapsed = effectiveTimestamp - position.lastInRangeTimestamp;
     if (secondsElapsed > 0) {
       additionalInRangeSeconds = BigInt(secondsElapsed);
     }
@@ -1332,19 +1644,17 @@ async function settleLPPosition(
 // ============================================
 
 NonfungiblePositionManager.IncreaseLiquidity.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
+  const timestamp = Number(event.block.timestamp);
+  const blockNumber = BigInt(event.block.number);
+  const positionManager = normalizeAddress(event.srcAddress);
+  if (isLegacyV3ManagerHardStopped(positionManager, timestamp, blockNumber)) return;
+
+  await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
 
   const tokenId = event.params.tokenId;
   const positionId = tokenId.toString();
-  const timestamp = Number(event.block.timestamp);
-  const positionManager = normalizeAddress(event.srcAddress);
   const liquidityDelta = BigInt(event.params.liquidity);
-  const isHardcodedManager = positionManager === HARDCODED_LP_POSITION_MANAGER;
+  const isHardcodedManager = positionManager === LEGACY_V3_LP_POSITION_MANAGER;
   // For hardcoded manager, ensure config exists upfront
   const hardcodedConfig = isHardcodedManager
     ? await ensureHardcodedPoolConfig(context, timestamp)
@@ -1393,7 +1703,7 @@ NonfungiblePositionManager.IncreaseLiquidity.handler(async ({ event, context }) 
       if (mintData) {
         const mintPool = normalizeAddress(mintData.pool);
         poolConfig =
-          mintPool === HARDCODED_LP_POOL
+          mintPool === LEGACY_V3_LP_POOL
             ? await ensureHardcodedPoolConfig(context, timestamp)
             : await getActiveLPPoolConfig(context, mintPool);
         if (poolConfig) {
@@ -1505,7 +1815,7 @@ NonfungiblePositionManager.IncreaseLiquidity.handler(async ({ event, context }) 
 
   const existingPool = normalizeAddress(position.pool);
   const poolConfig =
-    existingPool === HARDCODED_LP_POOL
+    existingPool === LEGACY_V3_LP_POOL
       ? await ensureHardcodedPoolConfig(context, timestamp)
       : await getActiveLPPoolConfig(context, existingPool);
   if (!poolConfig) return;
@@ -1595,23 +1905,22 @@ NonfungiblePositionManager.IncreaseLiquidity.handler(async ({ event, context }) 
 });
 
 NonfungiblePositionManager.DecreaseLiquidity.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
+  const timestamp = Number(event.block.timestamp);
+  const blockNumber = BigInt(event.block.number);
+  const positionManager = normalizeAddress(event.srcAddress);
+  if (isLegacyV3ManagerHardStopped(positionManager, timestamp, blockNumber)) return;
+
+  await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
 
   const tokenId = event.params.tokenId;
   const positionId = tokenId.toString();
-  const timestamp = Number(event.block.timestamp);
 
   let position = await context.UserLPPosition.get(positionId);
   if (!position) return;
 
   const decreasePool = normalizeAddress(position.pool);
   const poolConfig =
-    decreasePool === HARDCODED_LP_POOL
+    decreasePool === LEGACY_V3_LP_POOL
       ? await ensureHardcodedPoolConfig(context, timestamp)
       : await getActiveLPPoolConfig(context, decreasePool);
   if (!poolConfig) return;
@@ -1700,21 +2009,18 @@ NonfungiblePositionManager.DecreaseLiquidity.handler(async ({ event, context }) 
 });
 
 NonfungiblePositionManager.Transfer.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
+  const timestamp = Number(event.block.timestamp);
+  const blockNumber = BigInt(event.block.number);
+  const positionManager = normalizeAddress(event.srcAddress);
+  if (isLegacyV3ManagerHardStopped(positionManager, timestamp, blockNumber)) return;
+
+  await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
 
   const tokenId = event.params.tokenId;
   const positionId = tokenId.toString();
   const from = normalizeAddress(event.params.from);
   const to = normalizeAddress(event.params.to);
-  const timestamp = Number(event.block.timestamp);
-  const blockNumber = BigInt(event.block.number);
-  const positionManager = normalizeAddress(event.srcAddress);
-  const isHardcodedManager = positionManager === HARDCODED_LP_POSITION_MANAGER;
+  const isHardcodedManager = positionManager === LEGACY_V3_LP_POSITION_MANAGER;
   // For hardcoded manager, ensure config exists upfront
   const hardcodedConfig = isHardcodedManager
     ? await ensureHardcodedPoolConfig(context, timestamp)
@@ -1773,7 +2079,7 @@ NonfungiblePositionManager.Transfer.handler(async ({ event, context }) => {
       if (mintData) {
         const mintPool = normalizeAddress(mintData.pool);
         poolConfig =
-          mintPool === HARDCODED_LP_POOL
+          mintPool === LEGACY_V3_LP_POOL
             ? await ensureHardcodedPoolConfig(context, timestamp)
             : await getActiveLPPoolConfig(context, mintPool);
         if (poolConfig) {
@@ -1990,8 +2296,11 @@ NonfungiblePositionManager.Transfer.handler(async ({ event, context }) => {
 UniswapV3Pool.Initialize.handler(async ({ event, context }) => {
   const pool = normalizeAddress(event.srcAddress);
   const timestamp = Number(event.block.timestamp);
+  const blockNumber = BigInt(event.block.number);
+  if (isLegacyV3PoolHardStopped(pool, timestamp, blockNumber)) return;
+  await applyStaticLPPoolCutover(context, timestamp, blockNumber);
   const poolConfig =
-    pool === HARDCODED_LP_POOL
+    pool === LEGACY_V3_LP_POOL
       ? await ensureHardcodedPoolConfig(context, timestamp)
       : await getActiveLPPoolConfig(context, pool);
   if (!poolConfig) return;
@@ -2037,10 +2346,13 @@ UniswapV3Pool.Initialize.handler(async ({ event, context }) => {
 UniswapV3Pool.Swap.handler(async ({ event, context }) => {
   const pool = normalizeAddress(event.srcAddress);
   const timestamp = Number(event.block.timestamp);
+  const blockNumber = BigInt(event.block.number);
+  if (isLegacyV3PoolHardStopped(pool, timestamp, blockNumber)) return;
+  await applyStaticLPPoolCutover(context, timestamp, blockNumber);
 
   // Check if this pool is tracked
   const poolConfig =
-    pool === HARDCODED_LP_POOL
+    pool === LEGACY_V3_LP_POOL
       ? await ensureHardcodedPoolConfig(context, timestamp)
       : await getActiveLPPoolConfig(context, pool);
   if (!poolConfig) return;
@@ -2110,15 +2422,18 @@ UniswapV3Pool.Swap.handler(async ({ event, context }) => {
     token0Decimals,
     token1Decimals
   );
-  await updatePoolFeeStats(context, poolConfig, volumeUsd, timestamp, BigInt(event.block.number));
+  await updatePoolFeeStats(context, poolConfig, volumeUsd, timestamp, blockNumber);
 });
 
 UniswapV3Pool.SetFeeProtocol.handler(async ({ event, context }) => {
   const pool = normalizeAddress(event.srcAddress);
   const timestamp = Number(event.block.timestamp);
+  const blockNumber = BigInt(event.block.number);
+  if (isLegacyV3PoolHardStopped(pool, timestamp, blockNumber)) return;
+  await applyStaticLPPoolCutover(context, timestamp, blockNumber);
 
   const poolConfig =
-    pool === HARDCODED_LP_POOL
+    pool === LEGACY_V3_LP_POOL
       ? await ensureHardcodedPoolConfig(context, timestamp)
       : await getActiveLPPoolConfig(context, pool);
   if (!poolConfig) return;
@@ -2138,23 +2453,21 @@ UniswapV3Pool.SetFeeProtocol.handler(async ({ event, context }) => {
 });
 
 UniswapV3Pool.Mint.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-
+  const timestamp = Number(event.block.timestamp);
+  const blockNumber = BigInt(event.block.number);
   const pool = normalizeAddress(event.srcAddress);
+  if (isLegacyV3PoolHardStopped(pool, timestamp, blockNumber)) return;
+
+  await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
+
   let poolConfig: Awaited<ReturnType<typeof getActiveLPPoolConfig>> = null;
-  if (pool === HARDCODED_LP_POOL) {
-    poolConfig = await ensureHardcodedPoolConfig(context, Number(event.block.timestamp));
+  if (pool === LEGACY_V3_LP_POOL) {
+    poolConfig = await ensureHardcodedPoolConfig(context, timestamp);
   } else {
     poolConfig = await getActiveLPPoolConfig(context, pool);
   }
   if (!poolConfig) return;
 
-  const timestamp = Number(event.block.timestamp);
   const tickLower = Number(event.params.tickLower);
   const tickUpper = Number(event.params.tickUpper);
   const owner = normalizeAddress(event.params.owner);
@@ -2205,6 +2518,196 @@ UniswapV3Pool.Mint.handler(async ({ event, context }) => {
 });
 
 UniswapV3Pool.Burn.handler(async ({ event, context }) => {
+  const timestamp = Number(event.block.timestamp);
+  const blockNumber = BigInt(event.block.number);
+  const pool = normalizeAddress(event.srcAddress);
+  if (isLegacyV3PoolHardStopped(pool, timestamp, blockNumber)) return;
+
+  await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
+
+  // Burn is handled via DecreaseLiquidity on PositionManager
+});
+
+// ============================================
+//     UniswapV2Pair Handlers
+// ============================================
+
+async function applyV2LiquidityDelta(
+  context: handlerContext,
+  poolConfig: LPPoolConfig_t,
+  userId: string,
+  delta: bigint,
+  timestamp: number,
+  poolState: Awaited<ReturnType<typeof getOrCreateLPPoolState>>,
+  poolV2State: Awaited<ReturnType<typeof getOrCreateLPPoolV2State>>,
+  token0Decimals: number,
+  token1Decimals: number
+): Promise<boolean> {
+  const normalizedUserId = normalizeAddress(userId);
+  if (normalizedUserId === ZERO_ADDRESS || delta === 0n) return false;
+
+  const pool = normalizeAddress(poolConfig.pool);
+  const positionId = getV2PositionId(pool, normalizedUserId);
+  const existing = await context.UserLPPosition.get(positionId);
+  await getOrCreateUser(context, normalizedUserId);
+
+  const settlement = existing
+    ? await settleLPPosition(context, existing, timestamp)
+    : {
+        newAccumulatedSeconds: 0n,
+        newSettledPoints: 0n,
+        pointsEarned: 0n,
+        settledAt: timestamp,
+        pointsStartTimestamp: 0,
+        pointsEndTimestamp: timestamp,
+      };
+
+  if (existing && settlement.pointsEarned > 0n) {
+    await updateUserEpochLPPoints(
+      context,
+      normalizedUserId,
+      settlement.pointsEarned,
+      timestamp,
+      settlement.pointsStartTimestamp,
+      settlement.pointsEndTimestamp
+    );
+  }
+
+  const previousLiquidity = existing?.liquidity ?? 0n;
+  let liquidity = previousLiquidity + delta;
+  if (liquidity < 0n) liquidity = 0n;
+
+  const reserve0 = poolV2State.reserve0;
+  const reserve1 = poolV2State.reserve1;
+  const totalSupply = poolV2State.lpTotalSupply;
+  const { amount0, amount1 } = calculateV2PositionAmounts(
+    liquidity,
+    reserve0,
+    reserve1,
+    totalSupply
+  );
+  const valueUsd = calculatePositionValueUsd(
+    amount0,
+    amount1,
+    poolState.token0Price,
+    poolState.token1Price,
+    token0Decimals,
+    token1Decimals
+  );
+  const isActive = liquidity > 0n;
+
+  context.UserLPPosition.set({
+    id: positionId,
+    tokenId: getSyntheticTokenIdFromAddress(normalizedUserId),
+    user_id: normalizedUserId,
+    pool,
+    positionManager: pool,
+    tickLower: V2_TICK_LOWER,
+    tickUpper: V2_TICK_UPPER,
+    liquidity,
+    amount0,
+    amount1,
+    isInRange: isActive,
+    valueUsd,
+    lastInRangeTimestamp: isActive ? timestamp : 0,
+    accumulatedInRangeSeconds: settlement.newAccumulatedSeconds,
+    lastSettledAt: settlement.settledAt,
+    settledLpPoints: settlement.newSettledPoints,
+    createdAt: existing?.createdAt ?? timestamp,
+    lastUpdate: timestamp,
+  });
+
+  if (isActive) {
+    await addPositionToUserIndex(context, normalizedUserId, positionId, timestamp);
+    await addPositionToPoolIndex(context, pool, positionId, timestamp);
+  } else {
+    await removePositionFromUserIndex(context, normalizedUserId, positionId, timestamp);
+    await removePositionFromPoolIndex(context, pool, positionId, timestamp);
+  }
+
+  return true;
+}
+
+async function settleV2PoolPositions(
+  context: handlerContext,
+  pool: string,
+  timestamp: number
+): Promise<void> {
+  const poolId = normalizeAddress(pool);
+  const poolConfig = await getActiveLPPoolConfig(context, poolId);
+  if (!poolConfig || !isV2PoolConfig(poolConfig)) return;
+
+  const poolState = await getOrCreateLPPoolState(context, poolId, timestamp);
+  const poolV2State = await getOrCreateLPPoolV2State(context, poolId, timestamp);
+  const reserve0 = poolV2State.reserve0;
+  const reserve1 = poolV2State.reserve1;
+  const totalSupply = poolV2State.lpTotalSupply;
+  const { token0Decimals, token1Decimals } = await getPoolTokenDecimals(
+    context,
+    poolConfig,
+    timestamp
+  );
+
+  const positions = await listPoolLPPositions(context, poolId);
+  if (positions.length === 0) {
+    await updatePoolLPStats(context, poolId, timestamp);
+    return;
+  }
+
+  const touchedUsers = new Set<string>();
+  for (const position of positions) {
+    if (!position.id.startsWith('v2:')) continue;
+    if (position.liquidity <= 0n) continue;
+
+    const settlement = await settleLPPosition(context, position, timestamp);
+    if (settlement.pointsEarned > 0n) {
+      await updateUserEpochLPPoints(
+        context,
+        position.user_id,
+        settlement.pointsEarned,
+        timestamp,
+        settlement.pointsStartTimestamp,
+        settlement.pointsEndTimestamp
+      );
+    }
+
+    const { amount0, amount1 } = calculateV2PositionAmounts(
+      position.liquidity,
+      reserve0,
+      reserve1,
+      totalSupply
+    );
+    const valueUsd = calculatePositionValueUsd(
+      amount0,
+      amount1,
+      poolState.token0Price,
+      poolState.token1Price,
+      token0Decimals,
+      token1Decimals
+    );
+
+    context.UserLPPosition.set({
+      ...position,
+      amount0,
+      amount1,
+      isInRange: true,
+      valueUsd,
+      lastInRangeTimestamp: timestamp,
+      accumulatedInRangeSeconds: settlement.newAccumulatedSeconds,
+      lastSettledAt: settlement.settledAt,
+      settledLpPoints: settlement.newSettledPoints,
+      lastUpdate: timestamp,
+    });
+    touchedUsers.add(position.user_id);
+  }
+
+  for (const userId of touchedUsers) {
+    await updateUserLPStats(context, userId, timestamp);
+  }
+  await updatePoolLPStats(context, poolId, timestamp);
+}
+
+UniswapV2Pair.Transfer.handler(async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -2212,7 +2715,169 @@ UniswapV3Pool.Burn.handler(async ({ event, context }) => {
     BigInt(event.block.number)
   );
 
-  // Burn is handled via DecreaseLiquidity on PositionManager
+  const pool = normalizeAddress(event.srcAddress);
+  const timestamp = Number(event.block.timestamp);
+  const poolConfig = await getActiveLPPoolConfig(context, pool);
+  if (!poolConfig || !isV2PoolConfig(poolConfig)) return;
+
+  const amount = event.params.value;
+  if (amount <= 0n) return;
+
+  const from = normalizeAddress(event.params.from);
+  const to = normalizeAddress(event.params.to);
+  const existingPoolState = await getOrCreateLPPoolState(context, pool, timestamp);
+  const existingPoolV2State = await getOrCreateLPPoolV2State(context, pool, timestamp);
+
+  let nextTotalSupply = existingPoolV2State.lpTotalSupply;
+  if (from === ZERO_ADDRESS) {
+    nextTotalSupply += amount;
+  } else if (to === ZERO_ADDRESS) {
+    nextTotalSupply = nextTotalSupply > amount ? nextTotalSupply - amount : 0n;
+  }
+
+  const nextPoolV2State = {
+    ...existingPoolV2State,
+    lpTotalSupply: nextTotalSupply,
+    reserve0: existingPoolV2State.reserve0,
+    reserve1: existingPoolV2State.reserve1,
+    lastUpdate: timestamp,
+  };
+  context.LPPoolV2State.set(nextPoolV2State);
+  context.LPPoolState.set({
+    ...existingPoolState,
+    lastUpdate: timestamp,
+  });
+
+  const { token0Decimals, token1Decimals } = await getPoolTokenDecimals(
+    context,
+    poolConfig,
+    timestamp
+  );
+  const touchedUsers = new Set<string>();
+  if (from !== ZERO_ADDRESS) {
+    const changed = await applyV2LiquidityDelta(
+      context,
+      poolConfig,
+      from,
+      -amount,
+      timestamp,
+      existingPoolState,
+      nextPoolV2State,
+      token0Decimals,
+      token1Decimals
+    );
+    if (changed) touchedUsers.add(from);
+  }
+
+  if (to !== ZERO_ADDRESS) {
+    const changed = await applyV2LiquidityDelta(
+      context,
+      poolConfig,
+      to,
+      amount,
+      timestamp,
+      existingPoolState,
+      nextPoolV2State,
+      token0Decimals,
+      token1Decimals
+    );
+    if (changed) touchedUsers.add(to);
+  }
+
+  for (const userId of touchedUsers) {
+    await updateUserLPStats(context, userId, timestamp);
+  }
+  await updatePoolLPStats(context, pool, timestamp);
+});
+
+UniswapV2Pair.Swap.handler(async ({ event, context }) => {
+  const timestamp = Number(event.block.timestamp);
+  const blockNumber = BigInt(event.block.number);
+  await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
+
+  const pool = normalizeAddress(event.srcAddress);
+  const poolConfig = await getActiveLPPoolConfig(context, pool);
+  if (!poolConfig || !isV2PoolConfig(poolConfig)) return;
+
+  const poolState = await getOrCreateLPPoolState(context, pool, timestamp);
+  const { token0Decimals, token1Decimals } = await getPoolTokenDecimals(
+    context,
+    poolConfig,
+    timestamp
+  );
+
+  let token0Price = poolState.token0Price;
+  let token1Price = poolState.token1Price;
+  if (token0Price === 0n && isStableUsdToken(poolConfig.token0)) {
+    token0Price = getAusdPrice();
+  }
+  if (token1Price === 0n && isStableUsdToken(poolConfig.token1)) {
+    token1Price = getAusdPrice();
+  }
+
+  const amount0 = event.params.amount0In - event.params.amount0Out;
+  const amount1 = event.params.amount1In - event.params.amount1Out;
+  const volumeUsd = calculateSwapVolumeUsd(
+    amount0,
+    amount1,
+    token0Price,
+    token1Price,
+    token0Decimals,
+    token1Decimals
+  );
+  await updatePoolFeeStats(context, poolConfig, volumeUsd, timestamp, blockNumber);
+});
+
+UniswapV2Pair.Sync.handler(async ({ event, context }) => {
+  await recordProtocolTransaction(
+    context,
+    event.transaction.hash,
+    Number(event.block.timestamp),
+    BigInt(event.block.number)
+  );
+
+  const pool = normalizeAddress(event.srcAddress);
+  const timestamp = Number(event.block.timestamp);
+  const poolConfig = await getActiveLPPoolConfig(context, pool);
+  if (!poolConfig || !isV2PoolConfig(poolConfig)) return;
+
+  const reserve0 = BigInt(event.params.reserve0);
+  const reserve1 = BigInt(event.params.reserve1);
+  const poolState = await getOrCreateLPPoolState(context, pool, timestamp);
+  const poolV2State = await getOrCreateLPPoolV2State(context, pool, timestamp);
+  const { token0Decimals, token1Decimals } = await getPoolTokenDecimals(
+    context,
+    poolConfig,
+    timestamp
+  );
+  const nextPrices = calculateV2TokenPricesFromReserves(
+    poolConfig.token0,
+    poolConfig.token1,
+    reserve0,
+    reserve1,
+    token0Decimals,
+    token1Decimals,
+    poolState.token0Price,
+    poolState.token1Price
+  );
+
+  context.LPPoolState.set({
+    ...poolState,
+    currentTick: 0,
+    sqrtPriceX96: 0n,
+    token0Price: nextPrices.token0Price,
+    token1Price: nextPrices.token1Price,
+    lastUpdate: timestamp,
+  });
+  context.LPPoolV2State.set({
+    ...poolV2State,
+    reserve0,
+    reserve1,
+    lpTotalSupply: poolV2State.lpTotalSupply,
+    lastUpdate: timestamp,
+  });
+
+  await settleV2PoolPositions(context, pool, timestamp);
 });
 
 // ============================================
@@ -2338,6 +3003,7 @@ export async function settleUserLPPositions(
   timestamp: number,
   blockNumber?: bigint
 ): Promise<void> {
+  await applyStaticLPPoolCutover(context, timestamp, blockNumber);
   const normalizedUserId = normalizeAddress(userId);
   const positions = await listUserLPPositions(context, normalizedUserId);
   if (positions.length === 0) return;
@@ -2521,6 +3187,7 @@ export async function settleAllLPPoolPositions(
   context: handlerContext,
   timestamp: number
 ): Promise<void> {
+  await applyStaticLPPoolCutover(context, timestamp);
   const configs = await listActiveLPPoolConfigs(context);
   if (configs.length === 0) return;
 

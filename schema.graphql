@@ -1527,6 +1527,15 @@ type LPPoolState {
   lastUpdate: Int!
 }
 
+type LPPoolV2State {
+  id: ID!
+  pool: String! @index
+  reserve0: BigInt!
+  reserve1: BigInt!
+  lpTotalSupply: BigInt!
+  lastUpdate: Int!
+}
+
 type LPPoolStats {
   id: ID!
   pool: String! @index

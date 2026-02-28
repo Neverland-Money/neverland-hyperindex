@@ -344,3 +344,14 @@ networks:
           - event: Mint(address sender, address indexed owner, int24 indexed tickLower, int24 indexed tickUpper, uint128 amount, uint256 amount0, uint256 amount1)
           - event: Burn(address indexed owner, int24 indexed tickLower, int24 indexed tickUpper, uint128 amount, uint256 amount0, uint256 amount1)
           - event: SetFeeProtocol(uint8 feeProtocol0Old, uint8 feeProtocol1Old, uint8 feeProtocol0New, uint8 feeProtocol1New)
+
+      # UniswapV2 USDC/DUST pair (LP points cutover from V3 at block 56436798)
+      - name: UniswapV2Pair
+        abi_file_path: abis/uniswap/UniswapV2Pair.json
+        address: 0x86dBF00485871C901C5129bD525348Db96c2eB2d
+        start_block: 56436798
+        handler: src/handlers/lp.ts
+        events:
+          - event: Transfer(address indexed from, address indexed to, uint256 value)
+          - event: Swap(address indexed sender, uint256 amount0In, uint256 amount1In, uint256 amount0Out, uint256 amount1Out, address indexed to)
+          - event: Sync(uint112 reserve0, uint112 reserve1)

@@ -18,6 +18,10 @@ import { normalizeAddress } from '../helpers/constants';
 const BASIS_POINTS = 10000n;
 const MAX_COMBINED_MULTIPLIER = 100000n;
 
+function shouldSyncChainStateOnKeeperSettlement(): boolean {
+  return process.env.ENVIO_KEEPER_USER_SETTLED_SYNC_CHAIN === 'true';
+}
+
 async function getOrCreateKeeperState(context: handlerContext, timestamp: number) {
   let state = await context.LeaderboardKeeperState.get('current');
   if (!state) {
@@ -202,8 +206,11 @@ LeaderboardKeeper.UserSettled.handler(async ({ event, context }) => {
     txHash: event.transaction.hash,
   });
 
+  const syncChainState = shouldSyncChainStateOnKeeperSettlement();
   await settlePointsForAllReserves(context, userId, timestamp, blockNumber, {
     ignoreCooldown: true,
+    skipNftSync: !syncChainState,
+    skipLPChainSync: !syncChainState,
   });
 });
 
