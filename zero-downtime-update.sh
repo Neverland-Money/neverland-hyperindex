@@ -1,11 +1,27 @@
 #!/bin/bash
+#
+# Minimal-downtime upgrade / resync of the indexer stack.
+#
+# Flow:
+#   1. git pull latest code
+#   2. Bring up a parallel "staging" stack (docker-compose.staging.yml) with
+#      its own postgres / hasura / indexer on isolated volumes + localhost ports.
+#   3. Wait for staging indexer to finish syncing ("synced" in logs).
+#   4. Ask for confirmation.
+#   5. Stop prod → back up prod volume → copy staging volume into prod volume →
+#      rename envio_staging → envio → start prod.
+#   6. Verify prod via internal docker network (Hasura isn't published).
+#
+# Real downtime during the swap is ~10s (prod containers stop, volume copy,
+# prod containers start). True zero-downtime would require flipping the
+# Cloudflare Tunnel ingress route live, which is a bigger change.
+#
+# Run from this directory, as a user with docker group membership
+# (catalyst or deploy). No sudo needed.
 
-set -e
+set -euo pipefail
 
-echo "========================================"
-echo "Production Upgrade"
-echo "========================================"
-echo ""
+cd "$(dirname "$0")"
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -13,177 +29,195 @@ BLUE='\033[0;34m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+# --- Config derived from the working directory (so this script is portable) ---
+PROJECT="$(basename "$PWD")"                 # e.g. "indexer"
+PROD_VOLUME="${PROJECT}_postgres_data"        # e.g. "indexer_postgres_data"
+STAGING_VOLUME="${PROJECT}_postgres_data_staging"
+TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
+BACKUP_VOLUME="${PROD_VOLUME}_backup_${TIMESTAMP}"
 
-# Step 1: Pull latest code
-echo -e "${BLUE}Step 1/8: Pulling latest code from repository...${NC}"
-git fetch && git pull
-if [ $? -ne 0 ]; then
-  echo -e "${RED}✗ Git pull failed${NC}"
-  echo "Please resolve any git conflicts and try again."
-  exit 1
+PROD_COMPOSE="docker-compose.prod.yml"
+STAGING_COMPOSE="docker-compose.staging.yml"
+
+# Load .env (for HASURA_ADMIN_SECRET, POSTGRES_*, etc.)
+if [ ! -f .env ]; then
+    echo -e "${RED}✗ .env not found in $PWD${NC}" >&2
+    exit 1
 fi
+set -a
+# shellcheck disable=SC1091
+source .env
+set +a
+
+if [ -z "${HASURA_ADMIN_SECRET:-}" ]; then
+    echo -e "${RED}✗ HASURA_ADMIN_SECRET not set in .env${NC}" >&2
+    exit 1
+fi
+
+echo "========================================"
+echo "Indexer minimal-downtime upgrade"
+echo "  project:        $PROJECT"
+echo "  prod volume:    $PROD_VOLUME"
+echo "  staging volume: $STAGING_VOLUME"
+echo "  backup volume:  $BACKUP_VOLUME"
+echo "========================================"
+echo ""
+
+# --- Step 1: Pull latest code ---
+echo -e "${BLUE}Step 1/8: Pulling latest code...${NC}"
+git fetch && git pull
 echo -e "${GREEN}✓ Code updated${NC}"
 echo ""
 
-# Step 2: Clean and start staging environment
-echo -e "${BLUE}Step 2/8: Starting fresh staging environment...${NC}"
-echo "Cleaning up any existing staging containers and volumes..."
-docker-compose -f docker-compose.staging.yml down -v 2>/dev/null || true
-echo ""
-echo "Starting staging (this will compile the latest code)..."
-docker-compose -f docker-compose.staging.yml up -d
+# --- Step 2: Clean and start staging ---
+echo -e "${BLUE}Step 2/8: Starting a fresh staging stack...${NC}"
+docker compose -f "$STAGING_COMPOSE" down -v 2>/dev/null || true
+docker compose -f "$STAGING_COMPOSE" up -d
 echo -e "${GREEN}✓ Staging started${NC}"
 echo ""
 
-# Step 3: Wait for staging to be healthy
-echo -e "${BLUE}Step 3/8: Waiting for staging services to be healthy...${NC}"
-echo "This may take 30-60 seconds..."
-sleep 30
-
-# Wait for Hasura staging to be healthy
-until [ "$(docker inspect -f {{.State.Health.Status}} neverland-hasura-staging 2>/dev/null)" == "healthy" ]; do
-  echo "Waiting for Hasura staging to be healthy..."
-  sleep 5
+# --- Step 3: Wait for staging hasura healthy ---
+echo -e "${BLUE}Step 3/8: Waiting for staging Hasura to become healthy...${NC}"
+for _ in $(seq 1 60); do
+    status=$(docker inspect -f '{{.State.Health.Status}}' neverland-hasura-staging 2>/dev/null || echo "starting")
+    [ "$status" = "healthy" ] && break
+    echo "  Hasura staging: $status"
+    sleep 5
 done
-echo -e "${GREEN}✓ Staging services healthy${NC}"
-echo ""
-
-# Step 4: Monitor staging sync
-echo -e "${BLUE}Step 4/8: Waiting for staging to sync...${NC}"
-echo "You can monitor in another terminal with:"
-echo "  docker-compose -f docker-compose.staging.yml logs -f indexer-staging"
-echo ""
-echo "Waiting for sync to complete (checking every 30 seconds)..."
-echo "Press Ctrl+C if you want to check manually and continue when ready."
-echo ""
-
-# Wait for sync to complete (look for "synced" in logs)
-while true; do
-  if docker-compose -f docker-compose.staging.yml logs --tail=100 indexer-staging 2>/dev/null | grep -q "synced"; then
-    echo -e "${GREEN}✓ Staging indexer is synced!${NC}"
-    break
-  fi
-  
-  # Check if indexer is still running
-  if [ "$(docker inspect -f {{.State.Status}} neverland-indexer-staging 2>/dev/null)" != "running" ]; then
-    echo -e "${RED}✗ Staging indexer stopped unexpectedly${NC}"
-    echo "Check logs with: docker-compose -f docker-compose.staging.yml logs indexer-staging"
+if [ "$(docker inspect -f '{{.State.Health.Status}}' neverland-hasura-staging 2>/dev/null)" != "healthy" ]; then
+    echo -e "${RED}✗ Staging Hasura did not become healthy in time${NC}" >&2
     exit 1
-  fi
-  
-  echo "Still syncing... (check logs for progress)"
-  sleep 30
+fi
+echo -e "${GREEN}✓ Staging Hasura healthy${NC}"
+echo ""
+
+# --- Step 4: Wait for staging indexer to sync ---
+echo -e "${BLUE}Step 4/8: Waiting for staging indexer to finish syncing...${NC}"
+echo "  Tail in another terminal:"
+echo "    docker logs -f neverland-indexer-staging"
+echo ""
+while true; do
+    if docker logs --tail 200 neverland-indexer-staging 2>&1 | grep -qi "synced"; then
+        echo -e "${GREEN}✓ Staging indexer synced${NC}"
+        break
+    fi
+    if [ "$(docker inspect -f '{{.State.Status}}' neverland-indexer-staging 2>/dev/null)" != "running" ]; then
+        echo -e "${RED}✗ Staging indexer stopped unexpectedly${NC}" >&2
+        echo "  docker logs neverland-indexer-staging" >&2
+        exit 1
+    fi
+    echo "  Still syncing..."
+    sleep 30
 done
 echo ""
 
-# Step 5: Verify staging data
-echo -e "${BLUE}Step 5/8: Verifying staging data...${NC}"
-response=$(curl -s -o /dev/null -w "%{http_code}" \
-  -X POST http://localhost:8081/v1/graphql \
-  -H "x-hasura-admin-secret: ${HASURA_ADMIN_SECRET:-H9bN8Q9waXiS}" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "{ User(limit: 1) { id } }"}' \
-  --max-time 10)
+# --- Step 5: Verify staging via internal docker network ---
+echo -e "${BLUE}Step 5/8: Verifying staging GraphQL endpoint...${NC}"
+staging_code=$(docker exec neverland-indexer-staging curl -s -o /dev/null -w "%{http_code}" \
+    -X POST http://hasura-staging:8080/v1/graphql \
+    -H "x-hasura-admin-secret: $HASURA_ADMIN_SECRET" \
+    -H "Content-Type: application/json" \
+    -d '{"query": "{ __typename }"}' \
+    --max-time 10 || echo "000")
 
-if [ "$response" == "200" ]; then
-  echo -e "${GREEN}✓ Staging GraphQL endpoint is working${NC}"
+if [ "$staging_code" = "200" ]; then
+    echo -e "${GREEN}✓ Staging GraphQL OK${NC}"
 else
-  echo -e "${RED}✗ Staging GraphQL endpoint returned HTTP $response${NC}"
-  echo "Please verify staging manually before continuing."
-  exit 1
+    echo -e "${RED}✗ Staging GraphQL returned HTTP $staging_code${NC}" >&2
+    echo "  Verify manually then re-run or continue by hand." >&2
+    exit 1
 fi
 echo ""
 
-# Step 6: Confirm switch
-echo -e "${YELLOW}Step 6/8: Ready to switch to new production${NC}"
-echo "This will:"
-echo "  1. Stop production services (~5 seconds downtime starts)"
-echo "  2. Backup production database volume"
-echo "  3. Replace production volume with staging volume"
-echo "  4. Rename database from 'envio_staging' to 'envio'"
-echo "  5. Start production with new database (~10 seconds total downtime)"
-echo ""
-read -p "Continue with the switch? (y/n) " -n 1 -r
-echo
+# --- Step 6: Confirm swap ---
+echo -e "${YELLOW}Step 6/8: Ready to swap prod → staging volume.${NC}"
+cat <<EOF
+
+  This will:
+    1. Stop prod containers  (~10s GraphQL outage starts)
+    2. Back up current prod volume as:   $BACKUP_VOLUME
+    3. Replace prod volume contents with staging volume contents
+    4. Rename DB  envio_staging → envio  in the new prod volume
+    5. Bring prod back up     (~10s outage ends)
+
+EOF
+read -r -p "Continue? (y/n) " REPLY
 if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-  echo "Cancelled. Staging is still running on ports 8081, 5433, 9091"
-  exit 0
+    echo "Cancelled. Staging is still running (volumes intact)."
+    exit 0
 fi
 echo ""
 
-# Step 7: Stop production and swap volumes
-echo -e "${BLUE}Step 7/8: Swapping production to staging database...${NC}"
-echo "Stopping production..."
-docker-compose -f docker-compose.prod.yml down
+# --- Step 7: Swap ---
+echo -e "${BLUE}Step 7/8: Performing swap...${NC}"
+echo "  Stopping prod..."
+docker compose -f "$PROD_COMPOSE" down
 
-echo "Backing up production database volume..."
-docker volume rm neverland-hyperindex_postgres_data_backup_${TIMESTAMP} 2>/dev/null || true
-docker volume create neverland-hyperindex_postgres_data_backup_${TIMESTAMP}
+echo "  Creating backup volume: $BACKUP_VOLUME"
+docker volume create "$BACKUP_VOLUME" >/dev/null
 docker run --rm \
-  -v neverland-hyperindex_postgres_data:/from \
-  -v neverland-hyperindex_postgres_data_backup_${TIMESTAMP}:/to \
-  alpine sh -c "cd /from && cp -a . /to" 2>/dev/null || true
+    -v "$PROD_VOLUME":/from:ro \
+    -v "$BACKUP_VOLUME":/to \
+    alpine sh -c 'cd /from && cp -a . /to'
 
-echo "Replacing production volume with staging volume..."
-docker volume rm neverland-hyperindex_postgres_data
-docker volume create neverland-hyperindex_postgres_data
+echo "  Replacing prod volume from staging volume..."
+docker volume rm "$PROD_VOLUME" >/dev/null
+docker volume create "$PROD_VOLUME" >/dev/null
 docker run --rm \
-  -v neverland-hyperindex_postgres_data_staging:/from \
-  -v neverland-hyperindex_postgres_data:/to \
-  alpine sh -c "cd /from && cp -a . /to"
+    -v "$STAGING_VOLUME":/from:ro \
+    -v "$PROD_VOLUME":/to \
+    alpine sh -c 'cd /from && cp -a . /to'
 
-echo "Starting production with new database..."
-docker-compose -f docker-compose.prod.yml up -d postgres
-sleep 5
+echo "  Starting prod postgres only..."
+docker compose -f "$PROD_COMPOSE" up -d postgres
 
-echo "Renaming database from 'envio_staging' to 'envio'..."
-docker exec -i neverland-postgres psql -U postgres -c "ALTER DATABASE envio_staging RENAME TO envio;" 2>/dev/null || echo "(Database may already be named 'envio')"
+echo "  Waiting for prod postgres healthy..."
+for _ in $(seq 1 30); do
+    status=$(docker inspect -f '{{.State.Health.Status}}' neverland-postgres 2>/dev/null || echo "starting")
+    [ "$status" = "healthy" ] && break
+    sleep 2
+done
 
-echo "Starting all production services..."
-docker-compose -f docker-compose.prod.yml up -d
+echo "  Renaming envio_staging → envio (if needed)..."
+docker exec -i neverland-postgres psql -U postgres -c \
+    "ALTER DATABASE envio_staging RENAME TO envio;" 2>/dev/null || true
 
-echo -e "${GREEN}✓ Production switched to new database${NC}"
+echo "  Starting remaining prod services..."
+docker compose -f "$PROD_COMPOSE" up -d
+echo -e "${GREEN}✓ Prod restarted with swapped database${NC}"
 echo ""
 
-# Step 8: Verify production
-echo -e "${BLUE}Step 8/8: Verifying production...${NC}"
+# --- Step 8: Verify prod via internal network ---
+echo -e "${BLUE}Step 8/8: Verifying prod GraphQL endpoint...${NC}"
 sleep 10
-
-response=$(curl -s -o /dev/null -w "%{http_code}" \
-  -X POST http://localhost:8080/v1/graphql \
-  -H "x-hasura-admin-secret: ${HASURA_ADMIN_SECRET:-H9bN8Q9waXiS}" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "{ User(limit: 1) { id } }"}' \
-  --max-time 10)
-
-if [ "$response" == "200" ]; then
-  echo -e "${GREEN}✓ Production GraphQL endpoint is working${NC}"
+prod_code=$(docker exec neverland-indexer curl -s -o /dev/null -w "%{http_code}" \
+    -X POST http://hasura:8080/v1/graphql \
+    -H "x-hasura-admin-secret: $HASURA_ADMIN_SECRET" \
+    -H "Content-Type: application/json" \
+    -d '{"query": "{ __typename }"}' \
+    --max-time 10 || echo "000")
+if [ "$prod_code" = "200" ]; then
+    echo -e "${GREEN}✓ Prod GraphQL OK${NC}"
 else
-  echo -e "${RED}✗ Production GraphQL endpoint returned HTTP $response${NC}"
-  echo "You may need to check production logs."
+    echo -e "${RED}✗ Prod GraphQL returned HTTP $prod_code${NC}" >&2
+    echo "  Check:  docker logs neverland-hasura" >&2
 fi
 echo ""
 
-# Cleanup instructions
 echo -e "${GREEN}========================================"
-echo "✓ Production upgrade complete!"
+echo "✓ Upgrade complete!"
 echo -e "========================================${NC}"
-echo ""
-echo "Next steps:"
-echo ""
-echo "1. Verify production is working correctly"
-echo "2. Clean up staging when satisfied:"
-echo "   docker-compose -f docker-compose.staging.yml down -v"
-echo ""
-echo "3. Clean up old backups when satisfied:"
-echo "   docker volume rm neverland-hyperindex_postgres_data_backup_${TIMESTAMP}"
-echo ""
-echo "Rollback instructions (if needed):"
-echo "  docker-compose -f docker-compose.prod.yml down"
-echo "  docker volume rm neverland-hyperindex_postgres_data"
-echo "  docker volume create neverland-hyperindex_postgres_data"
-echo "  docker run --rm -v neverland-hyperindex_postgres_data_backup_${TIMESTAMP}:/from -v neverland-hyperindex_postgres_data:/to alpine sh -c 'cd /from && cp -a . /to'"
-echo "  docker exec -i neverland-postgres psql -U postgres -c 'ALTER DATABASE envio_staging RENAME TO envio;' || true"
-echo "  docker-compose -f docker-compose.prod.yml up -d"
-echo ""
+cat <<EOF
+
+Cleanup when you're satisfied:
+  docker compose -f $STAGING_COMPOSE down -v
+  docker volume rm $BACKUP_VOLUME
+
+Rollback (only if you need to revert):
+  docker compose -f $PROD_COMPOSE down
+  docker volume rm $PROD_VOLUME
+  docker volume create $PROD_VOLUME
+  docker run --rm -v $BACKUP_VOLUME:/from:ro -v $PROD_VOLUME:/to alpine sh -c 'cd /from && cp -a . /to'
+  docker compose -f $PROD_COMPOSE up -d
+
+EOF
