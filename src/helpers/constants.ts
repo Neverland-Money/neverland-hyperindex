@@ -56,11 +56,6 @@ export const BOOTSTRAP_NFT_PARTNERSHIPS: BootstrapNFTPartnership[] = [
     startTimestamp: 0,
   },
   { collection: '0xfb5ba4061f5c50b1daa6c067bb2dfb0a8ebf6a8d', name: 'Overnads', startTimestamp: 0 },
-  {
-    collection: '0x8255dacd8a45f4abe6dc821e6f7f3c92a8e22fbb',
-    name: 'Solveil Pass',
-    startTimestamp: 0,
-  },
 ];
 
 // Bootstrap NFT Multiplier Config (firstBonus, decayRatio)

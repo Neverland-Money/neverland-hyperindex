@@ -4,8 +4,8 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { LEADERBOARD_START_BLOCK } from '../helpers/constants';
 
-process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'true';
-process.env.ENVIO_DISABLE_ETH_CALLS = 'true';
+process.env.ENVIO_ENABLE_EXTERNAL_CALLS = 'false';
+process.env.ENVIO_ENABLE_ETH_CALLS = 'false';
 
 const ADDRESSES = {
   keeper: '0x000000000000000000000000000000000000b001',

@@ -5,8 +5,8 @@ import { test } from 'node:test';
 
 import { EMERGENCY_ADMIN_ID, POOL_ADMIN_ID } from '../helpers/constants';
 
-process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'true';
-process.env.ENVIO_DISABLE_ETH_CALLS = 'true';
+process.env.ENVIO_ENABLE_EXTERNAL_CALLS = 'false';
+process.env.ENVIO_ENABLE_ETH_CALLS = 'false';
 
 const ADDRESSES = {
   registry: '0x0000000000000000000000000000000000000101',

@@ -10,14 +10,19 @@ import {
   VotingPowerMultiplier,
 } from '../../generated';
 import {
+  addTierToIndex,
   computeTotalPointsWithMultiplier,
   getOrCreateUser,
   getOrCreateUserEpochStats,
   applyScheduledEpochTransitions,
   recordProtocolTransaction,
   refreshUserVotingPowerState,
+  removeTierFromIndex,
   shouldUseEthCalls,
+  touchTierIndex,
   updateLifetimePoints,
+  writeLeaderboardConfig,
+  writeLeaderboardEpoch,
 } from './shared';
 import { getTestnetBonusBps } from '../helpers/testnetTiers';
 import {
@@ -48,7 +53,7 @@ async function getOrInitLeaderboardConfig(context: handlerContext, timestamp: nu
       minDailyBonusUsd: useBootstrap ? BOOTSTRAP_CONFIG.minDailyBonusUsd : 0,
       lastUpdate: timestamp,
     };
-    context.LeaderboardConfig.set(config);
+    writeLeaderboardConfig(context, config);
   }
   return config;
 }
@@ -94,7 +99,7 @@ EpochManager.EpochStart.handler(async ({ event, context }) => {
     ? existingEpoch.scheduledStartTime
     : scheduledStartTime;
 
-  context.LeaderboardEpoch.set({
+  writeLeaderboardEpoch(context, {
     ...(existingEpoch ?? {
       id: epochId,
       epochNumber,
@@ -135,7 +140,7 @@ EpochManager.EpochEnd.handler(async ({ event, context }) => {
         ? BigInt(event.block.number)
         : undefined;
 
-  context.LeaderboardEpoch.set({
+  writeLeaderboardEpoch(context, {
     ...(existingEpoch ?? {
       id: epochId,
       epochNumber,
@@ -188,7 +193,7 @@ LeaderboardConfigContract.ConfigSnapshot.handler(async ({ event, context }) => {
   });
 
   const existingConfig = await context.LeaderboardConfig.get('global');
-  context.LeaderboardConfig.set({
+  writeLeaderboardConfig(context, {
     id: 'global',
     depositRateBps: event.params.depositRateBps,
     borrowRateBps: event.params.borrowRateBps,
@@ -214,7 +219,7 @@ LeaderboardConfigContract.DepositRateUpdated.handler(async ({ event, context }) 
   const timestamp = Number(event.params.timestamp);
   const config = await getOrInitLeaderboardConfig(context, timestamp);
 
-  context.LeaderboardConfig.set({
+  writeLeaderboardConfig(context, {
     ...config,
     depositRateBps: event.params.newRate,
     lastUpdate: timestamp,
@@ -231,7 +236,7 @@ LeaderboardConfigContract.BorrowRateUpdated.handler(async ({ event, context }) =
   const timestamp = Number(event.params.timestamp);
   const config = await getOrInitLeaderboardConfig(context, timestamp);
 
-  context.LeaderboardConfig.set({
+  writeLeaderboardConfig(context, {
     ...config,
     borrowRateBps: event.params.newRate,
     lastUpdate: timestamp,
@@ -248,7 +253,7 @@ LeaderboardConfigContract.VpRateUpdated.handler(async ({ event, context }) => {
   const timestamp = Number(event.params.timestamp);
   const config = await getOrInitLeaderboardConfig(context, timestamp);
 
-  context.LeaderboardConfig.set({
+  writeLeaderboardConfig(context, {
     ...config,
     vpRateBps: event.params.newRate,
     lastUpdate: timestamp,
@@ -266,7 +271,7 @@ LeaderboardConfigContract.DailyBonusUpdated.handler(async ({ event, context }) =
   const config = await getOrInitLeaderboardConfig(context, timestamp);
   const EIGHTEEN_DECIMALS = 1e18;
 
-  context.LeaderboardConfig.set({
+  writeLeaderboardConfig(context, {
     ...config,
     supplyDailyBonus: Number(event.params.newSupplyBonus) / EIGHTEEN_DECIMALS,
     borrowDailyBonus: Number(event.params.newBorrowBonus) / EIGHTEEN_DECIMALS,
@@ -286,7 +291,7 @@ LeaderboardConfigContract.CooldownUpdated.handler(async ({ event, context }) => 
   const timestamp = Number(event.params.timestamp);
   const config = await getOrInitLeaderboardConfig(context, timestamp);
 
-  context.LeaderboardConfig.set({
+  writeLeaderboardConfig(context, {
     ...config,
     cooldownSeconds: Number(event.params.newSeconds),
     lastUpdate: timestamp,
@@ -303,7 +308,7 @@ LeaderboardConfigContract.MinDailyBonusUsdUpdated.handler(async ({ event, contex
   const timestamp = Number(event.params.timestamp);
   const config = await getOrInitLeaderboardConfig(context, timestamp);
 
-  context.LeaderboardConfig.set({
+  writeLeaderboardConfig(context, {
     ...config,
     minDailyBonusUsd: Number(event.params.newMin),
     lastUpdate: timestamp,
@@ -550,6 +555,7 @@ VotingPowerMultiplier.TierAdded.handler(async ({ event, context }) => {
     lastUpdate: timestamp,
     isActive: true,
   });
+  await addTierToIndex(context, tierId, timestamp);
 });
 
 VotingPowerMultiplier.TierUpdated.handler(async ({ event, context }) => {
@@ -570,6 +576,7 @@ VotingPowerMultiplier.TierUpdated.handler(async ({ event, context }) => {
       multiplierBps: event.params.newMultiplierBps,
       lastUpdate: timestamp,
     });
+    await touchTierIndex(context, timestamp);
   }
 });
 
@@ -590,6 +597,7 @@ VotingPowerMultiplier.TierRemoved.handler(async ({ event, context }) => {
       isActive: false,
       lastUpdate: timestamp,
     });
+    await removeTierFromIndex(context, tierId, timestamp);
   }
 });
 
@@ -683,7 +691,7 @@ LeaderboardConfigContract.LPPoolConfigured.handler(async ({ event, context }) =>
 
   // Update global LP rate in config
   const config = await getOrInitLeaderboardConfig(context, timestamp);
-  context.LeaderboardConfig.set({
+  writeLeaderboardConfig(context, {
     ...config,
     lpRateBps,
     lastUpdate: timestamp,
@@ -730,7 +738,7 @@ LeaderboardConfigContract.LPRateUpdated.handler(async ({ event, context }) => {
   const timestamp = Number(event.params.timestamp);
   const config = await getOrInitLeaderboardConfig(context, timestamp);
 
-  context.LeaderboardConfig.set({
+  writeLeaderboardConfig(context, {
     ...config,
     lpRateBps: event.params.newRate,
     lastUpdate: timestamp,

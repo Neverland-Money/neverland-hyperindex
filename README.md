@@ -61,9 +61,9 @@ ENVIO_API_TOKEN=your-envio-api-token
 # LOG_LEVEL=debug
 # METRICS_PORT=9090
 
-# Optional: External read controls
-# ENVIO_DISABLE_EXTERNAL_CALLS=true
-# ENVIO_DISABLE_ETH_CALLS=true
+# Optional: External read controls (both default off)
+# ENVIO_ENABLE_EXTERNAL_CALLS=true  # master gate for all external calls
+# ENVIO_ENABLE_ETH_CALLS=true       # opt-in to eth_call reads (also requires above)
 
 # Optional: One-time chain baselines during settlement
 # ENVIO_ENABLE_NFT_CHAIN_SYNC=true

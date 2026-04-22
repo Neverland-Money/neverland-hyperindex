@@ -7,8 +7,8 @@ import { createDefaultReserve } from '../helpers/entityHelpers';
 import { KNOWN_GATEWAYS } from '../helpers/constants';
 import { VIEM_ERROR_ADDRESS, installViemMock } from './viem-mock';
 
-process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'true';
-process.env.ENVIO_DISABLE_ETH_CALLS = 'true';
+process.env.ENVIO_ENABLE_EXTERNAL_CALLS = 'false';
+process.env.ENVIO_ENABLE_ETH_CALLS = 'false';
 installViemMock();
 
 const RAY = 10n ** 27n;

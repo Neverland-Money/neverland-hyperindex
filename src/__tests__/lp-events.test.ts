@@ -6,8 +6,8 @@ import { test } from 'node:test';
 import { AUSD_ADDRESS, USDC_ADDRESS, ZERO_ADDRESS } from '../helpers/constants';
 import { installViemMock, setLPPositionOverride } from './viem-mock';
 
-process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'true';
-process.env.ENVIO_DISABLE_ETH_CALLS = 'true';
+process.env.ENVIO_ENABLE_EXTERNAL_CALLS = 'false';
+process.env.ENVIO_ENABLE_ETH_CALLS = 'false';
 process.env.ENVIO_DISABLE_BOOTSTRAP = 'true';
 installViemMock();
 
@@ -83,10 +83,10 @@ function createEventDataFactory() {
 }
 
 test('increase liquidity before transfer uses cached mint amounts', async () => {
-  const prevDisableExternal = process.env.ENVIO_DISABLE_EXTERNAL_CALLS;
-  const prevDisableEth = process.env.ENVIO_DISABLE_ETH_CALLS;
-  process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'false';
-  process.env.ENVIO_DISABLE_ETH_CALLS = 'false';
+  const prevEnableExternal = process.env.ENVIO_ENABLE_EXTERNAL_CALLS;
+  const prevEnableEth = process.env.ENVIO_ENABLE_ETH_CALLS;
+  process.env.ENVIO_ENABLE_EXTERNAL_CALLS = 'true';
+  process.env.ENVIO_ENABLE_ETH_CALLS = 'true';
   try {
     setLPPositionOverride([
       0n,
@@ -208,8 +208,8 @@ test('increase liquidity before transfer uses cached mint amounts', async () => 
 
     setLPPositionOverride(undefined);
   } finally {
-    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = prevDisableExternal;
-    process.env.ENVIO_DISABLE_ETH_CALLS = prevDisableEth;
+    process.env.ENVIO_ENABLE_EXTERNAL_CALLS = prevEnableExternal;
+    process.env.ENVIO_ENABLE_ETH_CALLS = prevEnableEth;
   }
 });
 
@@ -338,10 +338,10 @@ test('increase liquidity uses pool mint data when eth_call is unavailable', asyn
 });
 
 test('swap accrues lp points when position stays in range', async () => {
-  const prevDisableExternal = process.env.ENVIO_DISABLE_EXTERNAL_CALLS;
-  const prevDisableEth = process.env.ENVIO_DISABLE_ETH_CALLS;
-  process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'false';
-  process.env.ENVIO_DISABLE_ETH_CALLS = 'false';
+  const prevEnableExternal = process.env.ENVIO_ENABLE_EXTERNAL_CALLS;
+  const prevEnableEth = process.env.ENVIO_ENABLE_ETH_CALLS;
+  process.env.ENVIO_ENABLE_EXTERNAL_CALLS = 'true';
+  process.env.ENVIO_ENABLE_ETH_CALLS = 'true';
   try {
     setLPPositionOverride([
       0n,
@@ -483,8 +483,8 @@ test('swap accrues lp points when position stays in range', async () => {
 
     setLPPositionOverride(undefined);
   } finally {
-    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = prevDisableExternal;
-    process.env.ENVIO_DISABLE_ETH_CALLS = prevDisableEth;
+    process.env.ENVIO_ENABLE_EXTERNAL_CALLS = prevEnableExternal;
+    process.env.ENVIO_ENABLE_ETH_CALLS = prevEnableEth;
   }
 });
 
@@ -2734,10 +2734,10 @@ test('increase liquidity on legacy manager applies ausd-derived pricing path', a
 });
 
 test('transfer mint resolves pool config from eth_call position data', async () => {
-  const prevDisableExternal = process.env.ENVIO_DISABLE_EXTERNAL_CALLS;
-  const prevDisableEth = process.env.ENVIO_DISABLE_ETH_CALLS;
-  process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'false';
-  process.env.ENVIO_DISABLE_ETH_CALLS = 'false';
+  const prevEnableExternal = process.env.ENVIO_ENABLE_EXTERNAL_CALLS;
+  const prevEnableEth = process.env.ENVIO_ENABLE_ETH_CALLS;
+  process.env.ENVIO_ENABLE_EXTERNAL_CALLS = 'true';
+  process.env.ENVIO_ENABLE_ETH_CALLS = 'true';
 
   try {
     setLPPositionOverride([
@@ -2823,8 +2823,8 @@ test('transfer mint resolves pool config from eth_call position data', async () 
     assert.equal(position?.pool, ADDRESSES.pool);
   } finally {
     setLPPositionOverride(undefined);
-    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = prevDisableExternal;
-    process.env.ENVIO_DISABLE_ETH_CALLS = prevDisableEth;
+    process.env.ENVIO_ENABLE_EXTERNAL_CALLS = prevEnableExternal;
+    process.env.ENVIO_ENABLE_ETH_CALLS = prevEnableEth;
   }
 });
 

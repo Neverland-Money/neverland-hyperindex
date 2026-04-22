@@ -5,8 +5,8 @@ import { test } from 'node:test';
 
 import { ZERO_ADDRESS } from '../helpers/constants';
 
-process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'true';
-process.env.ENVIO_DISABLE_ETH_CALLS = 'true';
+process.env.ENVIO_ENABLE_EXTERNAL_CALLS = 'false';
+process.env.ENVIO_ENABLE_ETH_CALLS = 'false';
 
 const ADDRESSES = {
   controller: '0x0000000000000000000000000000000000002001',

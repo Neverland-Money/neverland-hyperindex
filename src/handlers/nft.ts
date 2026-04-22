@@ -46,7 +46,8 @@ import {
   PartnerNFT,
   The10kSquad,
   Overnads,
-  SolveilPass,
+  LilStars,
+  RealNads,
 } from '../../generated';
 import {
   getOrCreateUserLeaderboardState,
@@ -55,6 +56,9 @@ import {
   recordProtocolTransaction,
   settlePointsForUser,
   calculateNFTMultiplierFromUser,
+  writeNFTMultiplierConfig,
+  writeNFTPartnership,
+  writeNFTRegistryState,
 } from './shared';
 import { normalizeAddress } from '../helpers/constants';
 import type { handlerContext } from '../../generated';
@@ -67,7 +71,7 @@ async function getOrCreateRegistryState(context: handlerContext, timestamp: numb
       activeCollections: [],
       lastUpdate: timestamp,
     };
-    context.NFTPartnershipRegistryState.set(state);
+    writeNFTRegistryState(context, state);
   }
   return state;
 }
@@ -89,7 +93,7 @@ async function updateActiveCollections(
     activeCollections = state.activeCollections.filter(entry => entry !== normalizedCollection);
   }
 
-  context.NFTPartnershipRegistryState.set({
+  writeNFTRegistryState(context, {
     ...state,
     activeCollections,
     lastUpdate: timestamp,
@@ -132,7 +136,7 @@ NFTPartnershipRegistry.PartnershipAdded.handler(async ({ event, context }) => {
       ? paramsWithBoost.staticBoostBps
       : existing?.staticBoostBps;
 
-  context.NFTPartnership.set({
+  writeNFTPartnership(context, {
     id,
     collection: id,
     name: event.params.name,
@@ -145,7 +149,7 @@ NFTPartnershipRegistry.PartnershipAdded.handler(async ({ event, context }) => {
   });
 
   // Update global config with values from the event
-  context.NFTMultiplierConfig.set({
+  writeNFTMultiplierConfig(context, {
     id: 'current',
     firstBonus: event.params.currentFirstBonus,
     decayRatio: event.params.currentDecayRatio,
@@ -175,7 +179,7 @@ NFTPartnershipRegistry.PartnershipUpdated.handler(async ({ event, context }) => 
         ? paramsWithBoost.staticBoostBps
         : partnership.staticBoostBps;
 
-    context.NFTPartnership.set({
+    writeNFTPartnership(context, {
       ...partnership,
       name: event.params.name,
       active: event.params.active,
@@ -201,7 +205,7 @@ NFTPartnershipRegistry.PartnershipRemoved.handler(async ({ event, context }) => 
 
   const partnership = await context.NFTPartnership.get(id);
   if (partnership) {
-    context.NFTPartnership.set({
+    writeNFTPartnership(context, {
       ...partnership,
       active: false,
       lastUpdate: timestamp,
@@ -229,7 +233,7 @@ NFTPartnershipRegistry.MultiplierParamsUpdated.handler(async ({ event, context }
     txHash: event.transaction.hash,
   });
 
-  context.NFTMultiplierConfig.set({
+  writeNFTMultiplierConfig(context, {
     id: 'current',
     firstBonus: event.params.newFirstBonus,
     decayRatio: event.params.newDecayRatio,
@@ -388,8 +392,13 @@ Overnads.Transfer.handler(async ({ event, context }) => {
   await handleNFTTransfer(event, context);
 });
 
-// SolveilPass uses same handler as PartnerNFT
-SolveilPass.Transfer.handler(async ({ event, context }) => {
+// LilStars uses same handler as PartnerNFT
+LilStars.Transfer.handler(async ({ event, context }) => {
+  await handleNFTTransfer(event, context);
+});
+
+// RealNads uses same handler as PartnerNFT
+RealNads.Transfer.handler(async ({ event, context }) => {
   await handleNFTTransfer(event, context);
 });
 

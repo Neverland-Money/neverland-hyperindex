@@ -6,8 +6,8 @@ import { test } from 'node:test';
 import { ZERO_ADDRESS } from '../helpers/constants';
 import { VIEM_ERROR_ADDRESS, installViemMock } from './viem-mock';
 
-process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'true';
-process.env.ENVIO_DISABLE_ETH_CALLS = 'true';
+process.env.ENVIO_ENABLE_EXTERNAL_CALLS = 'false';
+process.env.ENVIO_ENABLE_ETH_CALLS = 'false';
 installViemMock();
 
 const ADDRESSES = {
@@ -652,13 +652,13 @@ test('static nft collection handlers reuse shared transfer logic', async () => {
     mockDb,
   });
 
-  const burned = TestHelpers.SolveilPass.Transfer.createMockEvent({
+  const burned = TestHelpers.LilStars.Transfer.createMockEvent({
     from: ADDRESSES.user,
     to: ZERO_ADDRESS,
     id: 3n,
     ...eventData(23, 430, ADDRESSES.collectionTwo),
   });
-  mockDb = await TestHelpers.SolveilPass.Transfer.processEvent({
+  mockDb = await TestHelpers.LilStars.Transfer.processEvent({
     event: burned,
     mockDb,
   });

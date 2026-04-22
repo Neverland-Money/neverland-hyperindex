@@ -52,11 +52,340 @@ const DEFAULT_COOLDOWN_SECONDS = 3600;
 const E8_DIVISOR = 1e8;
 const VP_DECIMALS = 1e18;
 const RAY = 10n ** 27n;
+
+// ============================================
+// Block-scoped read cache for global singletons
+// ============================================
+//
+// Within a single block the keeper can settle thousands of users back-to-back.
+// Each settlement re-reads LeaderboardConfig, LeaderboardState, the active
+// epoch, the NFT registry and the VP tier list. These are global and never
+// change inside a block unless one of the mutation handlers runs first, in
+// which case we explicitly invalidate. This trims tens of thousands of DB
+// reads per heavy block.
+type CachedTier = {
+  id: string;
+  tierIndex: bigint;
+  minVotingPower: bigint;
+  multiplierBps: bigint;
+  isActive: boolean;
+};
+
+type GlobalCache = {
+  blockKey: string | null;
+  config?: Awaited<ReturnType<handlerContext['LeaderboardConfig']['get']>>;
+  state?: Awaited<ReturnType<handlerContext['LeaderboardState']['get']>>;
+  epoch: Map<string, Awaited<ReturnType<handlerContext['LeaderboardEpoch']['get']>>>;
+  registryState?: Awaited<ReturnType<handlerContext['NFTPartnershipRegistryState']['get']>>;
+  multiplierConfig?: Awaited<ReturnType<handlerContext['NFTMultiplierConfig']['get']>>;
+  partnership: Map<string, Awaited<ReturnType<handlerContext['NFTPartnership']['get']>>>;
+  vpTiers?: CachedTier[]; // sorted ascending by tierIndex, only active tiers
+};
+
+const globalCache: GlobalCache = {
+  blockKey: null,
+  epoch: new Map(),
+  partnership: new Map(),
+};
+
+let lastContextRef: object | null = null;
+
+function syncCacheForContext(context: handlerContext): void {
+  // The runtime reuses the same context across handlers in a block, but tests
+  // build a fresh mock per case. If identity changes drop the cache so values
+  // from a prior test/block don't leak in.
+  const ref = context as unknown as object;
+  if (lastContextRef !== ref) {
+    lastContextRef = ref;
+    invalidateGlobalCache();
+  }
+}
+
+function ensureBlockCache(context: handlerContext, blockNumber: bigint | undefined): void {
+  syncCacheForContext(context);
+  if (blockNumber === undefined) return;
+  const key = blockNumber.toString();
+  if (globalCache.blockKey === key) return;
+  globalCache.blockKey = key;
+  globalCache.config = undefined;
+  globalCache.state = undefined;
+  globalCache.epoch.clear();
+  globalCache.registryState = undefined;
+  globalCache.multiplierConfig = undefined;
+  globalCache.partnership.clear();
+  globalCache.vpTiers = undefined;
+}
+
+export function invalidateGlobalCache(): void {
+  globalCache.blockKey = null;
+  globalCache.config = undefined;
+  globalCache.state = undefined;
+  globalCache.epoch.clear();
+  globalCache.registryState = undefined;
+  globalCache.multiplierConfig = undefined;
+  globalCache.partnership.clear();
+  globalCache.vpTiers = undefined;
+}
+
+export function invalidateLeaderboardConfigCache(): void {
+  globalCache.config = undefined;
+}
+
+export function invalidateLeaderboardStateCache(): void {
+  globalCache.state = undefined;
+  globalCache.epoch.clear();
+}
+
+export function invalidateNFTRegistryCache(): void {
+  globalCache.registryState = undefined;
+  globalCache.partnership.clear();
+}
+
+export function invalidateNFTMultiplierConfigCache(): void {
+  globalCache.multiplierConfig = undefined;
+}
+
+export function invalidateNFTPartnershipCache(collection?: string): void {
+  if (collection) {
+    globalCache.partnership.delete(normalizeAddress(collection));
+  } else {
+    globalCache.partnership.clear();
+  }
+}
+
+export function invalidateVotingPowerTiersCache(): void {
+  globalCache.vpTiers = undefined;
+}
+
+// When blockKey is null no handler has bound the cache to a block yet (tests,
+// or pre-block paths). In that case go straight to the DB without populating
+// the cache, otherwise stale entries from a prior test would leak in.
+function cacheActive(): boolean {
+  return globalCache.blockKey !== null;
+}
+
+// preload_handlers runs every handler twice: once concurrently for the whole
+// batch (writes are no-op, reads get batched into a single round-trip), then
+// sequentially with the in-memory store. Our module-scoped cache MUST stay
+// out of the preload phase — concurrent writes would leak values across
+// unrelated handlers and processing-phase reads would see stale data. So in
+// preload we just delegate to context.X.get/set so Envio's batcher can do its
+// thing, and only memoize in the sequential processing phase.
+function isPreload(context: handlerContext): boolean {
+  return (context as unknown as { isPreload?: boolean }).isPreload === true;
+}
+
+async function getCachedLeaderboardConfig(context: handlerContext) {
+  if (isPreload(context)) return await context.LeaderboardConfig.get('global');
+  syncCacheForContext(context);
+  if (!cacheActive()) return await context.LeaderboardConfig.get('global');
+  if (globalCache.config === undefined) {
+    globalCache.config = await context.LeaderboardConfig.get('global');
+  }
+  return globalCache.config;
+}
+
+async function getCachedLeaderboardState(context: handlerContext) {
+  if (isPreload(context)) return await context.LeaderboardState.get('current');
+  syncCacheForContext(context);
+  if (!cacheActive()) return await context.LeaderboardState.get('current');
+  if (globalCache.state === undefined) {
+    globalCache.state = await context.LeaderboardState.get('current');
+  }
+  return globalCache.state;
+}
+
+async function getCachedEpoch(context: handlerContext, epochNumber: bigint) {
+  const key = epochNumber.toString();
+  if (isPreload(context)) return await context.LeaderboardEpoch.get(key);
+  syncCacheForContext(context);
+  if (!cacheActive()) return await context.LeaderboardEpoch.get(key);
+  let epoch = globalCache.epoch.get(key);
+  if (epoch === undefined) {
+    epoch = await context.LeaderboardEpoch.get(key);
+    globalCache.epoch.set(key, epoch);
+  }
+  return epoch;
+}
+
+async function getCachedNFTRegistryState(context: handlerContext) {
+  if (isPreload(context)) return await context.NFTPartnershipRegistryState.get('current');
+  syncCacheForContext(context);
+  if (!cacheActive()) return await context.NFTPartnershipRegistryState.get('current');
+  if (globalCache.registryState === undefined) {
+    globalCache.registryState = await context.NFTPartnershipRegistryState.get('current');
+  }
+  return globalCache.registryState;
+}
+
+async function getCachedNFTMultiplierConfig(context: handlerContext) {
+  if (isPreload(context)) return await context.NFTMultiplierConfig.get('current');
+  syncCacheForContext(context);
+  if (!cacheActive()) return await context.NFTMultiplierConfig.get('current');
+  if (globalCache.multiplierConfig === undefined) {
+    globalCache.multiplierConfig = await context.NFTMultiplierConfig.get('current');
+  }
+  return globalCache.multiplierConfig;
+}
+
+async function getCachedNFTPartnership(context: handlerContext, collection: string) {
+  const id = normalizeAddress(collection);
+  if (isPreload(context)) return await context.NFTPartnership.get(id);
+  syncCacheForContext(context);
+  if (!cacheActive()) return await context.NFTPartnership.get(id);
+  let partnership = globalCache.partnership.get(id);
+  if (partnership === undefined) {
+    partnership = await context.NFTPartnership.get(id);
+    globalCache.partnership.set(id, partnership);
+  }
+  return partnership;
+}
+
+async function getCachedVotingPowerTiers(context: handlerContext): Promise<CachedTier[]> {
+  const preload = isPreload(context);
+  if (!preload) syncCacheForContext(context);
+  if (!preload && cacheActive() && globalCache.vpTiers !== undefined) return globalCache.vpTiers;
+  const index = context.VotingPowerTierIndex
+    ? await context.VotingPowerTierIndex.get('current')
+    : undefined;
+  let ids = index?.activeTierIds;
+  if (!ids || ids.length === 0) {
+    // Backwards compat: no index entity yet (older state, or partial test mock
+    // that wrote directly to VotingPowerTier without touching the index). Scan
+    // 0..MAX_VP_TIERS once; subsequent calls in the same block hit the cache.
+    const scanned: string[] = [];
+    for (let i = 0; i < MAX_VP_TIERS; i++) {
+      const tier = await context.VotingPowerTier.get(i.toString());
+      if (tier && tier.isActive) scanned.push(tier.id);
+    }
+    ids = scanned;
+  }
+  if (ids.length === 0) {
+    if (!preload && cacheActive()) globalCache.vpTiers = [];
+    return [];
+  }
+  // Batch all tier reads via Promise.all so the preload phase folds them into
+  // a single round-trip instead of N sequential awaits.
+  const fetched = await Promise.all(ids.map(id => context.VotingPowerTier.get(id)));
+  const tiers: CachedTier[] = [];
+  for (const tier of fetched) {
+    if (!tier || !tier.isActive) continue;
+    tiers.push({
+      id: tier.id,
+      tierIndex: tier.tierIndex,
+      minVotingPower: tier.minVotingPower,
+      multiplierBps: tier.multiplierBps,
+      isActive: tier.isActive,
+    });
+  }
+  tiers.sort((a, b) => (a.tierIndex < b.tierIndex ? -1 : a.tierIndex > b.tierIndex ? 1 : 0));
+  if (!preload && cacheActive()) globalCache.vpTiers = tiers;
+  return tiers;
+}
+
+// VotingPowerTierIndex maintenance helpers
+export async function addTierToIndex(
+  context: handlerContext,
+  tierId: string,
+  timestamp: number
+): Promise<void> {
+  const index = await context.VotingPowerTierIndex.get('current');
+  const existing = index?.activeTierIds ?? [];
+  if (existing.includes(tierId)) {
+    if (index) {
+      context.VotingPowerTierIndex.set({ ...index, lastUpdate: timestamp });
+    }
+    if (!isPreload(context)) invalidateVotingPowerTiersCache();
+    return;
+  }
+  context.VotingPowerTierIndex.set({
+    id: 'current',
+    activeTierIds: [...existing, tierId],
+    lastUpdate: timestamp,
+  });
+  if (!isPreload(context)) invalidateVotingPowerTiersCache();
+}
+
+export async function removeTierFromIndex(
+  context: handlerContext,
+  tierId: string,
+  timestamp: number
+): Promise<void> {
+  const index = await context.VotingPowerTierIndex.get('current');
+  if (!index) return;
+  const next = index.activeTierIds.filter(id => id !== tierId);
+  context.VotingPowerTierIndex.set({
+    id: 'current',
+    activeTierIds: next,
+    lastUpdate: timestamp,
+  });
+  if (!isPreload(context)) invalidateVotingPowerTiersCache();
+}
+
+export async function touchTierIndex(context: handlerContext, timestamp: number): Promise<void> {
+  const index = await context.VotingPowerTierIndex.get('current');
+  if (index) {
+    context.VotingPowerTierIndex.set({ ...index, lastUpdate: timestamp });
+  }
+  if (!isPreload(context)) invalidateVotingPowerTiersCache();
+}
+
+// Cache-aware write helpers so handlers don't have to remember to invalidate.
+type LeaderboardConfigInput = Parameters<handlerContext['LeaderboardConfig']['set']>[0];
+type LeaderboardEpochInput = Parameters<handlerContext['LeaderboardEpoch']['set']>[0];
+type LeaderboardStateInput = Parameters<handlerContext['LeaderboardState']['set']>[0];
+type NFTRegistryStateInput = Parameters<handlerContext['NFTPartnershipRegistryState']['set']>[0];
+type NFTMultiplierConfigInput = Parameters<handlerContext['NFTMultiplierConfig']['set']>[0];
+type NFTPartnershipInput = Parameters<handlerContext['NFTPartnership']['set']>[0];
+
+export function writeLeaderboardConfig(
+  context: handlerContext,
+  config: LeaderboardConfigInput
+): void {
+  context.LeaderboardConfig.set(config);
+  if (isPreload(context)) return;
+  invalidateLeaderboardConfigCache();
+}
+
+export function writeLeaderboardEpoch(context: handlerContext, epoch: LeaderboardEpochInput): void {
+  context.LeaderboardEpoch.set(epoch);
+  if (isPreload(context)) return;
+  globalCache.epoch.delete(epoch.epochNumber.toString());
+}
+
+export function writeLeaderboardState(context: handlerContext, state: LeaderboardStateInput): void {
+  context.LeaderboardState.set(state);
+  if (isPreload(context)) return;
+  invalidateLeaderboardStateCache();
+}
+
+export function writeNFTRegistryState(context: handlerContext, state: NFTRegistryStateInput): void {
+  context.NFTPartnershipRegistryState.set(state);
+  if (isPreload(context)) return;
+  invalidateNFTRegistryCache();
+}
+
+export function writeNFTMultiplierConfig(
+  context: handlerContext,
+  config: NFTMultiplierConfigInput
+): void {
+  context.NFTMultiplierConfig.set(config);
+  if (isPreload(context)) return;
+  invalidateNFTMultiplierConfigCache();
+}
+
+export function writeNFTPartnership(
+  context: handlerContext,
+  partnership: NFTPartnershipInput
+): void {
+  context.NFTPartnership.set(partnership);
+  if (isPreload(context)) return;
+  invalidateNFTPartnershipCache(partnership.collection);
+}
+
 export function shouldUseEthCalls(): boolean {
-  return !(
-    process.env.ENVIO_DISABLE_EXTERNAL_CALLS === 'true' ||
-    process.env.ENVIO_DISABLE_ETH_CALLS === 'true'
-  );
+  if (process.env.ENVIO_ENABLE_EXTERNAL_CALLS !== 'true') return false;
+  return process.env.ENVIO_ENABLE_ETH_CALLS === 'true';
 }
 
 function shouldSyncNFTOwnershipFromChain(): boolean {
@@ -138,7 +467,7 @@ export async function bootstrapLeaderboardIfNeeded(
     EPOCH_1_START_BLOCK_OVERRIDE > 0 ? BigInt(EPOCH_1_START_BLOCK_OVERRIDE) : blockNumber;
   const epoch1 = await context.LeaderboardEpoch.get('1');
   if (!epoch1) {
-    context.LeaderboardEpoch.set({
+    writeLeaderboardEpoch(context, {
       id: '1',
       epochNumber: 1n,
       startBlock,
@@ -153,17 +482,20 @@ export async function bootstrapLeaderboardIfNeeded(
   }
 
   // Bootstrap LeaderboardState
-  context.LeaderboardState.set({
+  writeLeaderboardState(context, {
     id: 'current',
     currentEpochNumber: 1n,
     isActive: true,
   });
 
-  // Bootstrap VotingPowerTiers
+  // Bootstrap VotingPowerTiers + index
+  const bootstrapTierIds: string[] = [];
   for (let i = 0; i < BOOTSTRAP_VP_TIERS.length; i++) {
     const [minVotingPower, multiplierBps] = BOOTSTRAP_VP_TIERS[i];
+    const id = i.toString();
+    bootstrapTierIds.push(id);
     context.VotingPowerTier.set({
-      id: i.toString(),
+      id,
       tierIndex: BigInt(i),
       minVotingPower,
       multiplierBps,
@@ -172,13 +504,20 @@ export async function bootstrapLeaderboardIfNeeded(
       isActive: true,
     });
   }
+  if (context.VotingPowerTierIndex) {
+    context.VotingPowerTierIndex.set({
+      id: 'current',
+      activeTierIds: bootstrapTierIds,
+      lastUpdate: EPOCH_1_START_TIME_OVERRIDE,
+    });
+  }
 
   // Bootstrap NFT Partnerships
   const activeCollections: string[] = [];
   for (const partnership of BOOTSTRAP_NFT_PARTNERSHIPS) {
     const id = normalizeAddress(partnership.collection);
     activeCollections.push(id);
-    context.NFTPartnership.set({
+    writeNFTPartnership(context, {
       id,
       collection: id,
       name: partnership.name,
@@ -193,7 +532,7 @@ export async function bootstrapLeaderboardIfNeeded(
 
   // Bootstrap NFTPartnershipRegistryState
   if (activeCollections.length > 0) {
-    context.NFTPartnershipRegistryState.set({
+    writeNFTRegistryState(context, {
       id: 'current',
       activeCollections,
       lastUpdate: EPOCH_1_START_TIME_OVERRIDE,
@@ -202,7 +541,7 @@ export async function bootstrapLeaderboardIfNeeded(
 
   // Bootstrap NFTMultiplierConfig
   if (BOOTSTRAP_NFT_PARTNERSHIPS.length > 0) {
-    context.NFTMultiplierConfig.set({
+    writeNFTMultiplierConfig(context, {
       id: 'global',
       firstBonus: BOOTSTRAP_NFT_MULTIPLIER_CONFIG.firstBonus,
       decayRatio: BOOTSTRAP_NFT_MULTIPLIER_CONFIG.decayRatio,
@@ -243,7 +582,7 @@ export async function bootstrapLeaderboardIfNeeded(
 
   // Bootstrap LeaderboardConfig
   const useBootstrap = EPOCH_1_START_TIME_OVERRIDE > 0;
-  context.LeaderboardConfig.set({
+  writeLeaderboardConfig(context, {
     id: 'global',
     depositRateBps: useBootstrap ? BOOTSTRAP_CONFIG.depositRateBps : 0n,
     borrowRateBps: useBootstrap ? BOOTSTRAP_CONFIG.borrowRateBps : 0n,
@@ -269,6 +608,7 @@ export async function recordProtocolTransaction(
 ): Promise<void> {
   // Bootstrap leaderboard on first event if epoch 1 override is set
   if (blockNumber !== undefined) {
+    ensureBlockCache(context, blockNumber);
     await bootstrapLeaderboardIfNeeded(context, timestamp, blockNumber);
     const { applyStaticLPPoolCutover } = await import('./lp');
     await applyStaticLPPoolCutover(context, timestamp, blockNumber);
@@ -343,7 +683,8 @@ export async function applyScheduledEpochTransitions(
   timestamp: number,
   blockNumber?: bigint
 ): Promise<void> {
-  const state = await context.LeaderboardState.get('current');
+  if (blockNumber !== undefined) ensureBlockCache(context, blockNumber);
+  const state = await getCachedLeaderboardState(context);
   let currentEpochNumber = state?.currentEpochNumber ?? 0n;
   let isActive = state?.isActive ?? false;
   let updated = false;
@@ -354,7 +695,7 @@ export async function applyScheduledEpochTransitions(
 
   for (let i = 0; i < MAX_SCHEDULED_TRANSITIONS; i += 1) {
     if (isActive) {
-      const epoch = await context.LeaderboardEpoch.get(currentEpochNumber.toString());
+      const epoch = await getCachedEpoch(context, currentEpochNumber);
       if (!epoch) break;
 
       const scheduledEndTime = epoch.scheduledEndTime ?? 0;
@@ -374,7 +715,7 @@ export async function applyScheduledEpochTransitions(
               ? blockNumber
               : epoch.endBlock;
 
-        context.LeaderboardEpoch.set({
+        writeLeaderboardEpoch(context, {
           ...epoch,
           endBlock,
           endTime,
@@ -390,7 +731,7 @@ export async function applyScheduledEpochTransitions(
       }
 
       const nextEpochNumber = currentEpochNumber + 1n;
-      const nextEpoch = await context.LeaderboardEpoch.get(nextEpochNumber.toString());
+      const nextEpoch = await getCachedEpoch(context, nextEpochNumber);
       const scheduledStartTime = nextEpoch?.scheduledStartTime ?? 0;
 
       if (scheduledStartTime > 0 && scheduledStartTime <= timestamp) {
@@ -409,7 +750,7 @@ export async function applyScheduledEpochTransitions(
               ? blockNumber
               : epoch.endBlock;
 
-        context.LeaderboardEpoch.set({
+        writeLeaderboardEpoch(context, {
           ...epoch,
           endBlock,
           endTime,
@@ -431,7 +772,7 @@ export async function applyScheduledEpochTransitions(
               : (nextEpoch?.startBlock ?? 0n);
 
         if (nextEpoch) {
-          context.LeaderboardEpoch.set({
+          writeLeaderboardEpoch(context, {
             ...nextEpoch,
             startBlock,
             startTime,
@@ -452,7 +793,7 @@ export async function applyScheduledEpochTransitions(
     }
 
     const nextEpochNumber = currentEpochNumber === 0n ? 1n : currentEpochNumber + 1n;
-    const nextEpoch = await context.LeaderboardEpoch.get(nextEpochNumber.toString());
+    const nextEpoch = await getCachedEpoch(context, nextEpochNumber);
     if (!nextEpoch) break;
 
     const scheduledStartTime = nextEpoch.scheduledStartTime ?? 0;
@@ -468,7 +809,7 @@ export async function applyScheduledEpochTransitions(
             ? blockNumber
             : nextEpoch.startBlock;
 
-      context.LeaderboardEpoch.set({
+      writeLeaderboardEpoch(context, {
         ...nextEpoch,
         startBlock,
         startTime,
@@ -488,7 +829,7 @@ export async function applyScheduledEpochTransitions(
   }
 
   if (updated) {
-    context.LeaderboardState.set({
+    writeLeaderboardState(context, {
       id: 'current',
       currentEpochNumber,
       isActive,
@@ -681,48 +1022,43 @@ export async function getOrCreateUserLeaderboardState(
   return state;
 }
 
-export async function calculateVPMultiplier(
+// Single pass over the cached active tier list. Tiers are pre-sorted ascending
+// by tierIndex (== ascending minVotingPower contract invariant). When the user
+// has no tiers configured we short-circuit: that's the steady-state today.
+async function resolveVPTier(
   context: handlerContext,
   votingPower: bigint
-): Promise<bigint> {
+): Promise<{ multiplier: bigint; tierIndex: bigint }> {
+  const tiers = await getCachedVotingPowerTiers(context);
+  if (tiers.length === 0) {
+    return { multiplier: BASIS_POINTS, tierIndex: 0n };
+  }
   let multiplier = BASIS_POINTS;
-
-  for (let i = 0; i < MAX_VP_TIERS; i++) {
-    const tier = await context.VotingPowerTier.get(i.toString());
-    if (!tier || !tier.isActive) continue;
-
+  let tierIndex = 0n;
+  for (const tier of tiers) {
     if (votingPower >= tier.minVotingPower) {
       multiplier = tier.multiplierBps;
+      tierIndex = tier.tierIndex;
     } else {
       break;
     }
   }
+  if (multiplier > MAX_VP_MULTIPLIER) multiplier = MAX_VP_MULTIPLIER;
+  return { multiplier, tierIndex };
+}
 
-  if (multiplier > MAX_VP_MULTIPLIER) {
-    multiplier = MAX_VP_MULTIPLIER;
-  }
-
-  return multiplier;
+export async function calculateVPMultiplier(
+  context: handlerContext,
+  votingPower: bigint
+): Promise<bigint> {
+  return (await resolveVPTier(context, votingPower)).multiplier;
 }
 
 export async function findVPTierIndex(
   context: handlerContext,
   votingPower: bigint
 ): Promise<bigint> {
-  let tierIndex = 0n;
-
-  for (let i = 0; i < MAX_VP_TIERS; i++) {
-    const tier = await context.VotingPowerTier.get(i.toString());
-    if (!tier || !tier.isActive) continue;
-
-    if (votingPower >= tier.minVotingPower) {
-      tierIndex = tier.tierIndex;
-    } else {
-      break;
-    }
-  }
-
-  return tierIndex;
+  return (await resolveVPTier(context, votingPower)).tierIndex;
 }
 
 export async function calculateNFTMultiplierFromUser(
@@ -741,7 +1077,7 @@ export async function calculateNFTMultiplierFromUser(
     return calculateNFTMultiplierFromCount(context, state.nftCount);
   }
 
-  const registryState = await context.NFTPartnershipRegistryState.get('current');
+  const registryState = await getCachedNFTRegistryState(context);
   const activeCollections = registryState?.activeCollections ?? [];
   if (activeCollections.length === 0) {
     // Fallback: use nftCount from UserLeaderboardState when no active collections
@@ -755,16 +1091,24 @@ export async function calculateNFTMultiplierFromUser(
   let staticBoostTotal = 0n;
   let decayCollectionCount = 0n;
 
-  for (const collection of activeCollections) {
-    const normalizedCollection = normalizeAddress(collection);
-    const ownershipId = `${normalizedUserId}:${normalizedCollection}`;
-    const ownership = await context.UserNFTOwnership.get(ownershipId);
-
-    if (!ownership || !ownership.hasNFT) continue;
-
-    const partnership = await context.NFTPartnership.get(normalizedCollection);
+  // Parallel-fan all ownership reads so the preload batcher can fold them
+  // into one round-trip per partnership across concurrent handlers, instead
+  // of `activeCollections.length` sequential awaits per user settle.
+  const normalizedCollections = activeCollections.map(c => normalizeAddress(c));
+  const ownerships = await Promise.all(
+    normalizedCollections.map(c => context.UserNFTOwnership.get(`${normalizedUserId}:${c}`))
+  );
+  const ownedCollections: string[] = [];
+  for (let i = 0; i < normalizedCollections.length; i++) {
+    const ownership = ownerships[i];
+    if (ownership && ownership.hasNFT) ownedCollections.push(normalizedCollections[i]);
+  }
+  // Only resolve partnerships for collections the user actually owns.
+  const partnerships = await Promise.all(
+    ownedCollections.map(c => getCachedNFTPartnership(context, c))
+  );
+  for (const partnership of partnerships) {
     if (!partnership || !partnership.active) continue;
-
     if (partnership.staticBoostBps && partnership.staticBoostBps > 0n) {
       staticBoostTotal += partnership.staticBoostBps;
     } else {
@@ -772,7 +1116,7 @@ export async function calculateNFTMultiplierFromUser(
     }
   }
 
-  const config = await context.NFTMultiplierConfig.get('current');
+  const config = await getCachedNFTMultiplierConfig(context);
   const firstBonus = config?.firstBonus ?? BOOTSTRAP_NFT_MULTIPLIER_CONFIG.firstBonus;
   const decayRatio = config?.decayRatio ?? BOOTSTRAP_NFT_MULTIPLIER_CONFIG.decayRatio;
 
@@ -805,7 +1149,7 @@ export async function calculateNFTMultiplierFromCount(
   }
 
   // Load NFT multiplier configuration (use bootstrap values if not yet configured)
-  const config = await context.NFTMultiplierConfig.get('current');
+  const config = await getCachedNFTMultiplierConfig(context);
   const firstBonus = config?.firstBonus ?? BOOTSTRAP_NFT_MULTIPLIER_CONFIG.firstBonus;
   const decayRatio = config?.decayRatio ?? BOOTSTRAP_NFT_MULTIPLIER_CONFIG.decayRatio;
 
@@ -1474,8 +1818,10 @@ export async function refreshUserVotingPowerState(
   const normalizedUserId = normalizeAddress(userId);
   const state = await getOrCreateUserLeaderboardState(context, normalizedUserId, timestamp);
   const currentVP = await calculateCurrentVPFromStorage(context, normalizedUserId, timestamp);
-  const vpMultiplier = await calculateVPMultiplier(context, currentVP);
-  const vpTierIndex = await findVPTierIndex(context, currentVP);
+  const { multiplier: vpMultiplier, tierIndex: vpTierIndex } = await resolveVPTier(
+    context,
+    currentVP
+  );
 
   // Recalculate NFT multiplier from actual ownership to handle static boosts
   const nftMultiplier = await calculateNFTMultiplierFromUser(context, normalizedUserId);
@@ -2170,9 +2516,10 @@ export async function settlePointsForUser(
     skipLPChainSync?: boolean;
   }
 ): Promise<void> {
+  ensureBlockCache(context, blockNumber);
   const normalizedUserId = normalizeAddress(userId);
   const normalizedReserveId = reserveId ? reserveId.toLowerCase() : null;
-  const leaderboardState = await context.LeaderboardState.get('current');
+  const leaderboardState = await getCachedLeaderboardState(context);
   // Allow settlements during gap; accrual is capped at the epoch end.
   if (Number(blockNumber) < LEADERBOARD_START_BLOCK) {
     await refreshUserVotingPowerState(context, normalizedUserId, timestamp);
@@ -2184,7 +2531,7 @@ export async function settlePointsForUser(
     return;
   }
 
-  const epoch = await context.LeaderboardEpoch.get(leaderboardState.currentEpochNumber.toString());
+  const epoch = await getCachedEpoch(context, leaderboardState.currentEpochNumber);
   if (!epoch) return;
 
   const balanceTimestamp =
@@ -2205,7 +2552,7 @@ export async function settlePointsForUser(
   }
   const vpState = await refreshUserVotingPowerState(context, normalizedUserId, timestamp);
 
-  const config = await context.LeaderboardConfig.get('global');
+  const config = await getCachedLeaderboardConfig(context);
   const cooldownSeconds = config?.cooldownSeconds ?? DEFAULT_COOLDOWN_SECONDS;
 
   let epochStats = await getOrCreateUserEpochStats(

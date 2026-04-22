@@ -5,8 +5,8 @@ import { test } from 'node:test';
 
 import { installViemMock } from './viem-mock';
 
-process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'true';
-process.env.ENVIO_DISABLE_ETH_CALLS = 'true';
+process.env.ENVIO_ENABLE_EXTERNAL_CALLS = 'false';
+process.env.ENVIO_ENABLE_ETH_CALLS = 'false';
 process.env.ENVIO_DISABLE_BOOTSTRAP = 'true';
 
 const ADDRESSES = {
@@ -309,10 +309,10 @@ test('epoch end initializes missing epoch state', async () => {
 });
 
 test('lp pool config handlers register pools and rates', async () => {
-  const previousExternal = process.env.ENVIO_DISABLE_EXTERNAL_CALLS;
-  const previousEth = process.env.ENVIO_DISABLE_ETH_CALLS;
-  process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'false';
-  process.env.ENVIO_DISABLE_ETH_CALLS = 'false';
+  const previousExternal = process.env.ENVIO_ENABLE_EXTERNAL_CALLS;
+  const prevEnableEth = process.env.ENVIO_ENABLE_ETH_CALLS;
+  process.env.ENVIO_ENABLE_EXTERNAL_CALLS = 'true';
+  process.env.ENVIO_ENABLE_ETH_CALLS = 'true';
   installViemMock();
 
   try {
@@ -383,8 +383,8 @@ test('lp pool config handlers register pools and rates', async () => {
     const config = mockDb.entities.LeaderboardConfig.get('global');
     assert.equal(config?.lpRateBps, 1500n);
   } finally {
-    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = previousExternal;
-    process.env.ENVIO_DISABLE_ETH_CALLS = previousEth;
+    process.env.ENVIO_ENABLE_EXTERNAL_CALLS = previousExternal;
+    process.env.ENVIO_ENABLE_ETH_CALLS = prevEnableEth;
   }
 });
 
@@ -421,10 +421,10 @@ test('lp pool config contract register supports v2 pools', async () => {
 });
 
 test('lp pool config keeps previous fee when eth calls are disabled', async () => {
-  const previousExternal = process.env.ENVIO_DISABLE_EXTERNAL_CALLS;
-  const previousEth = process.env.ENVIO_DISABLE_ETH_CALLS;
-  process.env.ENVIO_DISABLE_EXTERNAL_CALLS = 'true';
-  process.env.ENVIO_DISABLE_ETH_CALLS = 'true';
+  const previousExternal = process.env.ENVIO_ENABLE_EXTERNAL_CALLS;
+  const prevEnableEth = process.env.ENVIO_ENABLE_ETH_CALLS;
+  process.env.ENVIO_ENABLE_EXTERNAL_CALLS = 'false';
+  process.env.ENVIO_ENABLE_ETH_CALLS = 'false';
 
   try {
     const TestHelpers = loadTestHelpers();
@@ -472,8 +472,8 @@ test('lp pool config keeps previous fee when eth calls are disabled', async () =
     assert.equal(updated?.fee, 1234);
     assert.equal(updated?.enabledAtEpoch, 3n);
   } finally {
-    process.env.ENVIO_DISABLE_EXTERNAL_CALLS = previousExternal;
-    process.env.ENVIO_DISABLE_ETH_CALLS = previousEth;
+    process.env.ENVIO_ENABLE_EXTERNAL_CALLS = previousExternal;
+    process.env.ENVIO_ENABLE_ETH_CALLS = prevEnableEth;
   }
 });
 

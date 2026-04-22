@@ -2,6 +2,12 @@
 name: neverland-indexer
 description: Neverland Protocol Indexer
 
+# Two-phase preload optimization: handlers run twice — once concurrently to
+# discover & batch DB reads (writes are no-op), then sequentially with
+# in-memory data. Required for unbatched hot reads (User, UserReward,
+# UserReserve, DustLockToken, etc.) to hit ~100% batched.
+preload_handlers: true
+
 field_selection:
   transaction_fields:
     - hash
@@ -155,7 +161,7 @@ networks:
         address: 0xAB71Ce6910F255CC61fAf78EBd69A2B3dbC26Cd9
         handler: src/handlers/nft.ts
         events:
-          - event: PartnershipAdded(address indexed collection, string name, bool active, uint256 startTimestamp, uint256 endTimestamp, uint256 currentFirstBonus, uint256 currentDecayRatio, uint256 totalPartnerships)
+          - event: PartnershipAdded(address indexed collection, string name, bool active, uint256 startTimestamp, uint256 endTimestamp, uint256 staticBoostBps, uint256 currentFirstBonus, uint256 currentDecayRatio, uint256 totalPartnerships)
           - event: PartnershipUpdated(address indexed collection, string name, bool active, uint256 startTimestamp, uint256 endTimestamp)
           - event: PartnershipRemoved(address indexed collection, string name, uint256 totalPartnerships)
           - event: MultiplierParamsUpdated(uint256 oldFirstBonus, uint256 newFirstBonus, uint256 oldDecayRatio, uint256 newDecayRatio, uint256 timestamp, uint256 totalActivePartnerships)
@@ -308,15 +314,23 @@ networks:
       - name: Overnads
         abi_file_path: abis/helpers/ERC721.json
         address: 0xfb5ba4061f5c50b1daa6c067bb2dfb0a8ebf6a8d
-        start_block: 0
+        start_block: 37917430
         handler: src/handlers/nft.ts
         events:
           - event: Transfer(address indexed from, address indexed to, uint256 indexed tokenId)
 
-      - name: SolveilPass
+      - name: LilStars
         abi_file_path: abis/helpers/ERC721.json
-        address: 0x8255dacd8a45f4abe6dc821e6f7f3c92a8e22fbb
-        start_block: 0
+        address: 0xcabf3c04b90f4fe1b521fcaf4acb25d5df478e52
+        start_block: 56831578
+        handler: src/handlers/nft.ts
+        events:
+          - event: Transfer(address indexed from, address indexed to, uint256 indexed tokenId)
+
+      - name: RealNads
+        abi_file_path: abis/helpers/ERC721.json
+        address: 0xe20c4f8cacdb1854151f3e12144bdc919e608b9b
+        start_block: 38361781
         handler: src/handlers/nft.ts
         events:
           - event: Transfer(address indexed from, address indexed to, uint256 indexed tokenId)

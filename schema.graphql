@@ -1320,6 +1320,12 @@ type VotingPowerTier {
   isActive: Boolean! @index
 }
 
+type VotingPowerTierIndex {
+  id: ID!
+  activeTierIds: [String!]!
+  lastUpdate: Int!
+}
+
 type UserTokenList {
   id: ID!
   user_id: String! @index
