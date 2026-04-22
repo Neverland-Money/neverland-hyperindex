@@ -1,15 +1,20 @@
 [Unit]
-Description=Neverland HyperIndex
+Description=Neverland Indexer (HyperIndex + Hasura + Cloudflare Tunnel)
 Requires=docker.service
-After=docker.service
+After=docker.service network-online.target neverland-api.service
+Wants=network-online.target
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-WorkingDirectory=/home/catalyst/Documents/neverland/neverland-hyperindex
-ExecStart=/usr/bin/docker-compose -f docker-compose.prod.yml up -d
-ExecStop=/usr/bin/docker-compose -f docker-compose.prod.yml down
-TimeoutStartSec=0
+User=deploy
+Group=deploy
+WorkingDirectory=/opt/neverland/apps/indexer
+
+ExecStart=/usr/bin/docker compose -f docker-compose.prod.yml up -d --remove-orphans
+ExecStop=/usr/bin/docker compose -f docker-compose.prod.yml down
+
+TimeoutStartSec=600
 
 [Install]
 WantedBy=multi-user.target

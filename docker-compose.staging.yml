@@ -11,7 +11,8 @@ services:
     volumes:
       - postgres_data_staging:/var/lib/postgresql/data
     ports:
-      - "5433:5432"
+      # Localhost-only — use docker exec or SSH tunnel for access.
+      - "127.0.0.1:5433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
       interval: 10s
@@ -25,7 +26,8 @@ services:
     container_name: neverland-hasura-staging
     restart: unless-stopped
     ports:
-      - "8081:8080"
+      # Localhost-only — the upgrade script verifies via docker exec.
+      - "127.0.0.1:8081:8080"
     environment:
       HASURA_GRAPHQL_DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres-staging:5432/${POSTGRES_DB:-envio}_staging
       HASURA_GRAPHQL_ENABLE_CONSOLE: "true"
@@ -87,7 +89,8 @@ services:
       - node_modules_staging:/app/node_modules
       - pnpm_store_staging:/root/.local/share/pnpm/store
     ports:
-      - "9091:9090"
+      # Localhost-only metrics (for local Prometheus scrape only).
+      - "127.0.0.1:9091:9090"
     depends_on:
       postgres-staging:
         condition: service_healthy

@@ -10,8 +10,7 @@ services:
       POSTGRES_INITDB_ARGS: "-E UTF8"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
+    # No ports published — reachable only via the internal hyperindex network.
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
       interval: 10s
@@ -24,8 +23,8 @@ services:
     image: hasura/graphql-engine:v2.36.0
     container_name: neverland-hasura
     restart: unless-stopped
-    ports:
-      - "8080:8080"
+    # No ports published — cloudflared reaches hasura at http://hasura:8080
+    # on the internal hyperindex network.
     environment:
       HASURA_GRAPHQL_DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-envio}
       HASURA_GRAPHQL_ENABLE_CONSOLE: "true"
@@ -87,7 +86,8 @@ services:
       - node_modules:/app/node_modules
       - pnpm_store:/root/.local/share/pnpm/store
     ports:
-      - "9090:9090"
+      # Metrics exposed on localhost only (for future Prometheus scraping).
+      - "127.0.0.1:9090:9090"
     depends_on:
       postgres:
         condition: service_healthy

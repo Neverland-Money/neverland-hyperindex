@@ -7,11 +7,12 @@ echo "Neverland HyperIndex Deployment"
 echo "=================================="
 echo ""
 
-# Colors
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
-NC='\033[0m' # No Color
+NC='\033[0m'
+
+cd "$(dirname "$0")"
 
 # Check if .env exists
 if [ ! -f .env ]; then
@@ -28,52 +29,39 @@ if [ ! -f .env ]; then
     exit 1
 fi
 
-# Check required variables
+# Load .env for required-var check
+set -a
 source .env
+set +a
 
-if [ -z "$ENVIO_API_TOKEN" ] || [ "$ENVIO_API_TOKEN" = "your_envio_api_token_here" ]; then
-    echo -e "${RED}❌ ENVIO_API_TOKEN not set in .env${NC}"
-    exit 1
-fi
-
-if [ -z "$CLOUDFLARE_TUNNEL_TOKEN" ] || [ "$CLOUDFLARE_TUNNEL_TOKEN" = "your_cloudflare_tunnel_token_here" ]; then
-    echo -e "${RED}❌ CLOUDFLARE_TUNNEL_TOKEN not set in .env${NC}"
-    exit 1
-fi
-
-if [ -z "$POSTGRES_PASSWORD" ] || [ "$POSTGRES_PASSWORD" = "your_secure_postgres_password_here" ]; then
-    echo -e "${RED}❌ POSTGRES_PASSWORD not set in .env${NC}"
-    exit 1
-fi
-
+for var in ENVIO_API_TOKEN CLOUDFLARE_TUNNEL_TOKEN POSTGRES_PASSWORD HASURA_ADMIN_SECRET; do
+    placeholder_pattern="your_.*_here"
+    value="${!var:-}"
+    if [ -z "$value" ] || [[ "$value" =~ $placeholder_pattern ]]; then
+        echo -e "${RED}❌ $var not set (or still a placeholder) in .env${NC}"
+        exit 1
+    fi
+done
 echo -e "${GREEN}✓ Environment configuration validated${NC}"
 echo ""
 
-# Check Docker
+# Check Docker + Compose v2 plugin
 if ! command -v docker &> /dev/null; then
     echo -e "${RED}❌ Docker not found. Please install Docker first.${NC}"
     exit 1
 fi
-
-if ! command -v docker-compose &> /dev/null; then
-    echo -e "${RED}❌ Docker Compose not found. Please install Docker Compose first.${NC}"
+if ! docker compose version &> /dev/null; then
+    echo -e "${RED}❌ Docker Compose v2 plugin not found. Install from https://docs.docker.com/compose/install/${NC}"
     exit 1
 fi
-
-echo -e "${GREEN}✓ Docker and Docker Compose found${NC}"
+echo -e "${GREEN}✓ Docker + Compose v2 found${NC}"
 echo ""
 
-# Start deployment
-echo "Starting deployment..."
-echo ""
-
-# Pull latest images
 echo "Pulling Docker images..."
-docker-compose -f docker-compose.prod.yml pull
+docker compose -f docker-compose.prod.yml pull
 
-# Start services
 echo "Starting services..."
-docker-compose -f docker-compose.prod.yml up -d
+docker compose -f docker-compose.prod.yml up -d
 
 echo ""
 echo -e "${GREEN}=================================="
@@ -81,16 +69,9 @@ echo "✓ Deployment Complete!"
 echo "==================================${NC}"
 echo ""
 echo "Services status:"
-docker-compose -f docker-compose.prod.yml ps
+docker compose -f docker-compose.prod.yml ps
 echo ""
-echo "Next steps:"
-echo "  1. Check logs: docker-compose -f docker-compose.prod.yml logs -f"
-echo "  2. Wait for indexer to sync (may take several minutes)"
-echo "  3. Access GraphQL endpoint via your Cloudflare Tunnel URL"
+echo "Tip: On this server, the stack is normally managed by systemd."
+echo "  sudo systemctl status neverland-indexer"
+echo "  docker logs -f neverland-indexer   # watch sync"
 echo ""
-echo "Useful commands:"
-echo "  - View logs: docker-compose -f docker-compose.prod.yml logs -f indexer"
-echo "  - Stop: docker-compose -f docker-compose.prod.yml down"
-echo "  - Restart: docker-compose -f docker-compose.prod.yml restart"
-echo ""
-echo "For more information, see DEPLOYMENT.md"
