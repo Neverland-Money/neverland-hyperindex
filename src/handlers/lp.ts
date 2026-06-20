@@ -1704,6 +1704,11 @@ async function settleBalancerAutoRangePoolPositionsClockwise(
     poolConfig,
     timestamp
   );
+  // Precompute the LP rate once for the whole sweep — it depends only on the pool's
+  // lpRateBps + global config/pool-count, so it is loop-invariant (every swept position
+  // has pool === poolId). Threading it in avoids the per-position getEffectiveLpRateBps
+  // fan-out (LP registry + N config reads), matching settleV2PoolPositions.
+  const effectiveLpRateBps = await getEffectiveLpRateBps(context, poolConfig);
   const startIndex = cursor.cursorIndex % positions.length;
   const maxScans = Math.min(positions.length, LP_BALANCER_MAX_SETTLEMENTS_PER_SWAP);
   let nextCursorIndex = startIndex;
@@ -1723,7 +1728,7 @@ async function settleBalancerAutoRangePoolPositionsClockwise(
       continue;
     }
 
-    const settlement = await settleLPPosition(context, position, timestamp);
+    const settlement = await settleLPPosition(context, position, timestamp, effectiveLpRateBps);
     const derivedAmounts = calculateV2PositionAmounts(
       position.liquidity,
       poolV2State.reserve0,

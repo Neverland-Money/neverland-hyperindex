@@ -194,9 +194,9 @@ async function main(): Promise<void> {
     reportWallet(w.addr, w.expect, L, P);
   }
   console.log(`\n${'='.repeat(78)}`);
-  console.log(`Read: per-epoch lpPoints is the tell — wallet 2 should show a DIFF in the`);
-  console.log(`post-Balancer-cutover epoch (local > prod); wallets 1 & 3 should be ~match`);
-  console.log(`everywhere (sub-1% = the gate's past-epoch rounding + 45s live-epoch drift).`);
+  console.log(`Read: per-epoch lpPoints is the tell — the Balancer-LP wallet (#0, 0xcb69)`);
+  console.log(`should show a DIFF in the post-cutover epoch (local > prod); the no-LP wallet`);
+  console.log(`(#1, 0x0382) should ~match everywhere (sub-1% = past-epoch rounding + live drift).`);
 }
 
 main().catch((e: unknown) => {

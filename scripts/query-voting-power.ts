@@ -36,7 +36,7 @@ interface GraphQLResponse {
 }
 
 function isGraphQLResponse(value: unknown): value is GraphQLResponse {
-  return typeof value === 'object' && value !== null;
+  return typeof value === 'object' && value !== null && ('data' in value || 'errors' in value);
 }
 
 async function queryUserVotingPower(userAddress: string): Promise<void> {
