@@ -2,7 +2,14 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
+
+import { TestHelpers } from './v3-test-helpers';
 import { LEADERBOARD_START_BLOCK } from '../helpers/constants';
+import {
+  getConfiguredLiveEpoch,
+  shouldSkipMidEpochKeeperSettle,
+} from '../handlers/leaderboardKeeper';
+import type { handlerContext } from '../types/envio';
 
 process.env.ENVIO_ENABLE_EXTERNAL_CALLS = 'false';
 process.env.ENVIO_ENABLE_ETH_CALLS = 'false';
@@ -15,6 +22,7 @@ const ADDRESSES = {
 };
 
 function loadTestHelpers() {
+  return TestHelpers;
   const cwd = process.cwd();
   const distTestRoot = path.join(cwd, 'dist-test');
   const generatedLink = path.join(distTestRoot, 'generated');
@@ -302,6 +310,75 @@ test('keeper events update leaderboard state and ownership', async () => {
   );
 });
 
+test('keeper sync events preserve special edition multiplier in combined state', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  mockDb = mockDb.entities.NFTMultiplierConfig.set({
+    id: 'current',
+    firstBonus: 1000n,
+    decayRatio: 10000n,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.VotingPowerTier.set({
+    id: '0',
+    tierIndex: 0n,
+    minVotingPower: 0n,
+    multiplierBps: 20000n,
+    createdAt: 0,
+    lastUpdate: 0,
+    isActive: true,
+  });
+  mockDb = mockDb.entities.UserLeaderboardState.set({
+    id: ADDRESSES.user,
+    user_id: ADDRESSES.user,
+    nftCount: 0n,
+    nftMultiplier: 10000n,
+    specialEditionCount: 1n,
+    specialEditionMultiplier: 15000n,
+    votingPower: 0n,
+    vpTierIndex: 0n,
+    vpMultiplier: 10000n,
+    combinedMultiplier: 15000n,
+    totalEpochsParticipated: 0n,
+    lifetimePoints: 0n,
+    currentEpochId: undefined,
+    currentEpochRank: undefined,
+    lastUpdate: 0,
+  });
+
+  const vpSynced = TestHelpers.LeaderboardKeeper.VotingPowerSynced.createMockEvent({
+    user: ADDRESSES.user,
+    votingPower: 1n,
+    timestamp: 100n,
+    ...eventData(LEADERBOARD_START_BLOCK + 20, 100, ADDRESSES.keeper),
+  });
+  mockDb = await TestHelpers.LeaderboardKeeper.VotingPowerSynced.processEvent({
+    event: vpSynced,
+    mockDb,
+  });
+
+  let state = mockDb.entities.UserLeaderboardState.get(ADDRESSES.user);
+  assert.equal(state?.combinedMultiplier, 30000n);
+
+  const nftSynced = TestHelpers.LeaderboardKeeper.NFTBalanceSynced.createMockEvent({
+    user: ADDRESSES.user,
+    collection: ADDRESSES.collection,
+    balance: 1n,
+    timestamp: 101n,
+    ...eventData(LEADERBOARD_START_BLOCK + 21, 101, ADDRESSES.keeper),
+  });
+  mockDb = await TestHelpers.LeaderboardKeeper.NFTBalanceSynced.processEvent({
+    event: nftSynced,
+    mockDb,
+  });
+
+  state = mockDb.entities.UserLeaderboardState.get(ADDRESSES.user);
+  assert.equal(state?.nftMultiplier, 11000n);
+  assert.equal(state?.combinedMultiplier, 33000n);
+});
+
 test('nft balance sync clamps when state count is already zero', async () => {
   const TestHelpers = loadTestHelpers();
   let mockDb = TestHelpers.MockDb.createMockDb();
@@ -312,6 +389,8 @@ test('nft balance sync clamps when state count is already zero', async () => {
     user_id: ADDRESSES.user,
     nftCount: 0n,
     nftMultiplier: 10000n,
+    specialEditionCount: 0n,
+    specialEditionMultiplier: 10000n,
     votingPower: 0n,
     vpTierIndex: 0n,
     vpMultiplier: 10000n,
@@ -387,6 +466,126 @@ test('user settled uses block timestamp when event timestamp missing', async () 
   assert.equal(record?.timestamp, 777);
 });
 
+function keeperGateContext(
+  state: { currentEpochNumber: bigint; isActive: boolean } | undefined
+): handlerContext {
+  return { LeaderboardState: { get: async () => state } } as unknown as handlerContext;
+}
+
+test('keeper backfill gate skips only closed past epochs outside the gap', async () => {
+  const prev = process.env.ENVIO_LEADERBOARD_LIVE_EPOCH;
+  try {
+    delete process.env.ENVIO_LEADERBOARD_LIVE_EPOCH;
+    // gate disabled by default -> never skips
+    assert.equal(getConfiguredLiveEpoch(), 0n);
+    assert.equal(
+      await shouldSkipMidEpochKeeperSettle(
+        keeperGateContext({ currentEpochNumber: 2n, isActive: true })
+      ),
+      false
+    );
+
+    process.env.ENVIO_LEADERBOARD_LIVE_EPOCH = '5';
+    assert.equal(getConfiguredLiveEpoch(), 5n);
+    // closed past epoch, mid-epoch (active) -> SKIP
+    assert.equal(
+      await shouldSkipMidEpochKeeperSettle(
+        keeperGateContext({ currentEpochNumber: 2n, isActive: true })
+      ),
+      true
+    );
+    // closed past epoch, GAP (inactive) -> keep (it finalizes the epoch)
+    assert.equal(
+      await shouldSkipMidEpochKeeperSettle(
+        keeperGateContext({ currentEpochNumber: 2n, isActive: false })
+      ),
+      false
+    );
+    // live epoch -> keep
+    assert.equal(
+      await shouldSkipMidEpochKeeperSettle(
+        keeperGateContext({ currentEpochNumber: 5n, isActive: true })
+      ),
+      false
+    );
+    // future epoch -> keep
+    assert.equal(
+      await shouldSkipMidEpochKeeperSettle(
+        keeperGateContext({ currentEpochNumber: 6n, isActive: true })
+      ),
+      false
+    );
+    // missing leaderboard state -> keep
+    assert.equal(await shouldSkipMidEpochKeeperSettle(keeperGateContext(undefined)), false);
+
+    // malformed / zero values disable the gate
+    process.env.ENVIO_LEADERBOARD_LIVE_EPOCH = 'not-a-number';
+    assert.equal(getConfiguredLiveEpoch(), 0n);
+    process.env.ENVIO_LEADERBOARD_LIVE_EPOCH = '0';
+    assert.equal(getConfiguredLiveEpoch(), 0n);
+  } finally {
+    if (prev === undefined) delete process.env.ENVIO_LEADERBOARD_LIVE_EPOCH;
+    else process.env.ENVIO_LEADERBOARD_LIVE_EPOCH = prev;
+  }
+});
+
+test('keeper user settled is skipped for a closed past epoch when the live-epoch gate is set', async () => {
+  const prev = process.env.ENVIO_LEADERBOARD_LIVE_EPOCH;
+  process.env.ENVIO_LEADERBOARD_LIVE_EPOCH = '5';
+  try {
+    const TestHelpers = loadTestHelpers();
+    let mockDb = TestHelpers.MockDb.createMockDb();
+    const eventData = createEventDataFactory();
+
+    // epoch 2 (< live 5), active (mid-epoch, not the gap) -> gate applies
+    mockDb = mockDb.entities.LeaderboardState.set({
+      id: 'current',
+      currentEpochNumber: 2n,
+      isActive: true,
+    });
+    mockDb = mockDb.entities.LeaderboardEpoch.set({
+      id: '2',
+      epochNumber: 2n,
+      startBlock: 0n,
+      startTime: 0,
+      endBlock: undefined,
+      endTime: undefined,
+      isActive: true,
+      duration: undefined,
+      scheduledStartTime: 0,
+      scheduledEndTime: 0,
+    });
+
+    // block past the leaderboard start, so a NON-gated settle would create UserEpochStats
+    const block = Number(LEADERBOARD_START_BLOCK) + 1000;
+    const settle = TestHelpers.LeaderboardKeeper.UserSettled.createMockEvent({
+      user: ADDRESSES.user,
+      timestamp: 1767000000n,
+      ...eventData(block, 1767000000, ADDRESSES.keeper),
+    });
+    mockDb = await TestHelpers.LeaderboardKeeper.UserSettled.processEvent({
+      event: settle,
+      mockDb,
+    });
+
+    // the raw keeper event is still recorded (the gate keeps it)...
+    const recordId = `${settle.transaction.hash}-${settle.logIndex}`;
+    assert.ok(
+      mockDb.entities.LeaderboardKeeperUserSettled.get(recordId),
+      'raw keeper-settled event is still recorded'
+    );
+    // ...but the heavy reserve sweep was skipped -> no per-user epoch stats were created
+    assert.equal(
+      mockDb.entities.UserEpochStats.get(`${ADDRESSES.user}:2`),
+      undefined,
+      'mid-epoch keeper settle skipped for a closed past epoch'
+    );
+  } finally {
+    if (prev === undefined) delete process.env.ENVIO_LEADERBOARD_LIVE_EPOCH;
+    else process.env.ENVIO_LEADERBOARD_LIVE_EPOCH = prev;
+  }
+});
+
 test('voting power synced caps combined multiplier', async () => {
   const TestHelpers = loadTestHelpers();
   let mockDb = TestHelpers.MockDb.createMockDb();
@@ -412,6 +611,8 @@ test('voting power synced caps combined multiplier', async () => {
     user_id: ADDRESSES.user,
     nftCount: 1n,
     nftMultiplier: 10000n,
+    specialEditionCount: 0n,
+    specialEditionMultiplier: 10000n,
     votingPower: 0n,
     vpTierIndex: 0n,
     vpMultiplier: 10000n,

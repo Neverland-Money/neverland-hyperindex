@@ -3,7 +3,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 
-import { AUSD_ADDRESS, USDC_ADDRESS, ZERO_ADDRESS } from '../helpers/constants';
+import { TestHelpers } from './v3-test-helpers';
+
+import {
+  AUSD_ADDRESS,
+  BALANCER_AUTORANGE_V3_POOL_ADDRESS,
+  BALANCER_VAULT_ADDRESS,
+  LP_BALANCER_AUTORANGE_CUTOVER_BLOCK,
+  LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP,
+  USDC_ADDRESS,
+  ZERO_ADDRESS,
+} from '../helpers/constants';
 import { installViemMock, setLPPositionOverride } from './viem-mock';
 
 process.env.ENVIO_ENABLE_EXTERNAL_CALLS = 'false';
@@ -23,6 +33,9 @@ const EXPECTED_VALUE_USD = 3000n * 10n ** 8n;
 const DUST_DECIMALS = 18;
 const LEGACY_V3_POOL = '0xd15965968fe8bf2babbe39b2fc5de1ab6749141f';
 const LEGACY_V3_POSITION_MANAGER = '0x7197e214c0b767cfb76fb734ab638e2c192f4e53';
+const V2_POOL = '0x86dbf00485871c901c5129bd525348db96c2eb2d';
+const BALANCER_POOL = BALANCER_AUTORANGE_V3_POOL_ADDRESS;
+const DUST_ADDRESS = '0xad96c3dffcd6374294e2573a7fbba96097cc8d7c';
 const LP_V2_CUTOVER_BLOCK = 56436798;
 const LP_V2_CUTOVER_TIMESTAMP = 1771517877;
 
@@ -34,9 +47,10 @@ const ADDRESSES = {
   user: '0x000000000000000000000000000000000000a005',
 };
 
-type TestHelpersApi = typeof import('../../generated').TestHelpers;
+type TestHelpersApi = typeof TestHelpers;
 
 function loadTestHelpers(): TestHelpersApi {
+  return TestHelpers;
   const cwd = process.cwd();
   const distTestRoot = path.join(cwd, 'dist-test');
   const generatedLink = path.join(distTestRoot, 'generated');
@@ -82,7 +96,27 @@ function createEventDataFactory() {
   };
 }
 
-test('increase liquidity before transfer uses cached mint amounts', async () => {
+function seedLeaderboardConfig(
+  TestHelpers: TestHelpersApi,
+  mockDb: ReturnType<TestHelpersApi['MockDb']['createMockDb']>
+) {
+  return mockDb.entities.LeaderboardConfig.set({
+    id: 'global',
+    depositRateBps: 0n,
+    borrowRateBps: 0n,
+    vpRateBps: 0n,
+    lpRateBps: 2500n,
+    supplyDailyBonus: 0,
+    borrowDailyBonus: 0,
+    repayDailyBonus: 0,
+    withdrawDailyBonus: 0,
+    cooldownSeconds: 0,
+    minDailyBonusUsd: 0,
+    lastUpdate: 0,
+  });
+}
+
+test('increase liquidity without indexed mint data does not create from rpc', async () => {
   const prevEnableExternal = process.env.ENVIO_ENABLE_EXTERNAL_CALLS;
   const prevEnableEth = process.env.ENVIO_ENABLE_ETH_CALLS;
   process.env.ENVIO_ENABLE_EXTERNAL_CALLS = 'true';
@@ -170,11 +204,9 @@ test('increase liquidity before transfer uses cached mint amounts', async () => 
       mockDb,
     });
 
-    // IncreaseLiquidity now creates position directly (no pending data)
+    // IncreaseLiquidity alone does not read positions from RPC; ownership arrives through Transfer.
     const positionAfterIncrease = mockDb.entities.UserLPPosition.get(TOKEN_ID.toString());
-    assert.ok(positionAfterIncrease);
-    assert.equal(positionAfterIncrease?.amount0, AMOUNT0);
-    assert.equal(positionAfterIncrease?.amount1, AMOUNT1);
+    assert.equal(positionAfterIncrease, undefined);
 
     const transferMeta = {
       mockEventData: {
@@ -196,10 +228,7 @@ test('increase liquidity before transfer uses cached mint amounts', async () => 
     });
 
     const position = mockDb.entities.UserLPPosition.get(TOKEN_ID.toString());
-    assert.ok(position);
-    assert.equal(position?.amount0, AMOUNT0);
-    assert.equal(position?.amount1, AMOUNT1);
-    assert.equal(position?.valueUsd, EXPECTED_VALUE_USD);
+    assert.equal(position, undefined);
 
     // Mint data should be cleaned up after position creation
     const pendingKey = `pending:${TOKEN_ID.toString()}`;
@@ -303,13 +332,13 @@ test('increase liquidity uses pool mint data when eth_call is unavailable', asyn
     mockDb,
   });
 
-  // IncreaseLiquidity now creates position directly using Pool.Mint data
+  // IncreaseLiquidity can create from the indexed Pool.Mint data without RPC.
   const positionAfterIncrease = mockDb.entities.UserLPPosition.get(TOKEN_ID.toString());
   assert.ok(positionAfterIncrease);
   assert.equal(positionAfterIncrease?.tickLower, TICK_LOWER);
   assert.equal(positionAfterIncrease?.tickUpper, TICK_UPPER);
 
-  // Pool mint data should be cleaned up
+  // Pool mint data is cleaned once the position is created.
   const poolMintKey = `${ADDRESSES.pool}:${TICK_LOWER}:${TICK_UPPER}:${txHash}`;
   const poolMintData = mockDb.entities.LPMintData.get(poolMintKey);
   assert.equal(poolMintData, undefined);
@@ -430,6 +459,22 @@ test('swap accrues lp points when position stays in range', async () => {
 
     const increaseMeta = eventData(100, 1000, ADDRESSES.positionManager);
     const txHash = increaseMeta.mockEventData.transaction.hash;
+    const poolMint = TestHelpers.UniswapV3Pool.Mint.createMockEvent({
+      owner: ADDRESSES.positionManager,
+      tickLower: BigInt(TICK_LOWER),
+      tickUpper: BigInt(TICK_UPPER),
+      amount: 123n,
+      amount0: AMOUNT0,
+      amount1: AMOUNT1,
+      mockEventData: {
+        block: increaseMeta.mockEventData.block,
+        logIndex: increaseMeta.mockEventData.logIndex - 1,
+        srcAddress: ADDRESSES.pool,
+        transaction: { hash: txHash },
+      },
+    });
+    mockDb = await TestHelpers.UniswapV3Pool.Mint.processEvent({ event: poolMint, mockDb });
+
     const increase = TestHelpers.NonfungiblePositionManager.IncreaseLiquidity.createMockEvent({
       tokenId: TOKEN_ID,
       liquidity: 123n,
@@ -2670,7 +2715,6 @@ test('uniswap v2 sync derives prices when stable token is token1', async () => {
 test('increase liquidity on legacy manager applies ausd-derived pricing path', async () => {
   const TestHelpers = loadTestHelpers();
   let mockDb = TestHelpers.MockDb.createMockDb();
-  const eventData = createEventDataFactory();
 
   const txHash = '0x' + '9'.repeat(64);
   const blockNumber = LP_V2_CUTOVER_BLOCK - 1;
@@ -2733,7 +2777,7 @@ test('increase liquidity on legacy manager applies ausd-derived pricing path', a
   assert.equal(position?.pool, LEGACY_V3_POOL);
 });
 
-test('transfer mint resolves pool config from eth_call position data', async () => {
+test('transfer mint does not resolve missing position data from rpc', async () => {
   const prevEnableExternal = process.env.ENVIO_ENABLE_EXTERNAL_CALLS;
   const prevEnableEth = process.env.ENVIO_ENABLE_ETH_CALLS;
   process.env.ENVIO_ENABLE_EXTERNAL_CALLS = 'true';
@@ -2819,8 +2863,7 @@ test('transfer mint resolves pool config from eth_call position data', async () 
     });
 
     const position = mockDb.entities.UserLPPosition.get(TOKEN_ID.toString());
-    assert.ok(position);
-    assert.equal(position?.pool, ADDRESSES.pool);
+    assert.equal(position, undefined);
   } finally {
     setLPPositionOverride(undefined);
     process.env.ENVIO_ENABLE_EXTERNAL_CALLS = prevEnableExternal;
@@ -2951,4 +2994,246 @@ test('uniswap v2 transfer settles existing synthetic position points', async () 
   const epochStats = mockDb.entities.UserEpochStats.get(`${user}:1`);
   assert.ok(epochStats);
   assert.ok((epochStats?.lpPoints ?? 0n) > 0n);
+});
+
+test('balancer autorange transfer before cutover tracks holder and accrues only after cutover', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  mockDb = seedLeaderboardConfig(TestHelpers, mockDb);
+  const eventData = createEventDataFactory();
+  const user = ADDRESSES.user;
+  const positionId = `v2:${BALANCER_POOL}:${user}`;
+
+  mockDb = mockDb.entities.LeaderboardState.set({
+    id: 'current',
+    currentEpochNumber: 1n,
+    isActive: true,
+  });
+  mockDb = mockDb.entities.LeaderboardEpoch.set({
+    id: '1',
+    epochNumber: 1n,
+    startBlock: 0n,
+    startTime: 0,
+    endBlock: undefined,
+    endTime: undefined,
+    isActive: true,
+    duration: undefined,
+    scheduledStartTime: 0,
+    scheduledEndTime: 0,
+  });
+  mockDb = mockDb.entities.TokenInfo.set({
+    id: USDC_ADDRESS,
+    address: USDC_ADDRESS,
+    decimals: DECIMALS,
+    symbol: 'USDC',
+    name: 'USDC',
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.TokenInfo.set({
+    id: DUST_ADDRESS,
+    address: DUST_ADDRESS,
+    decimals: DUST_DECIMALS,
+    symbol: 'DUST',
+    name: 'Dust',
+    lastUpdate: 0,
+  });
+
+  const liquidityAdded = TestHelpers.BalancerVault.LiquidityAdded.createMockEvent({
+    pool: BALANCER_POOL,
+    liquidityProvider: user,
+    kind: 0n,
+    totalSupply: 1_000n,
+    amountsAddedRaw: [1_000_000n * 10n ** 6n, 500_000n * 10n ** 18n],
+    swapFeeAmountsRaw: [0n, 0n],
+    ...eventData(
+      LP_BALANCER_AUTORANGE_CUTOVER_BLOCK - 20,
+      LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP - 200,
+      BALANCER_VAULT_ADDRESS
+    ),
+  });
+  mockDb = await TestHelpers.BalancerVault.LiquidityAdded.processEvent({
+    event: liquidityAdded,
+    mockDb,
+  });
+
+  const preCutoverMint = TestHelpers.BalancerAutoRangePool.Transfer.createMockEvent({
+    from: ZERO_ADDRESS,
+    to: user,
+    value: 100n,
+    ...eventData(
+      LP_BALANCER_AUTORANGE_CUTOVER_BLOCK - 10,
+      LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP - 100,
+      BALANCER_POOL
+    ),
+  });
+  mockDb = await TestHelpers.BalancerAutoRangePool.Transfer.processEvent({
+    event: preCutoverMint,
+    mockDb,
+  });
+
+  const preCutoverStats = mockDb.entities.UserEpochStats.get(`${user}:1`);
+  assert.equal(preCutoverStats, undefined);
+  const position = mockDb.entities.UserLPPosition.get(positionId);
+  assert.ok(position);
+  assert.equal(position?.lastInRangeTimestamp, LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP - 100);
+
+  const postCutoverSwap = TestHelpers.BalancerVault.Swap.createMockEvent({
+    pool: BALANCER_POOL,
+    tokenIn: DUST_ADDRESS,
+    tokenOut: USDC_ADDRESS,
+    amountIn: 10n * 10n ** 18n,
+    amountOut: 5n * 10n ** 6n,
+    swapFeePercentage: 10n ** 16n,
+    swapFeeAmount: 10n ** 16n,
+    ...eventData(
+      LP_BALANCER_AUTORANGE_CUTOVER_BLOCK + 10,
+      LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP + 3600,
+      BALANCER_VAULT_ADDRESS
+    ),
+  });
+  mockDb = await TestHelpers.BalancerVault.Swap.processEvent({
+    event: postCutoverSwap,
+    mockDb,
+  });
+
+  const epochStats = mockDb.entities.UserEpochStats.get(`${user}:1`);
+  assert.ok(epochStats);
+  assert.ok((epochStats?.lpPoints ?? 0n) > 0n);
+
+  const updatedPosition = mockDb.entities.UserLPPosition.get(positionId);
+  assert.equal(updatedPosition?.liquidity, 100n);
+  assert.equal(updatedPosition?.lastSettledAt, LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP + 3600);
+
+  const v2State = mockDb.entities.LPPoolV2State.get(BALANCER_POOL);
+  assert.equal(v2State?.reserve0, 1_000_000n * 10n ** 6n - 5n * 10n ** 6n);
+  assert.equal(v2State?.reserve1, 500_000n * 10n ** 18n + 10n * 10n ** 18n);
+});
+
+test('uniswap v2 hard-stops at balancer autorange cutover and balancer becomes active', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  mockDb = seedLeaderboardConfig(TestHelpers, mockDb);
+  const eventData = createEventDataFactory();
+  const user = ADDRESSES.user;
+  const positionId = `v2:${V2_POOL}:${user}`;
+
+  mockDb = mockDb.entities.LeaderboardState.set({
+    id: 'current',
+    currentEpochNumber: 1n,
+    isActive: true,
+  });
+  mockDb = mockDb.entities.LeaderboardEpoch.set({
+    id: '1',
+    epochNumber: 1n,
+    startBlock: 0n,
+    startTime: 0,
+    endBlock: undefined,
+    endTime: undefined,
+    isActive: true,
+    duration: undefined,
+    scheduledStartTime: 0,
+    scheduledEndTime: 0,
+  });
+  mockDb = mockDb.entities.LPPoolRegistry.set({
+    id: 'global',
+    poolIds: [V2_POOL],
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolConfig.set({
+    id: V2_POOL,
+    pool: V2_POOL,
+    positionManager: V2_POOL,
+    token0: USDC_ADDRESS,
+    token1: DUST_ADDRESS,
+    fee: 3000,
+    lpRateBps: 2500n,
+    isActive: true,
+    enabledAtEpoch: 1n,
+    enabledAtTimestamp: LP_V2_CUTOVER_TIMESTAMP,
+    disabledAtEpoch: undefined,
+    disabledAtTimestamp: undefined,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolState.set({
+    id: V2_POOL,
+    pool: V2_POOL,
+    currentTick: 0,
+    sqrtPriceX96: 0n,
+    token0Price: PRICE_E8,
+    token1Price: PRICE_E8,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolV2State.set({
+    id: V2_POOL,
+    pool: V2_POOL,
+    reserve0: 1_000_000n * 10n ** 6n,
+    reserve1: 500_000n * 10n ** 18n,
+    lpTotalSupply: 1_000n,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.UserLPPosition.set({
+    id: positionId,
+    tokenId: BigInt(user),
+    user_id: user,
+    pool: V2_POOL,
+    positionManager: V2_POOL,
+    tickLower: -887272,
+    tickUpper: 887272,
+    liquidity: 1_000n,
+    amount0: 0n,
+    amount1: 0n,
+    isInRange: true,
+    valueUsd: 100n * 10n ** 8n,
+    lastInRangeTimestamp: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP - 3600,
+    accumulatedInRangeSeconds: 0n,
+    lastSettledAt: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP - 3600,
+    settledLpPoints: 0n,
+    createdAt: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP - 3600,
+    lastUpdate: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP - 3600,
+  });
+  mockDb = mockDb.entities.UserLPPositionIndex.set({
+    id: user,
+    user_id: user,
+    positionIds: [positionId],
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolPositionIndex.set({
+    id: V2_POOL,
+    pool: V2_POOL,
+    positionIds: [positionId],
+    lastUpdate: 0,
+  });
+
+  const postCutoverTransfer = TestHelpers.UniswapV2Pair.Transfer.createMockEvent({
+    from: ZERO_ADDRESS,
+    to: user,
+    value: 100n,
+    ...eventData(
+      LP_BALANCER_AUTORANGE_CUTOVER_BLOCK + 1,
+      LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP + 60,
+      V2_POOL
+    ),
+  });
+  mockDb = await TestHelpers.UniswapV2Pair.Transfer.processEvent({
+    event: postCutoverTransfer,
+    mockDb,
+  });
+
+  const v2Config = mockDb.entities.LPPoolConfig.get(V2_POOL);
+  assert.equal(v2Config?.isActive, false);
+  assert.equal(v2Config?.disabledAtTimestamp, LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP);
+
+  const balancerConfig = mockDb.entities.LPPoolConfig.get(BALANCER_POOL);
+  assert.equal(balancerConfig?.isActive, true);
+  assert.equal(balancerConfig?.enabledAtTimestamp, LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP);
+
+  const epochStats = mockDb.entities.UserEpochStats.get(`${user}:1`);
+  assert.ok(epochStats);
+  assert.ok((epochStats?.lpPoints ?? 0n) > 0n);
+
+  const updatedV2Position = mockDb.entities.UserLPPosition.get(positionId);
+  assert.equal(updatedV2Position?.liquidity, 1_000n);
+  assert.equal(updatedV2Position?.lastSettledAt, LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP);
 });

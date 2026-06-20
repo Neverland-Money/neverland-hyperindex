@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 
+import { TestHelpers } from './v3-test-helpers';
+
 import { ZERO_ADDRESS } from '../helpers/constants';
 import { VIEM_ERROR_ADDRESS, installViemMock } from './viem-mock';
 
@@ -18,6 +20,7 @@ const ADDRESSES = {
 };
 
 function loadTestHelpers() {
+  return TestHelpers;
   const cwd = process.cwd();
   const distTestRoot = path.join(cwd, 'dist-test');
   const generatedLink = path.join(distTestRoot, 'generated');
@@ -287,6 +290,114 @@ test('transfer uses default multiplier when config missing', async () => {
   assert.equal(state?.nftCount, 1n);
 });
 
+test('transfer composes collection multiplier with special edition multiplier', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  mockDb = mockDb.entities.LeaderboardState.set({
+    id: 'current',
+    currentEpochNumber: 1n,
+    isActive: true,
+  });
+  mockDb = mockDb.entities.LeaderboardEpoch.set({
+    id: '1',
+    epochNumber: 1n,
+    startBlock: 0n,
+    startTime: 0,
+    endBlock: undefined,
+    endTime: undefined,
+    isActive: true,
+    duration: undefined,
+    scheduledStartTime: 0,
+    scheduledEndTime: 0,
+  });
+  mockDb = mockDb.entities.NFTMultiplierConfig.set({
+    id: 'current',
+    firstBonus: 1000n,
+    decayRatio: 9000n,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.NFTPartnershipRegistryState.set({
+    id: 'current',
+    activeCollections: [ADDRESSES.collection],
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.NFTPartnership.set({
+    id: ADDRESSES.collection,
+    collection: ADDRESSES.collection,
+    name: 'Test Collection',
+    active: true,
+    staticBoostBps: undefined,
+    startTimestamp: 0,
+    endTimestamp: undefined,
+    addedAt: 0,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.SpecialEditionRegistryState.set({
+    id: 'current',
+    editionIds: [1n],
+    totalEditions: 1n,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.SpecialEditionConfig.set({
+    id: '1',
+    editionId: 1n,
+    key: 'SHINY',
+    name: 'Shiny',
+    perTokenBoostBps: 2000n,
+    enabled: true,
+    exists: true,
+    createdAt: 0,
+    updatedAt: 0,
+    changeTimestamps: [0],
+    boostBpsHistory: [2000n],
+    enabledHistory: [1n],
+  });
+  mockDb = mockDb.entities.UserSpecialEditionState.set({
+    id: `${ADDRESSES.user}:1`,
+    user_id: ADDRESSES.user,
+    editionId: 1n,
+    tokenCount: 1n,
+    countTimestamps: [0],
+    tokenCountHistory: [1n],
+    updatedAt: 0,
+  });
+  mockDb = mockDb.entities.UserLeaderboardState.set({
+    id: ADDRESSES.user,
+    user_id: ADDRESSES.user,
+    nftCount: 0n,
+    nftMultiplier: 10000n,
+    specialEditionCount: 1n,
+    specialEditionMultiplier: 12000n,
+    votingPower: 0n,
+    vpTierIndex: 0n,
+    vpMultiplier: 10000n,
+    combinedMultiplier: 12000n,
+    totalEpochsParticipated: 0n,
+    lifetimePoints: 0n,
+    currentEpochId: undefined,
+    currentEpochRank: undefined,
+    lastUpdate: 0,
+  });
+
+  const received = TestHelpers.PartnerNFT.Transfer.createMockEvent({
+    from: ZERO_ADDRESS,
+    to: ADDRESSES.user,
+    id: 7n,
+    ...eventData(11, 310, ADDRESSES.collection),
+  });
+  mockDb = await TestHelpers.PartnerNFT.Transfer.processEvent({
+    event: received,
+    mockDb,
+  });
+
+  const state = mockDb.entities.UserLeaderboardState.get(ADDRESSES.user);
+  assert.equal(state?.nftMultiplier, 11000n);
+  assert.equal(state?.specialEditionMultiplier, 12000n);
+  assert.equal(state?.combinedMultiplier, 13200n);
+});
+
 test('transfer caps multiplier at max', async () => {
   const TestHelpers = loadTestHelpers();
   let mockDb = TestHelpers.MockDb.createMockDb();
@@ -347,6 +458,8 @@ test('transfer caps multiplier at max', async () => {
     user_id: ADDRESSES.user,
     nftCount: 1n,
     nftMultiplier: 50000n,
+    specialEditionCount: 0n,
+    specialEditionMultiplier: 10000n,
     votingPower: 0n,
     vpTierIndex: 0n,
     vpMultiplier: 10000n,
@@ -423,6 +536,8 @@ test('transfer removal handles empty state count', async () => {
     user_id: ADDRESSES.user,
     nftCount: 0n,
     nftMultiplier: 10000n,
+    specialEditionCount: 0n,
+    specialEditionMultiplier: 10000n,
     votingPower: 0n,
     vpTierIndex: 0n,
     vpMultiplier: 10000n,
@@ -465,6 +580,8 @@ test('combined multiplier caps at maximum', async () => {
     user_id: ADDRESSES.user,
     nftCount: 1n,
     nftMultiplier: 50000n,
+    specialEditionCount: 0n,
+    specialEditionMultiplier: 10000n,
     votingPower: 0n,
     vpTierIndex: 0n,
     vpMultiplier: 50000n,
@@ -619,6 +736,8 @@ test('static nft collection handlers reuse shared transfer logic', async () => {
     user_id: ADDRESSES.user,
     nftCount: 1n,
     nftMultiplier: 11000n,
+    specialEditionCount: 0n,
+    specialEditionMultiplier: 10000n,
     votingPower: 0n,
     vpTierIndex: 0n,
     vpMultiplier: 10000n,

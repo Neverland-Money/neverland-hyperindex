@@ -2,21 +2,19 @@
 name: neverland-indexer
 description: Neverland Protocol Indexer
 
-# Two-phase preload optimization: handlers run twice — once concurrently to
-# discover & batch DB reads (writes are no-op), then sequentially with
-# in-memory data. Required for unbatched hot reads (User, UserReward,
-# UserReserve, DustLockToken, etc.) to hit ~100% batched.
-preload_handlers: true
+rollback_on_reorg: true
 
 field_selection:
   transaction_fields:
     - hash
-    - from
-    - to
 
-networks:
+chains:
   - id: 143 # Monad mainnet
     start_block: 32587107
+    rpc:
+      - url: ${ENVIO_MONAD_RPC_URL}
+        ws: ${ENVIO_MONAD_WS_URL}
+        for: realtime
     contracts:
       # --------------------------------------
       #           CONFIGURATIONS
@@ -83,6 +81,23 @@ networks:
           - event: Unpaused(address account)
 
       # --------------------------------------
+      #     Neverland: Profile Shop
+      # --------------------------------------
+      - name: NeverlandProfileItemsSeller
+        address: 0xcEE8d6d42a37a9d721B41CeFa16DaB7F0d0a14EB
+        start_block: 78313940
+        handler: src/handlers/profileShop.ts
+        events:
+          - event: FundsRecipientUpdated(address indexed oldFundsRecipient, address indexed newFundsRecipient)
+          - event: Initialized(uint8 version)
+          - event: ItemConfigured(bytes32 indexed itemSlugHash, string itemSlug, uint256 oldPrice, uint256 newPrice, uint8 category, bool available)
+          - event: ItemPurchased(address indexed buyer, address indexed recipient, bytes32 indexed itemSlugHash, uint256 purchaseId, string itemSlug, uint8 category, uint256 quantity, uint256 unitPrice, uint256 totalPrice)
+          - event: OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner)
+          - event: OwnershipTransferred(address indexed previousOwner, address indexed newOwner)
+          - event: Paused(address account)
+          - event: Unpaused(address account)
+
+      # --------------------------------------
       #     Neverland: RevenueReward
       # --------------------------------------
       - name: RevenueReward
@@ -109,6 +124,7 @@ networks:
       # --------------------------------------
       - name: EpochManager
         address: 0xdA27A7745CBE958B0d00268cf63394A0d09c0216
+        start_block: 46513173
         handler: src/handlers/leaderboard.ts
         events:
           - event: EpochStart(uint256 indexed epochNumber, uint256 startTime)
@@ -119,6 +135,7 @@ networks:
       # --------------------------------------
       - name: LeaderboardConfig
         address: 0xDff18C7a928544449eF2Bb84c609f95427d7fcc8
+        start_block: 46513180
         handler: src/handlers/leaderboard.ts
         events:
           - event: ConfigSnapshot(uint256 depositRateBps, uint256 borrowRateBps, uint256 vpRateBps, uint256 supplyDailyBonus, uint256 borrowDailyBonus, uint256 repayDailyBonus, uint256 withdrawDailyBonus, uint256 cooldownSeconds, uint256 minDailyBonusUsd, uint256 timestamp)
@@ -141,6 +158,7 @@ networks:
       # --------------------------------------
       - name: LeaderboardKeeper
         address: 0x550eAaD1Ddc5Fd13Bc9818D99f985E7367D5D2B9
+        start_block: 46513221
         handler: src/handlers/leaderboardKeeper.ts
         events:
           - event: VotingPowerSynced(address indexed user, uint256 votingPower, uint256 timestamp)
@@ -159,6 +177,7 @@ networks:
       # --------------------------------------
       - name: NFTPartnershipRegistry
         address: 0xAB71Ce6910F255CC61fAf78EBd69A2B3dbC26Cd9
+        start_block: 46513186
         handler: src/handlers/nft.ts
         events:
           - event: PartnershipAdded(address indexed collection, string name, bool active, uint256 startTimestamp, uint256 endTimestamp, uint256 staticBoostBps, uint256 currentFirstBonus, uint256 currentDecayRatio, uint256 totalPartnerships)
@@ -167,10 +186,27 @@ networks:
           - event: MultiplierParamsUpdated(uint256 oldFirstBonus, uint256 newFirstBonus, uint256 oldDecayRatio, uint256 newDecayRatio, uint256 timestamp, uint256 totalActivePartnerships)
 
       # --------------------------------------
+      #     Leaderboard: SpecialEditionRegistry
+      # --------------------------------------
+      - name: SpecialEditionRegistry
+        address: 0x9A0231CeaB25EA0D820cfE73bFC3cd2D7681d532
+        start_block: 82180215
+        handler: src/handlers/specialEditions.ts
+        events:
+          - event: EditionConfigured(uint16 indexed editionId, string name, uint256 oldPerTokenBoostBps, uint256 newPerTokenBoostBps, uint256 timestamp)
+          - event: EditionCreated(uint16 indexed editionId, string key, string name, uint256 perTokenBoostBps, bool enabled, uint256 timestamp, uint256 totalEditions)
+          - event: EditionEnabledUpdated(uint16 indexed editionId, bool oldEnabled, bool newEnabled, uint256 timestamp)
+          - event: MembershipCorrected(uint256 indexed tokenId, uint16 indexed editionId, bool oldMember, bool newMember, bytes32 sourceHash, string reason, uint256 timestamp)
+          - event: PublisherUpdated(address indexed oldPublisher, address indexed newPublisher)
+          - event: SpecialEditionRegistered(uint256 indexed tokenId, uint16 indexed editionId, bytes32 indexed sourceHash, uint256 tokenEditionBitmap, uint256 editionTokenCount, uint256 timestamp)
+          - event: SpecialEditionRegistrationBatch(uint16 indexed editionId, uint256 requestedCount, uint256 registeredCount, uint256 timestamp)
+
+      # --------------------------------------
       #     Leaderboard: VotingPowerMultiplier
       # --------------------------------------
       - name: VotingPowerMultiplier
         address: 0x9b203C61d03e64550BFbC17EF56438D1a67D80b7
+        start_block: 46513200
         handler: src/handlers/leaderboard.ts
         events:
           - event: TierAdded(uint256 indexed tierIndex, uint256 minVotingPower, uint256 multiplierBps, uint256 totalTiers)
@@ -178,9 +214,16 @@ networks:
           - event: TierRemoved(uint256 indexed tierIndex, uint256 totalTiers)
 
       # ============================================
-      #     DYNAMIC CONTRACTS (Factory Pattern)
+      #     DYNAMIC + STATIC-BOOTSTRAP CONTRACTS
       # ============================================
-      # These contracts are discovered at runtime via contractRegister
+      # Entries WITHOUT an `address` are discovered at runtime via contractRegister
+      # (PoolAddressesProvider, PoolConfigurator, Pool, AToken, *DebtToken,
+      # UserVault, PartnerNFT). Entries WITH an `address` below (static NFTs + LP
+      # pools) are bootstrapped from config so their full history is indexed from
+      # their start_block. NOTE: the four LP contracts are ALSO re-added dynamically
+      # by LeaderboardConfig.LPPoolConfigured (src/handlers/leaderboard.ts) — Envio
+      # dedupes the same (contractName,address) so that is a safe forward-compat
+      # path for pools configured later. Do not remove either side.
 
       # PoolAddressesProvider - registered from PoolAddressesProviderRegistry
       - name: PoolAddressesProvider
@@ -306,7 +349,7 @@ networks:
       - name: The10kSquad
         abi_file_path: abis/helpers/ERC721.json
         address: 0x818030837e8350ba63e64d7dc01a547fa73c8279
-        start_block: 0
+        start_block: 32587107
         handler: src/handlers/nft.ts
         events:
           - event: Transfer(address indexed from, address indexed to, uint256 indexed tokenId)
@@ -343,6 +386,10 @@ networks:
         handler: src/handlers/lp.ts
         events:
           - event: IncreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)
+            field_selection:
+              transaction_fields:
+                - hash
+                - from
           - event: DecreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)
           - event: Transfer(address indexed from, address indexed to, uint256 indexed tokenId)
 
@@ -359,7 +406,8 @@ networks:
           - event: Burn(address indexed owner, int24 indexed tickLower, int24 indexed tickUpper, uint128 amount, uint256 amount0, uint256 amount1)
           - event: SetFeeProtocol(uint8 feeProtocol0Old, uint8 feeProtocol1Old, uint8 feeProtocol0New, uint8 feeProtocol1New)
 
-      # UniswapV2 USDC/DUST pair (LP points cutover from V3 at block 56436798)
+      # UniswapV2 USDC/DUST pair (LP points cutover from V3 at block 56436798;
+      # deprecated in favor of Balancer AutoRange V3 at block 78741015)
       - name: UniswapV2Pair
         abi_file_path: abis/uniswap/UniswapV2Pair.json
         address: 0x86dBF00485871C901C5129bD525348Db96c2eB2d
@@ -369,3 +417,23 @@ networks:
           - event: Transfer(address indexed from, address indexed to, uint256 value)
           - event: Swap(address indexed sender, uint256 amount0In, uint256 amount1In, uint256 amount0Out, uint256 amount1Out, address indexed to)
           - event: Sync(uint112 reserve0, uint112 reserve1)
+
+      # Balancer AutoRange V3 USDC/DUST pool (active LP points from block 78741015)
+      - name: BalancerAutoRangePool
+        abi_file_path: abis/balancer/BalancerAutoRangePool.json
+        address: 0x27dA8a34579FBC99319aF1C1a0f0D51065084576
+        start_block: 75698569
+        handler: src/handlers/lp.ts
+        events:
+          - event: Transfer(address indexed from, address indexed to, uint256 value)
+
+      # Balancer V3 Vault events for AutoRange pool reserve/fee reconstruction.
+      # Pool BPT balances come from BalancerAutoRangePool.Transfer above.
+      - name: BalancerVault
+        abi_file_path: abis/balancer/BalancerVault.json
+        start_block: 75698569
+        handler: src/handlers/lp.ts
+        events:
+          - event: Swap(address indexed pool, address indexed tokenIn, address indexed tokenOut, uint256 amountIn, uint256 amountOut, uint256 swapFeePercentage, uint256 swapFeeAmount)
+          - event: LiquidityAdded(address indexed pool, address indexed liquidityProvider, uint8 indexed kind, uint256 totalSupply, uint256[] amountsAddedRaw, uint256[] swapFeeAmountsRaw)
+          - event: LiquidityRemoved(address indexed pool, address indexed liquidityProvider, uint8 indexed kind, uint256 totalSupply, uint256[] amountsRemovedRaw, uint256[] swapFeeAmountsRaw)

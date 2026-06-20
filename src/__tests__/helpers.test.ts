@@ -4,10 +4,13 @@ import { test } from 'node:test';
 import {
   DEFAULT_BORROW_RATE_BPS,
   DEFAULT_DEPOSIT_RATE_BPS,
+  STATIC_NFT_COLLECTION_ADDRESSES,
   TREASURY_ADDRESSES,
   WMON_ADDRESS,
+  ZERO_ADDRESS,
   fromScaledPoints,
   getTokenMetadata,
+  isStaticNftCollection,
   toScaledPoints,
 } from '../helpers/constants';
 import {
@@ -67,7 +70,7 @@ import {
   VIEM_PARTIAL_ADDRESS,
   installViemMock,
 } from './viem-mock';
-import type { handlerContext } from '../../generated';
+import type { handlerContext } from '../types/envio';
 
 const RAY = 10n ** 27n;
 const WAD = 10n ** 18n;
@@ -160,6 +163,7 @@ test('points helpers cover default, caps, and thresholds', () => {
   assert.equal(getLPRatePerHour(200n), 200 / 10000 / 24);
 
   assert.equal(applyMultipliers(10, 20000n, 20000n), 40);
+  assert.equal(applyMultipliers(10, 20000n, 20000n, 15000n), 60);
   assert.equal(applyMultipliers(10, 100000n, 100000n), 100);
 
   assert.equal(calculateVotingPower(0n, 100, false, 0), 0n);
@@ -312,4 +316,19 @@ test('readPoolFee handles bigint results', async () => {
   } finally {
     publicClient.readContract = originalRead;
   }
+});
+
+test('isStaticNftCollection matches the statically-configured collections case-insensitively', () => {
+  // Guards against re-registering a statically-configured NFT collection as a
+  // dynamic PartnerNFT (which would double-dispatch its Transfer logs). Every
+  // address in the set must be recognized regardless of case.
+  for (const addr of STATIC_NFT_COLLECTION_ADDRESSES) {
+    assert.equal(isStaticNftCollection(addr), true, `lowercase ${addr}`);
+    assert.equal(isStaticNftCollection(addr.toUpperCase()), true, `uppercase ${addr}`);
+  }
+  // The10kSquad with a checksum/mixed-case spelling is still matched.
+  assert.equal(isStaticNftCollection('0x818030837E8350bA63E64d7DC01a547Fa73C8279'), true);
+  // A genuine partner collection (not statically configured) is NOT skipped.
+  assert.equal(isStaticNftCollection('0x000000000000000000000000000000000000d002'), false);
+  assert.equal(isStaticNftCollection(ZERO_ADDRESS), false);
 });
