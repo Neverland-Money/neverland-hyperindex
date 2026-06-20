@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 
+import { shouldUseEthCalls } from '../handlers/shared';
+
 type ConfigEvent = {
   contract: string;
   event: string;
@@ -35,28 +37,10 @@ function loadHandlerSources(): { sources: string; aliases: Map<string, string[]>
   const handlersDir = path.join(process.cwd(), 'src', 'handlers');
   const files = fs.readdirSync(handlersDir).filter(file => file.endsWith('.ts'));
   const aliases = new Map<string, string[]>();
-  const importRegex =
-    /import\s*{\s*([^}]+)\s*}\s*from\s*['"]..\/..\/generated(?:\/index\.js)?['"]/g;
 
   const sources = files
     .map(file => {
       const content = fs.readFileSync(path.join(handlersDir, file), 'utf8');
-      for (const match of content.matchAll(importRegex)) {
-        const entries = match[1].split(',');
-        for (const entry of entries) {
-          const trimmed = entry.trim();
-          if (!trimmed) continue;
-          const aliasMatch = trimmed.match(/^([A-Za-z0-9_]+)\s+as\s+([A-Za-z0-9_]+)$/);
-          if (aliasMatch) {
-            const original = aliasMatch[1];
-            const alias = aliasMatch[2];
-            const existing = aliases.get(original) ?? [];
-            if (!existing.includes(alias)) {
-              aliases.set(original, [...existing, alias]);
-            }
-          }
-        }
-      }
       return content;
     })
     .join('\n');
@@ -80,8 +64,11 @@ test('every configured event has a handler', () => {
     const event = escapeRegExp(entry.event);
     const hasHandler = prefixes.some(prefix => {
       const contract = escapeRegExp(prefix);
-      const pattern = new RegExp(`${contract}\\.${event}\\.handler\\b`);
-      return pattern.test(sources);
+      const legacyPattern = new RegExp(`${contract}\\.${event}\\.handler\\b`);
+      const v3Pattern = new RegExp(
+        `indexer\\.onEvent\\(\\s*\\{\\s*contract:\\s*['"]${contract}['"]\\s*,\\s*event:\\s*['"]${event}['"]`
+      );
+      return legacyPattern.test(sources) || v3Pattern.test(sources);
     });
     if (!hasHandler) missing.push(`${entry.contract}.${entry.event}`);
   }
@@ -91,4 +78,110 @@ test('every configured event has a handler', () => {
     0,
     missing.length ? `Missing handlers: ${missing.join(', ')}` : undefined
   );
+});
+
+test('special edition registry config has an explicit production preflight', () => {
+  const configText = fs.readFileSync(path.join(process.cwd(), 'config.yaml'), 'utf8');
+  const scriptText = fs.readFileSync(
+    path.join(process.cwd(), 'scripts', 'check-special-edition-config.ts'),
+    'utf8'
+  );
+  const packageJson = JSON.parse(
+    fs.readFileSync(path.join(process.cwd(), 'package.json'), 'utf8')
+  ) as { scripts?: Record<string, string> };
+
+  assert.match(configText, /- name:\s*SpecialEditionRegistry/);
+  assert.match(configText, /- name:\s*SpecialEditionRegistry[\s\S]*?start_block:\s*82180215/);
+  assert.match(scriptText, /ZERO_ADDRESS/);
+  assert.match(scriptText, /address\.toLowerCase\(\)/);
+  assert.match(scriptText, /ZERO_ADDRESS/);
+  assert.match(scriptText, /\^\[1-9\]\[0-9\]\*\$/);
+  assert.match(scriptText, /\$\{CONTRACT_NAME\} start_block must be the registry deployment block/);
+  assert.equal(
+    packageJson.scripts?.['check:special-edition-config'],
+    'tsx scripts/check-special-edition-config.ts'
+  );
+});
+
+test('nft transfer handlers settle before collection ownership mutation', () => {
+  const source = fs.readFileSync(path.join(process.cwd(), 'src', 'handlers', 'nft.ts'), 'utf8');
+  const settleMatches = [...source.matchAll(/await settlePointsForUser\(/g)];
+  const ownershipWriteMatches = [
+    ...source.matchAll(/writeOwnership\(\);\n\n\s+\/\/ Update state first/g),
+  ];
+
+  assert.equal(settleMatches.length, 2);
+  assert.equal(ownershipWriteMatches.length, 2);
+  for (let i = 0; i < settleMatches.length; i++) {
+    assert.ok(
+      (settleMatches[i]?.index ?? 0) < (ownershipWriteMatches[i]?.index ?? 0),
+      `NFT transfer path ${i + 1} must settle points before writing ownership`
+    );
+  }
+});
+
+test('special edition membership changes settle owner before count mutation', () => {
+  const source = fs.readFileSync(
+    path.join(process.cwd(), 'src', 'handlers', 'specialEditions.ts'),
+    'utf8'
+  );
+  const start = source.indexOf('async function applyMembershipChange');
+  const end = source.indexOf('export async function handleDustLockSpecialEditionTransfer');
+  const membershipSource = source.slice(start, end);
+  const settleIndex = membershipSource.indexOf('await settleOwnerBeforeSpecialEditionChange');
+  const tokenStateWriteIndex = membershipSource.indexOf('context.SpecialEditionTokenState.set');
+  const userDeltaIndex = membershipSource.indexOf('await applyUserSpecialEditionDelta');
+
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  assert.notEqual(settleIndex, -1);
+  assert.notEqual(tokenStateWriteIndex, -1);
+  assert.notEqual(userDeltaIndex, -1);
+  assert.ok(
+    settleIndex < tokenStateWriteIndex && settleIndex < userDeltaIndex,
+    'special edition membership changes must settle before token/user counts change'
+  );
+});
+
+test('production handlers do not use eth_call or archive-node RPC paths', () => {
+  const previousExternal = process.env.ENVIO_ENABLE_EXTERNAL_CALLS;
+  const previousEth = process.env.ENVIO_ENABLE_ETH_CALLS;
+  process.env.ENVIO_ENABLE_EXTERNAL_CALLS = 'true';
+  process.env.ENVIO_ENABLE_ETH_CALLS = 'true';
+
+  try {
+    assert.equal(
+      shouldUseEthCalls(),
+      false,
+      'ENVIO_ENABLE_ETH_CALLS must not enable eth_call paths on Monad'
+    );
+  } finally {
+    process.env.ENVIO_ENABLE_EXTERNAL_CALLS = previousExternal;
+    process.env.ENVIO_ENABLE_ETH_CALLS = previousEth;
+  }
+
+  const handlersDir = path.join(process.cwd(), 'src', 'handlers');
+  const files = fs.readdirSync(handlersDir).filter(file => file.endsWith('.ts'));
+  const violations: string[] = [];
+  const forbiddenPatterns: Array<[RegExp, string]> = [
+    [/helpers\/viem/, 'imports viem RPC helpers'],
+    [/\bpublicClient\b/, 'references publicClient'],
+    [/\breadContract\s*\(/, 'uses readContract'],
+    [/\bgetBalance\s*\(/, 'uses getBalance'],
+    [/\bgetCode\s*\(/, 'uses getCode'],
+    [/\bgetStorageAt\s*\(/, 'uses getStorageAt'],
+    [/\bgetLogs\s*\(/, 'uses getLogs'],
+    [/ENVIO_ENABLE_ETH_CALLS/, 'references ENVIO_ENABLE_ETH_CALLS'],
+  ];
+
+  for (const file of files) {
+    const source = fs.readFileSync(path.join(handlersDir, file), 'utf8');
+    for (const [pattern, reason] of forbiddenPatterns) {
+      if (pattern.test(source)) {
+        violations.push(`${file}: ${reason}`);
+      }
+    }
+  }
+
+  assert.deepEqual(violations, []);
 });

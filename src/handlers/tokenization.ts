@@ -3,8 +3,8 @@
  * AToken, VariableDebtToken, StableDebtToken
  */
 
-import type { handlerContext } from '../../generated';
-import { AToken, VariableDebtToken, StableDebtToken } from '../../generated';
+import type { handlerContext } from '../types/envio';
+import { indexer } from 'envio';
 import { rayDiv, rayMul, toDecimal } from '../helpers/math';
 import {
   isGatewayAddress,
@@ -13,7 +13,6 @@ import {
   getTokenMetadata,
   normalizeAddress,
 } from '../helpers/constants';
-import { tryReadTokenMetadata } from '../helpers/viem';
 import {
   recordProtocolTransaction,
   addReserveToUserList,
@@ -78,7 +77,7 @@ async function getOrCreateUserReserveForAllowance(
 // AToken Handlers
 // ============================================
 
-AToken.Mint.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'AToken', event: 'Mint' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -137,7 +136,8 @@ AToken.Mint.handler(async ({ event, context }) => {
       userAddress,
       reserveId,
       Number(event.block.timestamp),
-      BigInt(event.block.number)
+      BigInt(event.block.number),
+      { ignoreCooldown: true }
     );
 
     const calculatedAmount = rayDiv(userBalanceChange, event.params.index);
@@ -246,7 +246,7 @@ AToken.Mint.handler(async ({ event, context }) => {
   }
 });
 
-AToken.Burn.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'AToken', event: 'Burn' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -287,7 +287,8 @@ AToken.Burn.handler(async ({ event, context }) => {
     userAddress,
     reserveId,
     Number(event.block.timestamp),
-    BigInt(event.block.number)
+    BigInt(event.block.number),
+    { ignoreCooldown: true }
   );
 
   if (userReserve) {
@@ -405,7 +406,7 @@ AToken.Burn.handler(async ({ event, context }) => {
   }
 });
 
-AToken.BalanceTransfer.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'AToken', event: 'BalanceTransfer' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -497,10 +498,14 @@ AToken.BalanceTransfer.handler(async ({ event, context }) => {
 
   // Settle points for real users, not gateway contracts
   if (fromAddress !== ZERO_ADDRESS && !isFromGateway) {
-    await settlePointsForUser(context, fromAddress, reserveId, timestamp, blockNumber);
+    await settlePointsForUser(context, fromAddress, reserveId, timestamp, blockNumber, {
+      ignoreCooldown: true,
+    });
   }
   if (toAddress !== ZERO_ADDRESS && !isToGateway) {
-    await settlePointsForUser(context, toAddress, reserveId, timestamp, blockNumber);
+    await settlePointsForUser(context, toAddress, reserveId, timestamp, blockNumber, {
+      ignoreCooldown: true,
+    });
   }
 
   const scaledAmount = event.params.value;
@@ -611,7 +616,7 @@ AToken.BalanceTransfer.handler(async ({ event, context }) => {
   }
 });
 
-AToken.Initialized.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'AToken', event: 'Initialized' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -665,13 +670,6 @@ AToken.Initialized.handler(async ({ event, context }) => {
       decimals = tokenInfo.decimals;
     } else {
       /* c8 ignore end */
-      const chainMetadata = await tryReadTokenMetadata(underlyingAsset, BigInt(event.block.number));
-      if (chainMetadata) {
-        if (chainMetadata.symbol) symbol = chainMetadata.symbol;
-        if (chainMetadata.name) name = chainMetadata.name;
-        if (chainMetadata.decimals !== undefined) decimals = chainMetadata.decimals;
-      }
-
       if (!symbol && !name) {
         // Extract symbol from aToken symbol by stripping "n" prefix
         const aTokenSymbol = event.params.aTokenSymbol;
@@ -709,7 +707,7 @@ AToken.Initialized.handler(async ({ event, context }) => {
   }
 });
 
-AToken.PriceObserved.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'AToken', event: 'PriceObserved' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -729,55 +727,61 @@ AToken.PriceObserved.handler(async ({ event, context }) => {
   );
 });
 
-VariableDebtToken.PriceObserved.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  await recordPriceObserved(
-    context,
-    event.params.asset,
-    event.params.price,
-    event.params.baseUnit,
-    event.params.oracle,
-    event.params.ok,
-    Number(event.block.timestamp),
-    Number(event.block.number),
-    Number(event.logIndex)
-  );
-});
+indexer.onEvent(
+  { contract: 'VariableDebtToken', event: 'PriceObserved' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    await recordPriceObserved(
+      context,
+      event.params.asset,
+      event.params.price,
+      event.params.baseUnit,
+      event.params.oracle,
+      event.params.ok,
+      Number(event.block.timestamp),
+      Number(event.block.number),
+      Number(event.logIndex)
+    );
+  }
+);
 
-StableDebtToken.PriceObserved.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const params = event.params as typeof event.params & {
-    baseUnit: bigint;
-    ok: boolean;
-  };
-  await recordPriceObserved(
-    context,
-    params.asset,
-    params.price,
-    params.baseUnit,
-    params.oracle,
-    params.ok,
-    Number(event.block.timestamp),
-    Number(event.block.number),
-    Number(event.logIndex)
-  );
-});
+indexer.onEvent(
+  { contract: 'StableDebtToken', event: 'PriceObserved' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const params = event.params as typeof event.params & {
+      baseUnit: bigint;
+      ok: boolean;
+    };
+    await recordPriceObserved(
+      context,
+      params.asset,
+      params.price,
+      params.baseUnit,
+      params.oracle,
+      params.ok,
+      Number(event.block.timestamp),
+      Number(event.block.number),
+      Number(event.logIndex)
+    );
+  }
+);
 
 // ============================================
 // VariableDebtToken Handlers
 // ============================================
 
-VariableDebtToken.Mint.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'VariableDebtToken', event: 'Mint' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -828,7 +832,8 @@ VariableDebtToken.Mint.handler(async ({ event, context }) => {
     userAddress,
     reserveId,
     Number(event.block.timestamp),
-    BigInt(event.block.number)
+    BigInt(event.block.number),
+    { ignoreCooldown: true }
   );
 
   // Subgraph: userBalanceChange = value - balanceIncrease (actual borrow)
@@ -921,7 +926,7 @@ VariableDebtToken.Mint.handler(async ({ event, context }) => {
   );
 });
 
-VariableDebtToken.Burn.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'VariableDebtToken', event: 'Burn' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -948,7 +953,8 @@ VariableDebtToken.Burn.handler(async ({ event, context }) => {
     userAddress,
     reserveId,
     Number(event.block.timestamp),
-    BigInt(event.block.number)
+    BigInt(event.block.number),
+    { ignoreCooldown: true }
   );
 
   // Subgraph: userBalanceChange = value + balanceIncrease (total repayment)
@@ -1043,7 +1049,7 @@ VariableDebtToken.Burn.handler(async ({ event, context }) => {
 // StableDebtToken Handlers
 // ============================================
 
-StableDebtToken.Mint.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'StableDebtToken', event: 'Mint' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -1093,7 +1099,8 @@ StableDebtToken.Mint.handler(async ({ event, context }) => {
     userAddress,
     reserveId,
     Number(event.block.timestamp),
-    BigInt(event.block.number)
+    BigInt(event.block.number),
+    { ignoreCooldown: true }
   );
 
   const reserve = await context.Reserve.get(reserveId);
@@ -1165,7 +1172,7 @@ StableDebtToken.Mint.handler(async ({ event, context }) => {
   });
 });
 
-StableDebtToken.Burn.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'StableDebtToken', event: 'Burn' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -1251,7 +1258,8 @@ StableDebtToken.Burn.handler(async ({ event, context }) => {
     userAddress,
     reserveId,
     Number(event.block.timestamp),
-    BigInt(event.block.number)
+    BigInt(event.block.number),
+    { ignoreCooldown: true }
   );
 
   const historyId = `${event.transaction.hash}-${event.logIndex}`;
@@ -1272,133 +1280,145 @@ StableDebtToken.Burn.handler(async ({ event, context }) => {
   );
 });
 
-StableDebtToken.BorrowAllowanceDelegated.handler(async ({ event, context }) => {
-  const fromUser = normalizeAddress(event.params.fromUser);
-  const toUser = normalizeAddress(event.params.toUser);
-  const asset = normalizeAddress(event.params.asset);
-  const id = `${fromUser}-${toUser}-${asset}-stable`;
+indexer.onEvent(
+  { contract: 'StableDebtToken', event: 'BorrowAllowanceDelegated' },
+  async ({ event, context }) => {
+    const fromUser = normalizeAddress(event.params.fromUser);
+    const toUser = normalizeAddress(event.params.toUser);
+    const asset = normalizeAddress(event.params.asset);
+    const id = `${fromUser}-${toUser}-${asset}-stable`;
 
-  await getOrCreateUser(context, fromUser);
+    await getOrCreateUser(context, fromUser);
 
-  context.BorrowAllowance.set({
-    id,
-    fromUser,
-    toUser,
-    asset,
-    amount: event.params.amount,
-    lastUpdate: Number(event.block.timestamp),
-  });
+    context.BorrowAllowance.set({
+      id,
+      fromUser,
+      toUser,
+      asset,
+      amount: event.params.amount,
+      lastUpdate: Number(event.block.timestamp),
+    });
 
-  const subToken = await context.SubToken.get(normalizeAddress(event.srcAddress));
-  if (!subToken) return;
-  const reserveId = `${subToken.underlyingAssetAddress}-${subToken.pool_id}`;
-  const userReserveId = await getOrCreateUserReserveForAllowance(
-    context,
-    fromUser,
-    reserveId,
-    subToken.pool_id,
-    Number(event.block.timestamp)
-  );
-  const delegatedId = `stable${fromUser}${toUser}${asset}`;
-  context.StableTokenDelegatedAllowance.set({
-    id: delegatedId,
-    fromUser_id: fromUser,
-    toUser_id: toUser,
-    amountAllowed: event.params.amount,
-    userReserve_id: userReserveId,
-  });
-});
-
-VariableDebtToken.BorrowAllowanceDelegated.handler(async ({ event, context }) => {
-  const fromUser = normalizeAddress(event.params.fromUser);
-  const toUser = normalizeAddress(event.params.toUser);
-  const asset = normalizeAddress(event.params.asset);
-  const id = `${fromUser}-${toUser}-${asset}-variable`;
-
-  await getOrCreateUser(context, fromUser);
-
-  context.BorrowAllowance.set({
-    id,
-    fromUser,
-    toUser,
-    asset,
-    amount: event.params.amount,
-    lastUpdate: Number(event.block.timestamp),
-  });
-
-  const subToken = await context.SubToken.get(normalizeAddress(event.srcAddress));
-  if (!subToken) return;
-  const reserveId = `${subToken.underlyingAssetAddress}-${subToken.pool_id}`;
-  const userReserveId = await getOrCreateUserReserveForAllowance(
-    context,
-    fromUser,
-    reserveId,
-    subToken.pool_id,
-    Number(event.block.timestamp)
-  );
-  const delegatedId = `variable${fromUser}${toUser}${asset}`;
-  context.VariableTokenDelegatedAllowance.set({
-    id: delegatedId,
-    fromUser_id: fromUser,
-    toUser_id: toUser,
-    amountAllowed: event.params.amount,
-    userReserve_id: userReserveId,
-  });
-});
-
-StableDebtToken.Initialized.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const tokenId = normalizeAddress(event.srcAddress);
-  const subToken = await context.SubToken.get(tokenId);
-  if (subToken) {
-    context.SubToken.set({
-      ...subToken,
-      underlyingAssetAddress: normalizeAddress(event.params.underlyingAsset),
-      underlyingAssetDecimals: Number(event.params.debtTokenDecimals),
+    const subToken = await context.SubToken.get(normalizeAddress(event.srcAddress));
+    if (!subToken) return;
+    const reserveId = `${subToken.underlyingAssetAddress}-${subToken.pool_id}`;
+    const userReserveId = await getOrCreateUserReserveForAllowance(
+      context,
+      fromUser,
+      reserveId,
+      subToken.pool_id,
+      Number(event.block.timestamp)
+    );
+    const delegatedId = `stable${fromUser}${toUser}${asset}`;
+    context.StableTokenDelegatedAllowance.set({
+      id: delegatedId,
+      fromUser_id: fromUser,
+      toUser_id: toUser,
+      amountAllowed: event.params.amount,
+      userReserve_id: userReserveId,
     });
   }
+);
 
-  const mapping = await context.ContractToPoolMapping.get(normalizeAddress(event.params.pool));
-  if (mapping) {
-    context.MapAssetPool.set({
-      id: tokenId,
-      pool: mapping.pool_id,
-      underlyingAsset: normalizeAddress(event.params.underlyingAsset),
+indexer.onEvent(
+  { contract: 'VariableDebtToken', event: 'BorrowAllowanceDelegated' },
+  async ({ event, context }) => {
+    const fromUser = normalizeAddress(event.params.fromUser);
+    const toUser = normalizeAddress(event.params.toUser);
+    const asset = normalizeAddress(event.params.asset);
+    const id = `${fromUser}-${toUser}-${asset}-variable`;
+
+    await getOrCreateUser(context, fromUser);
+
+    context.BorrowAllowance.set({
+      id,
+      fromUser,
+      toUser,
+      asset,
+      amount: event.params.amount,
+      lastUpdate: Number(event.block.timestamp),
+    });
+
+    const subToken = await context.SubToken.get(normalizeAddress(event.srcAddress));
+    if (!subToken) return;
+    const reserveId = `${subToken.underlyingAssetAddress}-${subToken.pool_id}`;
+    const userReserveId = await getOrCreateUserReserveForAllowance(
+      context,
+      fromUser,
+      reserveId,
+      subToken.pool_id,
+      Number(event.block.timestamp)
+    );
+    const delegatedId = `variable${fromUser}${toUser}${asset}`;
+    context.VariableTokenDelegatedAllowance.set({
+      id: delegatedId,
+      fromUser_id: fromUser,
+      toUser_id: toUser,
+      amountAllowed: event.params.amount,
+      userReserve_id: userReserveId,
     });
   }
-});
+);
 
-VariableDebtToken.Initialized.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const tokenId = normalizeAddress(event.srcAddress);
-  const subToken = await context.SubToken.get(tokenId);
-  if (subToken) {
-    context.SubToken.set({
-      ...subToken,
-      underlyingAssetAddress: normalizeAddress(event.params.underlyingAsset),
-      underlyingAssetDecimals: Number(event.params.debtTokenDecimals),
-    });
-  }
+indexer.onEvent(
+  { contract: 'StableDebtToken', event: 'Initialized' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const tokenId = normalizeAddress(event.srcAddress);
+    const subToken = await context.SubToken.get(tokenId);
+    if (subToken) {
+      context.SubToken.set({
+        ...subToken,
+        underlyingAssetAddress: normalizeAddress(event.params.underlyingAsset),
+        underlyingAssetDecimals: Number(event.params.debtTokenDecimals),
+      });
+    }
 
-  const mapping = await context.ContractToPoolMapping.get(normalizeAddress(event.params.pool));
-  if (mapping) {
-    context.MapAssetPool.set({
-      id: tokenId,
-      pool: mapping.pool_id,
-      underlyingAsset: normalizeAddress(event.params.underlyingAsset),
-    });
+    const mapping = await context.ContractToPoolMapping.get(normalizeAddress(event.params.pool));
+    if (mapping) {
+      context.MapAssetPool.set({
+        id: tokenId,
+        pool: mapping.pool_id,
+        underlyingAsset: normalizeAddress(event.params.underlyingAsset),
+      });
+    }
   }
-});
+);
+
+indexer.onEvent(
+  { contract: 'VariableDebtToken', event: 'Initialized' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const tokenId = normalizeAddress(event.srcAddress);
+    const subToken = await context.SubToken.get(tokenId);
+    if (subToken) {
+      context.SubToken.set({
+        ...subToken,
+        underlyingAssetAddress: normalizeAddress(event.params.underlyingAsset),
+        underlyingAssetDecimals: Number(event.params.debtTokenDecimals),
+      });
+    }
+
+    const mapping = await context.ContractToPoolMapping.get(normalizeAddress(event.params.pool));
+    if (mapping) {
+      context.MapAssetPool.set({
+        id: tokenId,
+        pool: mapping.pool_id,
+        underlyingAsset: normalizeAddress(event.params.underlyingAsset),
+      });
+    }
+  }
+);
 
 async function recordReserveParamsHistory(
   context: handlerContext,

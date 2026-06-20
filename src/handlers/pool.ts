@@ -3,8 +3,8 @@
  * Supply, Borrow, Repay, Withdraw, Liquidation, FlashLoan, etc.
  */
 
-import type { handlerContext } from '../../generated';
-import { Pool } from '../../generated';
+import type { handlerContext } from '../types/envio';
+import { indexer } from 'envio';
 import {
   recordProtocolTransaction,
   getOrCreateUser,
@@ -124,7 +124,7 @@ async function maybeStoreEpochEndReserveSnapshot(
   });
 }
 
-Pool.Supply.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'Pool', event: 'Supply' }, async ({ event, context }) => {
   try {
     // context.log.debug(`Processing Supply event for user ${event.params.onBehalfOf}`);
 
@@ -181,7 +181,7 @@ Pool.Supply.handler(async ({ event, context }) => {
   /* c8 ignore end */
 });
 
-Pool.Withdraw.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'Pool', event: 'Withdraw' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -195,7 +195,7 @@ Pool.Withdraw.handler(async ({ event, context }) => {
   // The AToken.Burn handler creates RedeemUnderlying with the correct owner.
 });
 
-Pool.Borrow.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'Pool', event: 'Borrow' }, async ({ event, context }) => {
   try {
     // context.log.debug(`Processing Borrow event for user ${event.params.onBehalfOf}`);
 
@@ -259,7 +259,7 @@ Pool.Borrow.handler(async ({ event, context }) => {
   /* c8 ignore end */
 });
 
-Pool.Repay.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'Pool', event: 'Repay' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -299,7 +299,7 @@ Pool.Repay.handler(async ({ event, context }) => {
   });
 });
 
-Pool.FlashLoan.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'Pool', event: 'FlashLoan' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -359,7 +359,7 @@ Pool.FlashLoan.handler(async ({ event, context }) => {
   });
 });
 
-Pool.LiquidationCall.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'Pool', event: 'LiquidationCall' }, async ({ event, context }) => {
   try {
     // context.log.info(
     //   `Processing Liquidation for user ${event.params.user} by ${event.params.liquidator}`
@@ -428,112 +428,118 @@ Pool.LiquidationCall.handler(async ({ event, context }) => {
   /* c8 ignore end */
 });
 
-Pool.ReserveUsedAsCollateralEnabled.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
+indexer.onEvent(
+  { contract: 'Pool', event: 'ReserveUsedAsCollateralEnabled' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
 
-  const poolId = await resolvePoolId(context, event.srcAddress);
-  const reserveAddress = normalizeAddress(event.params.reserve);
-  const reserveId = `${reserveAddress}-${poolId}`;
-  const userId = normalizeAddress(event.params.user);
-  const userReserveId = `${userId}-${reserveId}`;
+    const poolId = await resolvePoolId(context, event.srcAddress);
+    const reserveAddress = normalizeAddress(event.params.reserve);
+    const reserveId = `${reserveAddress}-${poolId}`;
+    const userId = normalizeAddress(event.params.user);
+    const userReserveId = `${userId}-${reserveId}`;
 
-  await getOrCreateUser(context, userId);
-  let userReserve = await context.UserReserve.get(userReserveId);
-  if (userReserve) {
-    const historyId = getHistoryEntityId(event.transaction.hash, Number(event.logIndex));
-    context.UsageAsCollateral.set({
-      id: historyId,
-      txHash: event.transaction.hash,
-      action: 'UsageAsCollateral',
-      pool_id: poolId,
-      user_id: userId,
-      reserve_id: reserveId,
-      userReserve_id: userReserveId,
-      fromState: userReserve.usageAsCollateralEnabledOnUser,
-      toState: true,
-      timestamp: Number(event.block.timestamp),
-    });
+    await getOrCreateUser(context, userId);
+    let userReserve = await context.UserReserve.get(userReserveId);
+    if (userReserve) {
+      const historyId = getHistoryEntityId(event.transaction.hash, Number(event.logIndex));
+      context.UsageAsCollateral.set({
+        id: historyId,
+        txHash: event.transaction.hash,
+        action: 'UsageAsCollateral',
+        pool_id: poolId,
+        user_id: userId,
+        reserve_id: reserveId,
+        userReserve_id: userReserveId,
+        fromState: userReserve.usageAsCollateralEnabledOnUser,
+        toState: true,
+        timestamp: Number(event.block.timestamp),
+      });
 
-    context.UserReserve.set({
-      ...userReserve,
-      usageAsCollateralEnabledOnUser: true,
-      lastUpdateTimestamp: Number(event.block.timestamp),
-    });
+      context.UserReserve.set({
+        ...userReserve,
+        usageAsCollateralEnabledOnUser: true,
+        lastUpdateTimestamp: Number(event.block.timestamp),
+      });
 
-    // Update Reserve.totalLiquidityAsCollateral when collateral is enabled
-    if (!userReserve.usageAsCollateralEnabledOnUser) {
-      const reserve = await context.Reserve.get(reserveId);
-      if (reserve) {
-        const userBalance = userReserve.currentATokenBalance;
-        context.Reserve.set({
-          ...reserve,
-          totalLiquidityAsCollateral: reserve.totalLiquidityAsCollateral + userBalance,
-        });
+      // Update Reserve.totalLiquidityAsCollateral when collateral is enabled
+      if (!userReserve.usageAsCollateralEnabledOnUser) {
+        const reserve = await context.Reserve.get(reserveId);
+        if (reserve) {
+          const userBalance = userReserve.currentATokenBalance;
+          context.Reserve.set({
+            ...reserve,
+            totalLiquidityAsCollateral: reserve.totalLiquidityAsCollateral + userBalance,
+          });
+        }
       }
     }
   }
-});
+);
 
-Pool.ReserveUsedAsCollateralDisabled.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
+indexer.onEvent(
+  { contract: 'Pool', event: 'ReserveUsedAsCollateralDisabled' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
 
-  const poolId = await resolvePoolId(context, event.srcAddress);
-  const reserveAddress = normalizeAddress(event.params.reserve);
-  const reserveId = `${reserveAddress}-${poolId}`;
-  const userId = normalizeAddress(event.params.user);
-  const userReserveId = `${userId}-${reserveId}`;
+    const poolId = await resolvePoolId(context, event.srcAddress);
+    const reserveAddress = normalizeAddress(event.params.reserve);
+    const reserveId = `${reserveAddress}-${poolId}`;
+    const userId = normalizeAddress(event.params.user);
+    const userReserveId = `${userId}-${reserveId}`;
 
-  await getOrCreateUser(context, userId);
-  let userReserve = await context.UserReserve.get(userReserveId);
-  if (userReserve) {
-    const historyId = getHistoryEntityId(event.transaction.hash, Number(event.logIndex));
-    context.UsageAsCollateral.set({
-      id: historyId,
-      txHash: event.transaction.hash,
-      action: 'UsageAsCollateral',
-      pool_id: poolId,
-      user_id: userId,
-      reserve_id: reserveId,
-      userReserve_id: userReserveId,
-      fromState: userReserve.usageAsCollateralEnabledOnUser,
-      toState: false,
-      timestamp: Number(event.block.timestamp),
-    });
+    await getOrCreateUser(context, userId);
+    let userReserve = await context.UserReserve.get(userReserveId);
+    if (userReserve) {
+      const historyId = getHistoryEntityId(event.transaction.hash, Number(event.logIndex));
+      context.UsageAsCollateral.set({
+        id: historyId,
+        txHash: event.transaction.hash,
+        action: 'UsageAsCollateral',
+        pool_id: poolId,
+        user_id: userId,
+        reserve_id: reserveId,
+        userReserve_id: userReserveId,
+        fromState: userReserve.usageAsCollateralEnabledOnUser,
+        toState: false,
+        timestamp: Number(event.block.timestamp),
+      });
 
-    context.UserReserve.set({
-      ...userReserve,
-      usageAsCollateralEnabledOnUser: false,
-      lastUpdateTimestamp: Number(event.block.timestamp),
-    });
+      context.UserReserve.set({
+        ...userReserve,
+        usageAsCollateralEnabledOnUser: false,
+        lastUpdateTimestamp: Number(event.block.timestamp),
+      });
 
-    // Update Reserve.totalLiquidityAsCollateral when collateral is disabled
-    if (userReserve.usageAsCollateralEnabledOnUser) {
-      const reserve = await context.Reserve.get(reserveId);
-      if (reserve) {
-        const userBalance = userReserve.currentATokenBalance;
-        context.Reserve.set({
-          ...reserve,
-          totalLiquidityAsCollateral:
-            reserve.totalLiquidityAsCollateral > userBalance
-              ? reserve.totalLiquidityAsCollateral - userBalance
-              : 0n,
-        });
+      // Update Reserve.totalLiquidityAsCollateral when collateral is disabled
+      if (userReserve.usageAsCollateralEnabledOnUser) {
+        const reserve = await context.Reserve.get(reserveId);
+        if (reserve) {
+          const userBalance = userReserve.currentATokenBalance;
+          context.Reserve.set({
+            ...reserve,
+            totalLiquidityAsCollateral:
+              reserve.totalLiquidityAsCollateral > userBalance
+                ? reserve.totalLiquidityAsCollateral - userBalance
+                : 0n,
+          });
+        }
       }
     }
   }
-});
+);
 
-Pool.ReserveDataUpdated.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'Pool', event: 'ReserveDataUpdated' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -588,7 +594,7 @@ Pool.ReserveDataUpdated.handler(async ({ event, context }) => {
   }
 });
 
-Pool.MintedToTreasury.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'Pool', event: 'MintedToTreasury' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -659,7 +665,7 @@ Pool.MintedToTreasury.handler(async ({ event, context }) => {
   }
 });
 
-Pool.UserEModeSet.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'Pool', event: 'UserEModeSet' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -688,7 +694,7 @@ Pool.UserEModeSet.handler(async ({ event, context }) => {
   });
 });
 
-Pool.MintUnbacked.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'Pool', event: 'MintUnbacked' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -726,7 +732,7 @@ Pool.MintUnbacked.handler(async ({ event, context }) => {
   }
 });
 
-Pool.BackUnbacked.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'Pool', event: 'BackUnbacked' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -773,29 +779,32 @@ Pool.BackUnbacked.handler(async ({ event, context }) => {
   }
 });
 
-Pool.IsolationModeTotalDebtUpdated.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
+indexer.onEvent(
+  { contract: 'Pool', event: 'IsolationModeTotalDebtUpdated' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
 
-  const poolId = await resolvePoolId(context, event.srcAddress);
-  const assetAddress = normalizeAddress(event.params.asset);
-  const reserveId = `${assetAddress}-${poolId}`;
-  const id = `${event.transaction.hash}-${event.logIndex}`;
+    const poolId = await resolvePoolId(context, event.srcAddress);
+    const assetAddress = normalizeAddress(event.params.asset);
+    const reserveId = `${assetAddress}-${poolId}`;
+    const id = `${event.transaction.hash}-${event.logIndex}`;
 
-  context.IsolationModeTotalDebtUpdated.set({
-    id,
-    isolatedDebt: event.params.totalDebt,
-    pool_id: poolId,
-    reserve_id: reserveId,
-    timestamp: Number(event.block.timestamp),
-  });
-});
+    context.IsolationModeTotalDebtUpdated.set({
+      id,
+      isolatedDebt: event.params.totalDebt,
+      pool_id: poolId,
+      reserve_id: reserveId,
+      timestamp: Number(event.block.timestamp),
+    });
+  }
+);
 
-Pool.SwapBorrowRateMode.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'Pool', event: 'SwapBorrowRateMode' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -835,36 +844,39 @@ Pool.SwapBorrowRateMode.handler(async ({ event, context }) => {
   });
 });
 
-Pool.RebalanceStableBorrowRate.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
+indexer.onEvent(
+  { contract: 'Pool', event: 'RebalanceStableBorrowRate' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
 
-  const poolId = await resolvePoolId(context, event.srcAddress);
-  const reserveAddress = normalizeAddress(event.params.reserve);
-  const reserveId = `${reserveAddress}-${poolId}`;
-  const userId = normalizeAddress(event.params.user);
-  const userReserveId = `${userId}-${reserveId}`;
+    const poolId = await resolvePoolId(context, event.srcAddress);
+    const reserveAddress = normalizeAddress(event.params.reserve);
+    const reserveId = `${reserveAddress}-${poolId}`;
+    const userId = normalizeAddress(event.params.user);
+    const userReserveId = `${userId}-${reserveId}`;
 
-  await getOrCreateUser(context, userId);
+    await getOrCreateUser(context, userId);
 
-  const userReserve = await context.UserReserve.get(userReserveId);
+    const userReserve = await context.UserReserve.get(userReserveId);
 
-  const id = `${event.transaction.hash}-${event.logIndex}`;
+    const id = `${event.transaction.hash}-${event.logIndex}`;
 
-  context.RebalanceStableBorrowRate.set({
-    id,
-    txHash: event.transaction.hash,
-    action: 'RebalanceStableBorrowRate',
-    pool_id: poolId,
-    user_id: userId,
-    reserve_id: reserveId,
-    userReserve_id: userReserveId,
-    borrowRateFrom: userReserve?.oldStableBorrowRate || 0n,
-    borrowRateTo: userReserve?.stableBorrowRate || 0n,
-    timestamp: Number(event.block.timestamp),
-  });
-});
+    context.RebalanceStableBorrowRate.set({
+      id,
+      txHash: event.transaction.hash,
+      action: 'RebalanceStableBorrowRate',
+      pool_id: poolId,
+      user_id: userId,
+      reserve_id: reserveId,
+      userReserve_id: userReserveId,
+      borrowRateFrom: userReserve?.oldStableBorrowRate || 0n,
+      borrowRateTo: userReserve?.stableBorrowRate || 0n,
+      timestamp: Number(event.block.timestamp),
+    });
+  }
+);

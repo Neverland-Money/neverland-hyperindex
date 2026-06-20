@@ -3,7 +3,7 @@
  * Calculates protocol-wide USD totals from Reserve data
  */
 
-import type { handlerContext } from '../../generated';
+import type { handlerContext } from '../types/envio';
 import { ensureAssetPrice } from '../handlers/shared';
 
 /**

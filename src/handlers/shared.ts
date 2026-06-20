@@ -2,8 +2,8 @@
  * Shared helper functions used across all event handlers
  */
 
-import type { handlerContext } from '../../generated';
-import type { PriceOracleAsset_t } from '../../generated/src/db/Entities.gen';
+import type { handlerContext } from '../types/envio';
+import type { PriceOracleAsset_t } from '../types/envio';
 import {
   AUSD_ADDRESS,
   DEFAULT_BORROW_RATE_BPS,
@@ -32,7 +32,6 @@ import {
   BOOTSTRAP_NFT_MULTIPLIER_CONFIG,
   BOOTSTRAP_LP_POOL_CONFIGS,
 } from '../helpers/constants';
-import { readNFTBalance } from '../helpers/viem';
 import { calculateVotingPower, getCurrentDay } from '../helpers/points';
 import {
   calculateCompoundedInterest,
@@ -164,15 +163,16 @@ function cacheActive(): boolean {
   return globalCache.blockKey !== null;
 }
 
-// preload_handlers runs every handler twice: once concurrently for the whole
-// batch (writes are no-op, reads get batched into a single round-trip), then
-// sequentially with the in-memory store. Our module-scoped cache MUST stay
-// out of the preload phase — concurrent writes would leak values across
-// unrelated handlers and processing-phase reads would see stale data. So in
-// preload we just delegate to context.X.get/set so Envio's batcher can do its
-// thing, and only memoize in the sequential processing phase.
+// HyperIndex V3 preload optimization runs every handler twice: once
+// concurrently for the whole batch (writes are no-op, reads get batched into a
+// single round-trip), then sequentially with the in-memory store. Our
+// module-scoped cache MUST stay out of the preload phase: concurrent writes
+// would leak values across unrelated handlers and processing-phase reads would
+// see stale data. So in preload we delegate to context.X.get/set so Envio's
+// batcher can do its thing, and only memoize in the sequential processing
+// phase.
 function isPreload(context: handlerContext): boolean {
-  return (context as unknown as { isPreload?: boolean }).isPreload === true;
+  return context.isPreload === true;
 }
 
 async function getCachedLeaderboardConfig(context: handlerContext) {
@@ -384,8 +384,9 @@ export function writeNFTPartnership(
 }
 
 export function shouldUseEthCalls(): boolean {
-  if (process.env.ENVIO_ENABLE_EXTERNAL_CALLS !== 'true') return false;
-  return process.env.ENVIO_ENABLE_ETH_CALLS === 'true';
+  // Monad production indexing is event-only: full nodes cannot serve archive-style
+  // historic reads, so handler paths must never depend on external chain state.
+  return false;
 }
 
 function shouldSyncNFTOwnershipFromChain(): boolean {
@@ -850,7 +851,7 @@ export async function updateUserTokenList(
 ): Promise<void> {
   const normalizedUser = normalizeAddress(userAddress);
   let userTokens = await context.UserTokenList.get(normalizedUser);
-  let tokenIds: bigint[] = userTokens?.tokenIds || [];
+  let tokenIds: bigint[] = [...(userTokens?.tokenIds ?? [])];
 
   if (action === 'add') {
     let alreadyExists = false;
@@ -1007,6 +1008,8 @@ export async function getOrCreateUserLeaderboardState(
       user_id: normalizedUserId,
       nftCount: 0n,
       nftMultiplier: 10000n,
+      specialEditionCount: 0n,
+      specialEditionMultiplier: 10000n,
       votingPower: 0n,
       vpTierIndex: 0n,
       vpMultiplier: 10000n,
@@ -1169,107 +1172,386 @@ export async function calculateNFTMultiplierFromCount(
   return totalMultiplier;
 }
 
+function historyValueAt<T>(
+  timestamps: readonly number[] | undefined,
+  values: readonly T[] | undefined,
+  timestamp: number,
+  fallback: T
+): T {
+  if (!timestamps || !values || timestamps.length === 0 || values.length === 0) {
+    return fallback;
+  }
+  const len = Math.min(timestamps.length, values.length);
+  for (let i = len - 1; i >= 0; i--) {
+    if ((timestamps[i] ?? 0) <= timestamp) {
+      return values[i] ?? fallback;
+    }
+  }
+  return fallback;
+}
+
+function pushTimelineValue<T>(timestamps: number[], values: T[], timestamp: number, value: T) {
+  timestamps.push(timestamp);
+  values.push(value);
+}
+
+export function composeCombinedMultiplierBps(
+  nftMultiplier: bigint,
+  specialEditionMultiplier: bigint,
+  vpMultiplier: bigint
+): bigint {
+  let combinedMultiplierBps =
+    (nftMultiplier * specialEditionMultiplier * vpMultiplier) / (BASIS_POINTS * BASIS_POINTS);
+  if (combinedMultiplierBps > MAX_COMBINED_MULTIPLIER) {
+    combinedMultiplierBps = MAX_COMBINED_MULTIPLIER;
+  }
+  return combinedMultiplierBps;
+}
+
+export async function getOrCreateSpecialEditionRegistryState(
+  context: handlerContext,
+  timestamp: number
+) {
+  let state = await context.SpecialEditionRegistryState.get('current');
+  if (!state) {
+    state = {
+      id: 'current',
+      editionIds: [],
+      lastUpdate: timestamp,
+    };
+    context.SpecialEditionRegistryState.set(state);
+  }
+  return state;
+}
+
+export async function getOrCreateUserSpecialEditionAggregate(
+  context: handlerContext,
+  userId: string,
+  timestamp: number
+) {
+  const normalizedUserId = normalizeAddress(userId);
+  let aggregate = await context.UserSpecialEditionAggregate.get(normalizedUserId);
+  if (!aggregate) {
+    aggregate = {
+      id: normalizedUserId,
+      user_id: normalizedUserId,
+      specialEditionCount: 0n,
+      specialEditionMultiplier: BASIS_POINTS,
+      updatedAt: timestamp,
+    };
+    context.UserSpecialEditionAggregate.set(aggregate);
+  }
+  return aggregate;
+}
+
+export async function getOrCreateUserSpecialEditionState(
+  context: handlerContext,
+  userId: string,
+  editionId: bigint,
+  timestamp: number
+) {
+  const normalizedUserId = normalizeAddress(userId);
+  const id = `${normalizedUserId}:${editionId.toString()}`;
+  let state = await context.UserSpecialEditionState.get(id);
+  if (!state) {
+    state = {
+      id,
+      user_id: normalizedUserId,
+      editionId,
+      tokenCount: 0n,
+      countTimestamps: [timestamp],
+      tokenCountHistory: [0n],
+      updatedAt: timestamp,
+    };
+    context.UserSpecialEditionState.set(state);
+  }
+  return state;
+}
+
+async function calculateSpecialEditionMultiplierAt(
+  context: handlerContext,
+  userId: string,
+  timestamp: number
+): Promise<bigint> {
+  if (
+    !context.SpecialEditionRegistryState ||
+    !context.SpecialEditionConfig ||
+    !context.UserSpecialEditionState
+  ) {
+    return BASIS_POINTS;
+  }
+
+  const normalizedUserId = normalizeAddress(userId);
+  const registry = await context.SpecialEditionRegistryState.get('current');
+  const editionIds = registry?.editionIds ?? [];
+  let boostTotal = 0n;
+
+  for (const editionId of editionIds) {
+    const config = await context.SpecialEditionConfig.get(editionId.toString());
+    if (!config || !config.exists) continue;
+
+    const enabled = historyValueAt(
+      config.changeTimestamps,
+      config.enabledHistory,
+      timestamp,
+      config.enabled ? 1n : 0n
+    );
+    if (enabled === 0n) continue;
+
+    const boostBps = historyValueAt(
+      config.changeTimestamps,
+      config.boostBpsHistory,
+      timestamp,
+      config.perTokenBoostBps
+    );
+    if (boostBps <= 0n) continue;
+
+    const userEdition = await context.UserSpecialEditionState.get(
+      `${normalizedUserId}:${editionId.toString()}`
+    );
+    const count = userEdition
+      ? historyValueAt(
+          userEdition.countTimestamps,
+          userEdition.tokenCountHistory,
+          timestamp,
+          userEdition.tokenCount
+        )
+      : 0n;
+    if (count > 0n) {
+      boostTotal += count * boostBps;
+    }
+  }
+
+  return BASIS_POINTS + boostTotal;
+}
+
+export async function calculateSpecialEditionMultiplierFromUser(
+  context: handlerContext,
+  userId: string,
+  timestamp: number
+): Promise<bigint> {
+  return calculateSpecialEditionMultiplierAt(context, userId, timestamp);
+}
+
+async function collectSpecialEditionMultiplierBoundaries(
+  context: handlerContext,
+  userId: string,
+  startTimestamp: number,
+  endTimestamp: number
+): Promise<number[]> {
+  const boundaries = new Set<number>([startTimestamp, endTimestamp]);
+  if (
+    endTimestamp <= startTimestamp ||
+    !context.SpecialEditionRegistryState ||
+    !context.SpecialEditionConfig ||
+    !context.UserSpecialEditionState
+  ) {
+    return Array.from(boundaries).sort((a, b) => a - b);
+  }
+
+  const normalizedUserId = normalizeAddress(userId);
+  const registry = await context.SpecialEditionRegistryState.get('current');
+  const editionIds = registry?.editionIds ?? [];
+
+  for (const editionId of editionIds) {
+    const config = await context.SpecialEditionConfig.get(editionId.toString());
+    for (const ts of config?.changeTimestamps ?? []) {
+      if (ts > startTimestamp && ts < endTimestamp) boundaries.add(ts);
+    }
+
+    const userEdition = await context.UserSpecialEditionState.get(
+      `${normalizedUserId}:${editionId.toString()}`
+    );
+    for (const ts of userEdition?.countTimestamps ?? []) {
+      if (ts > startTimestamp && ts < endTimestamp) boundaries.add(ts);
+    }
+  }
+
+  return Array.from(boundaries).sort((a, b) => a - b);
+}
+
+export async function calculateAverageSpecialEditionMultiplierBps(
+  context: handlerContext,
+  userId: string,
+  startTimestamp: number,
+  endTimestamp: number
+): Promise<bigint> {
+  if (endTimestamp <= startTimestamp) {
+    return calculateSpecialEditionMultiplierAt(context, userId, endTimestamp);
+  }
+  if (
+    !context.SpecialEditionRegistryState ||
+    !context.SpecialEditionConfig ||
+    !context.UserSpecialEditionState
+  ) {
+    return BASIS_POINTS;
+  }
+
+  const normalizedUserId = normalizeAddress(userId);
+  const sorted = await collectSpecialEditionMultiplierBoundaries(
+    context,
+    normalizedUserId,
+    startTimestamp,
+    endTimestamp
+  );
+  let weighted = 0n;
+  let durationTotal = 0n;
+  for (let i = 0; i < sorted.length - 1; i++) {
+    const start = sorted[i] ?? startTimestamp;
+    const end = sorted[i + 1] ?? endTimestamp;
+    if (end <= start) continue;
+
+    const duration = BigInt(end - start);
+    const multiplier = await calculateSpecialEditionMultiplierAt(context, normalizedUserId, start);
+    weighted += multiplier * duration;
+    durationTotal += duration;
+  }
+
+  return durationTotal > 0n ? weighted / durationTotal : BASIS_POINTS;
+}
+
+export async function refreshUserSpecialEditionState(
+  context: handlerContext,
+  userId: string,
+  timestamp: number
+) {
+  const normalizedUserId = normalizeAddress(userId);
+  if (
+    !context.SpecialEditionRegistryState ||
+    !context.SpecialEditionConfig ||
+    !context.UserSpecialEditionState ||
+    !context.UserSpecialEditionAggregate
+  ) {
+    return {
+      specialEditionCount: 0n,
+      specialEditionMultiplier: BASIS_POINTS,
+    };
+  }
+
+  const registry = await context.SpecialEditionRegistryState.get('current');
+  const editionIds = registry?.editionIds ?? [];
+  let specialEditionCount = 0n;
+
+  for (const editionId of editionIds) {
+    const state = await context.UserSpecialEditionState.get(
+      `${normalizedUserId}:${editionId.toString()}`
+    );
+    if (state && state.tokenCount > 0n) {
+      specialEditionCount += state.tokenCount;
+    }
+  }
+
+  const specialEditionMultiplier = await calculateSpecialEditionMultiplierAt(
+    context,
+    normalizedUserId,
+    timestamp
+  );
+  const aggregate = await getOrCreateUserSpecialEditionAggregate(
+    context,
+    normalizedUserId,
+    timestamp
+  );
+  if (
+    aggregate.specialEditionCount !== specialEditionCount ||
+    aggregate.specialEditionMultiplier !== specialEditionMultiplier
+  ) {
+    context.UserSpecialEditionAggregate.set({
+      ...aggregate,
+      specialEditionCount,
+      specialEditionMultiplier,
+      updatedAt: timestamp,
+    });
+  }
+
+  return { specialEditionCount, specialEditionMultiplier };
+}
+
+export async function applyUserSpecialEditionDelta(
+  context: handlerContext,
+  userId: string,
+  editionId: bigint,
+  delta: bigint,
+  timestamp: number,
+  txHash: string,
+  reason: string,
+  logIndex: number
+): Promise<void> {
+  const normalizedUserId = normalizeAddress(userId);
+  if (normalizedUserId === ZERO_ADDRESS) return;
+  if (
+    !context.UserSpecialEditionState ||
+    !context.UserSpecialEditionAggregate ||
+    !context.SpecialEditionRegistryState ||
+    !context.SpecialEditionConfig
+  ) {
+    return;
+  }
+
+  const userEdition = await getOrCreateUserSpecialEditionState(
+    context,
+    normalizedUserId,
+    editionId,
+    timestamp
+  );
+  const nextCount =
+    delta < 0n && userEdition.tokenCount < -delta ? 0n : userEdition.tokenCount + delta;
+  const countTimestamps = [...userEdition.countTimestamps];
+  const tokenCountHistory = [...userEdition.tokenCountHistory];
+  pushTimelineValue(countTimestamps, tokenCountHistory, timestamp, nextCount);
+
+  context.UserSpecialEditionState.set({
+    ...userEdition,
+    tokenCount: nextCount,
+    countTimestamps,
+    tokenCountHistory,
+    updatedAt: timestamp,
+  });
+
+  const aggregate = await refreshUserSpecialEditionState(context, normalizedUserId, timestamp);
+  const leaderboardState = await getOrCreateUserLeaderboardState(
+    context,
+    normalizedUserId,
+    timestamp
+  );
+  const combinedMultiplier = composeCombinedMultiplierBps(
+    leaderboardState.nftMultiplier,
+    aggregate.specialEditionMultiplier,
+    leaderboardState.vpMultiplier
+  );
+
+  const updatedState = {
+    ...leaderboardState,
+    specialEditionCount: aggregate.specialEditionCount,
+    specialEditionMultiplier: aggregate.specialEditionMultiplier,
+    combinedMultiplier,
+    lastUpdate: timestamp,
+  };
+  context.UserLeaderboardState.set(updatedState);
+  createMultiplierSnapshot(context, updatedState, timestamp, txHash, reason, logIndex);
+  context.UserSpecialEditionHistory.set({
+    id: `${normalizedUserId}:${editionId.toString()}:${timestamp}:${txHash}:${logIndex}`,
+    user_id: normalizedUserId,
+    editionId,
+    tokenCount: nextCount,
+    specialEditionCount: aggregate.specialEditionCount,
+    specialEditionMultiplier: aggregate.specialEditionMultiplier,
+    timestamp,
+    txHash,
+    logIndex,
+    changeReason: reason,
+  });
+}
+
 async function syncUserNFTOwnershipFromChain(
   context: handlerContext,
   userId: string,
   timestamp: number,
   blockNumber?: bigint
 ): Promise<void> {
-  const normalizedUserId = normalizeAddress(userId);
-  if (!shouldSyncNFTOwnershipFromChain()) {
-    return;
-  }
-
-  // Baseline each (user, collection) once, then rely on transfer events.
-
-  const registryState = await context.NFTPartnershipRegistryState.get('current');
-  const activeCollections = registryState?.activeCollections ?? [];
-  if (activeCollections.length === 0) {
-    return;
-  }
-
-  let state = null as null | Awaited<ReturnType<typeof getOrCreateUserLeaderboardState>>;
-
-  for (const collection of activeCollections) {
-    const normalizedCollection = normalizeAddress(collection);
-    const baselineId = `${normalizedUserId}:${normalizedCollection}`;
-    const baseline = await context.UserNFTBaseline.get(baselineId);
-    if (baseline) {
-      continue;
-    }
-
-    const ownershipId = `${normalizedUserId}:${normalizedCollection}`;
-    const ownership = await context.UserNFTOwnership.get(ownershipId);
-    const oldBalance = ownership?.balance ?? 0n;
-
-    const balance = await readNFTBalance(normalizedCollection, normalizedUserId, blockNumber);
-    if (balance === null) {
-      continue;
-    }
-
-    const hasNFT = balance > 0n;
-    const wasOwning = oldBalance > 0n;
-
-    if (hasNFT) {
-      context.UserNFTOwnership.set({
-        id: ownershipId,
-        user_id: normalizedUserId,
-        partnership_id: normalizedCollection,
-        balance,
-        hasNFT,
-        lastCheckedAt: timestamp,
-        lastCheckedBlock: blockNumber ?? 0n,
-      });
-    } else if (ownership) {
-      context.UserNFTOwnership.deleteUnsafe(ownershipId);
-    }
-
-    if (wasOwning === hasNFT) {
-      context.UserNFTBaseline.set({
-        id: baselineId,
-        user_id: normalizedUserId,
-        partnership_id: normalizedCollection,
-        checkedAt: timestamp,
-        checkedBlock: blockNumber ?? 0n,
-      });
-      continue;
-    }
-
-    if (!state) {
-      state = await getOrCreateUserLeaderboardState(context, normalizedUserId, timestamp);
-    }
-
-    let newNftCount = state.nftCount;
-    if (hasNFT && !wasOwning) {
-      newNftCount = state.nftCount + 1n;
-    } else if (!hasNFT && wasOwning) {
-      newNftCount = state.nftCount > 0n ? state.nftCount - 1n : 0n;
-    }
-
-    const newNftMultiplier = await calculateNFTMultiplierFromCount(context, newNftCount);
-    let combinedMultiplier = (newNftMultiplier * state.vpMultiplier) / BASIS_POINTS;
-    if (combinedMultiplier > MAX_COMBINED_MULTIPLIER) {
-      combinedMultiplier = MAX_COMBINED_MULTIPLIER;
-    }
-
-    state = {
-      ...state,
-      nftCount: newNftCount,
-      nftMultiplier: newNftMultiplier,
-      combinedMultiplier,
-      lastUpdate: timestamp,
-    };
-
-    context.UserLeaderboardState.set(state);
-
-    context.UserNFTBaseline.set({
-      id: baselineId,
-      user_id: normalizedUserId,
-      partnership_id: normalizedCollection,
-      checkedAt: timestamp,
-      checkedBlock: blockNumber ?? 0n,
-    });
-  }
+  void context;
+  void userId;
+  void timestamp;
+  void blockNumber;
 }
 
 export function createVPHistoryEntry(
@@ -1312,10 +1594,11 @@ export async function updateUserVotingPower(
   const vpMultiplier = await calculateVPMultiplier(context, newVotingPower);
   const vpTierIndex = await findVPTierIndex(context, newVotingPower);
 
-  let combinedMultiplier = (state.nftMultiplier * vpMultiplier) / BASIS_POINTS;
-  if (combinedMultiplier > MAX_COMBINED_MULTIPLIER) {
-    combinedMultiplier = MAX_COMBINED_MULTIPLIER;
-  }
+  const combinedMultiplier = composeCombinedMultiplierBps(
+    state.nftMultiplier,
+    state.specialEditionMultiplier ?? BASIS_POINTS,
+    vpMultiplier
+  );
 
   const updatedState = {
     ...state,
@@ -1437,6 +1720,8 @@ export function createMultiplierSnapshot(
     id: string;
     nftCount: bigint;
     nftMultiplier: bigint;
+    specialEditionCount?: bigint;
+    specialEditionMultiplier?: bigint;
     votingPower: bigint;
     vpMultiplier: bigint;
     combinedMultiplier: bigint;
@@ -1453,6 +1738,8 @@ export function createMultiplierSnapshot(
     timestamp,
     nftCount: state.nftCount,
     nftMultiplier: state.nftMultiplier,
+    specialEditionCount: state.specialEditionCount ?? 0n,
+    specialEditionMultiplier: state.specialEditionMultiplier ?? BASIS_POINTS,
     votingPower: state.votingPower,
     vpMultiplier: state.vpMultiplier,
     combinedMultiplier: state.combinedMultiplier,
@@ -1483,7 +1770,11 @@ export async function recalculateUserTotalVP(
       votingPower: 0n,
       vpMultiplier: BASIS_POINTS,
       vpTierIndex: 0n,
-      combinedMultiplier: state.nftMultiplier,
+      combinedMultiplier: composeCombinedMultiplierBps(
+        state.nftMultiplier,
+        state.specialEditionMultiplier ?? BASIS_POINTS,
+        BASIS_POINTS
+      ),
       lastUpdate: timestamp,
     });
     return;
@@ -1512,10 +1803,11 @@ export async function recalculateUserTotalVP(
   const vpMultiplier = await calculateVPMultiplier(context, totalVotingPower);
   const vpTierIndex = await findVPTierIndex(context, totalVotingPower);
 
-  let combinedMultiplier = (state.nftMultiplier * vpMultiplier) / BASIS_POINTS;
-  if (combinedMultiplier > MAX_COMBINED_MULTIPLIER) {
-    combinedMultiplier = MAX_COMBINED_MULTIPLIER;
-  }
+  const combinedMultiplier = composeCombinedMultiplierBps(
+    state.nftMultiplier,
+    state.specialEditionMultiplier ?? BASIS_POINTS,
+    vpMultiplier
+  );
 
   const updatedState = {
     ...state,
@@ -1825,17 +2117,21 @@ export async function refreshUserVotingPowerState(
 
   // Recalculate NFT multiplier from actual ownership to handle static boosts
   const nftMultiplier = await calculateNFTMultiplierFromUser(context, normalizedUserId);
+  const specialEdition = await refreshUserSpecialEditionState(context, normalizedUserId, timestamp);
 
-  let combinedMultiplierBps = (nftMultiplier * vpMultiplier) / BASIS_POINTS;
-  if (combinedMultiplierBps > MAX_COMBINED_MULTIPLIER) {
-    combinedMultiplierBps = MAX_COMBINED_MULTIPLIER;
-  }
+  const combinedMultiplierBps = composeCombinedMultiplierBps(
+    nftMultiplier,
+    specialEdition.specialEditionMultiplier,
+    vpMultiplier
+  );
 
   if (
     state.votingPower !== currentVP ||
     state.vpMultiplier !== vpMultiplier ||
     state.vpTierIndex !== vpTierIndex ||
     state.nftMultiplier !== nftMultiplier ||
+    state.specialEditionCount !== specialEdition.specialEditionCount ||
+    state.specialEditionMultiplier !== specialEdition.specialEditionMultiplier ||
     state.combinedMultiplier !== combinedMultiplierBps
   ) {
     context.UserLeaderboardState.set({
@@ -1844,6 +2140,8 @@ export async function refreshUserVotingPowerState(
       vpMultiplier,
       vpTierIndex,
       nftMultiplier,
+      specialEditionCount: specialEdition.specialEditionCount,
+      specialEditionMultiplier: specialEdition.specialEditionMultiplier,
       combinedMultiplier: combinedMultiplierBps,
       lastUpdate: timestamp,
     });
@@ -1864,23 +2162,52 @@ export async function calculateAverageCombinedMultiplierBps(
   endTimestamp: number
 ): Promise<bigint> {
   const normalizedUserId = normalizeAddress(userId);
-  const averageVP = await calculateAverageVPFromStorage(
+
+  // Recalculate NFT multiplier from actual ownership to handle static boosts
+  const nftMultiplier = await calculateNFTMultiplierFromUser(context, userId);
+  const boundaries = await collectSpecialEditionMultiplierBoundaries(
     context,
     normalizedUserId,
     startTimestamp,
     endTimestamp
   );
-  const vpMultiplier = await calculateVPMultiplier(context, averageVP);
 
-  // Recalculate NFT multiplier from actual ownership to handle static boosts
-  const nftMultiplier = await calculateNFTMultiplierFromUser(context, userId);
+  let weighted = 0n;
+  let durationTotal = 0n;
+  for (let i = 0; i < boundaries.length - 1; i++) {
+    const start = boundaries[i] ?? startTimestamp;
+    const end = boundaries[i + 1] ?? endTimestamp;
+    if (end <= start) continue;
 
-  let combinedMultiplierBps = (nftMultiplier * vpMultiplier) / BASIS_POINTS;
-  if (combinedMultiplierBps > MAX_COMBINED_MULTIPLIER) {
-    combinedMultiplierBps = MAX_COMBINED_MULTIPLIER;
+    const averageVP = await calculateAverageVPFromStorage(context, normalizedUserId, start, end);
+    const vpMultiplier = await calculateVPMultiplier(context, averageVP);
+    const specialEditionMultiplier = await calculateSpecialEditionMultiplierAt(
+      context,
+      normalizedUserId,
+      start
+    );
+    const combinedMultiplierBps = composeCombinedMultiplierBps(
+      nftMultiplier,
+      specialEditionMultiplier,
+      vpMultiplier
+    );
+    const duration = BigInt(end - start);
+    weighted += combinedMultiplierBps * duration;
+    durationTotal += duration;
   }
 
-  return combinedMultiplierBps;
+  if (durationTotal > 0n) {
+    return weighted / durationTotal;
+  }
+
+  const currentVP = await calculateCurrentVPFromStorage(context, normalizedUserId, endTimestamp);
+  const vpMultiplier = await calculateVPMultiplier(context, currentVP);
+  const specialEditionMultiplier = await calculateSpecialEditionMultiplierAt(
+    context,
+    normalizedUserId,
+    endTimestamp
+  );
+  return composeCombinedMultiplierBps(nftMultiplier, specialEditionMultiplier, vpMultiplier);
 }
 
 export async function applyMultipliersForUser(
@@ -2539,7 +2866,7 @@ export async function settlePointsForUser(
       ? epoch.endTime
       : timestamp;
 
-  if (!options?.skipNftSync) {
+  if (!options?.skipNftSync && shouldSyncNFTOwnershipFromChain()) {
     await syncUserNFTOwnershipFromChain(context, normalizedUserId, timestamp, blockNumber);
   }
   if (!options?.skipLPSync && !options?.skipLPChainSync && shouldSyncLPPositionsFromChain()) {
@@ -2687,12 +3014,12 @@ export async function settlePointsForUser(
           // Convert to scaled BigInt
           const vpPointsScaled = toScaledPoints(vpPointsEarned);
 
-          const state = await getOrCreateUserLeaderboardState(context, normalizedUserId, timestamp);
-          const avgVpMultiplier = await calculateVPMultiplier(context, averageVP);
-          let combinedMultiplierBps = (state.nftMultiplier * avgVpMultiplier) / BASIS_POINTS;
-          if (combinedMultiplierBps > MAX_COMBINED_MULTIPLIER) {
-            combinedMultiplierBps = MAX_COMBINED_MULTIPLIER;
-          }
+          const combinedMultiplierBps = await calculateAverageCombinedMultiplierBps(
+            context,
+            normalizedUserId,
+            vpAccrualStart,
+            vpAccrualEnd
+          );
 
           const nextDailyVpPoints = epochStats.dailyVPPoints + vpPointsScaled;
           const nextVpPointsWithMultiplier =

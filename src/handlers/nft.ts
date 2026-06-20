@@ -41,14 +41,7 @@
  * - >0 in event = static boost value in basis points
  */
 
-import {
-  NFTPartnershipRegistry,
-  PartnerNFT,
-  The10kSquad,
-  Overnads,
-  LilStars,
-  RealNads,
-} from '../../generated';
+import { indexer } from 'envio';
 import {
   getOrCreateUserLeaderboardState,
   createMultiplierSnapshot,
@@ -56,12 +49,13 @@ import {
   recordProtocolTransaction,
   settlePointsForUser,
   calculateNFTMultiplierFromUser,
+  composeCombinedMultiplierBps,
   writeNFTMultiplierConfig,
   writeNFTPartnership,
   writeNFTRegistryState,
 } from './shared';
-import { normalizeAddress } from '../helpers/constants';
-import type { handlerContext } from '../../generated';
+import { normalizeAddress, isStaticNftCollection } from '../helpers/constants';
+import type { handlerContext } from '../types/envio';
 
 async function getOrCreateRegistryState(context: handlerContext, timestamp: number) {
   let state = await context.NFTPartnershipRegistryState.get('current');
@@ -104,152 +98,177 @@ async function updateActiveCollections(
 // NFTPartnershipRegistry Handlers
 // ============================================
 
-NFTPartnershipRegistry.PartnershipAdded.contractRegister(({ event, context }) => {
-  context.addPartnerNFT(normalizeAddress(event.params.collection));
-});
+indexer.contractRegister(
+  { contract: 'NFTPartnershipRegistry', event: 'PartnershipAdded' },
+  async ({ event, context }) => {
+    const collection = normalizeAddress(event.params.collection);
+    // Collections that are already statically configured in config.yaml (with their
+    // own Transfer handler) must not also be registered as dynamic PartnerNFT
+    // contracts — Envio does not dedupe across contract names, so doing so would
+    // double-dispatch their Transfer logs and double-count NFT balances/multipliers.
+    if (isStaticNftCollection(collection)) return;
+    context.chain.PartnerNFT.add(collection);
+  }
+);
 
-NFTPartnershipRegistry.PartnershipAdded.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const id = normalizeAddress(event.params.collection);
-  const timestamp = Number(event.block.timestamp);
+indexer.onEvent(
+  { contract: 'NFTPartnershipRegistry', event: 'PartnershipAdded' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const id = normalizeAddress(event.params.collection);
+    const timestamp = Number(event.block.timestamp);
 
-  // The first settlement after a partnership is added can baseline ownership
-  // via a one-time on-chain balance check per user.
+    // The first settlement after a partnership is added can baseline ownership
+    // via a one-time on-chain balance check per user.
 
-  // Extract staticBoostBps if present in event (future contract versions)
-  const paramsWithBoost = event.params as typeof event.params & { staticBoostBps?: bigint };
-
-  // Check if partnership already exists (for resync)
-  const existing = await context.NFTPartnership.get(id);
-
-  // Only update staticBoostBps if explicitly provided in event
-  // undefined = not in event (old contracts), preserve existing value
-  // 0 = explicitly decay-based NFT
-  // >0 = static boost value
-  const staticBoostBps =
-    paramsWithBoost.staticBoostBps !== undefined
-      ? paramsWithBoost.staticBoostBps
-      : existing?.staticBoostBps;
-
-  writeNFTPartnership(context, {
-    id,
-    collection: id,
-    name: event.params.name,
-    active: event.params.active,
-    staticBoostBps,
-    startTimestamp: Number(event.params.startTimestamp),
-    endTimestamp: event.params.endTimestamp > 0n ? Number(event.params.endTimestamp) : undefined,
-    addedAt: timestamp,
-    lastUpdate: timestamp,
-  });
-
-  // Update global config with values from the event
-  writeNFTMultiplierConfig(context, {
-    id: 'current',
-    firstBonus: event.params.currentFirstBonus,
-    decayRatio: event.params.currentDecayRatio,
-    lastUpdate: timestamp,
-  });
-
-  await updateActiveCollections(context, id, event.params.active, timestamp);
-});
-
-NFTPartnershipRegistry.PartnershipUpdated.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const id = normalizeAddress(event.params.collection);
-
-  const partnership = await context.NFTPartnership.get(id);
-  if (partnership) {
-    // Extract staticBoostBps if present in event
+    // Extract staticBoostBps if present in event (future contract versions)
     const paramsWithBoost = event.params as typeof event.params & { staticBoostBps?: bigint };
 
-    // Only update staticBoostBps if explicitly provided
+    // Check if partnership already exists (for resync)
+    const existing = await context.NFTPartnership.get(id);
+
+    // Only update staticBoostBps if explicitly provided in event
+    // undefined = not in event (old contracts), preserve existing value
+    // 0 = explicitly decay-based NFT
+    // >0 = static boost value
     const staticBoostBps =
       paramsWithBoost.staticBoostBps !== undefined
         ? paramsWithBoost.staticBoostBps
-        : partnership.staticBoostBps;
+        : existing?.staticBoostBps;
 
     writeNFTPartnership(context, {
-      ...partnership,
+      id,
+      collection: id,
       name: event.params.name,
       active: event.params.active,
       staticBoostBps,
       startTimestamp: Number(event.params.startTimestamp),
       endTimestamp: event.params.endTimestamp > 0n ? Number(event.params.endTimestamp) : undefined,
-      lastUpdate: Number(event.block.timestamp),
-    });
-  }
-
-  await updateActiveCollections(context, id, event.params.active, Number(event.block.timestamp));
-});
-
-NFTPartnershipRegistry.PartnershipRemoved.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const id = normalizeAddress(event.params.collection);
-  const timestamp = Number(event.block.timestamp);
-
-  const partnership = await context.NFTPartnership.get(id);
-  if (partnership) {
-    writeNFTPartnership(context, {
-      ...partnership,
-      active: false,
+      addedAt: timestamp,
       lastUpdate: timestamp,
     });
+
+    // Update global config with values from the event
+    writeNFTMultiplierConfig(context, {
+      id: 'current',
+      firstBonus: event.params.currentFirstBonus,
+      decayRatio: event.params.currentDecayRatio,
+      lastUpdate: timestamp,
+    });
+
+    await updateActiveCollections(context, id, event.params.active, timestamp);
   }
+);
 
-  await updateActiveCollections(context, id, false, timestamp);
-});
+indexer.onEvent(
+  { contract: 'NFTPartnershipRegistry', event: 'PartnershipUpdated' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const id = normalizeAddress(event.params.collection);
 
-NFTPartnershipRegistry.MultiplierParamsUpdated.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const id = event.params.timestamp.toString();
+    const partnership = await context.NFTPartnership.get(id);
+    if (partnership) {
+      // Extract staticBoostBps if present in event
+      const paramsWithBoost = event.params as typeof event.params & { staticBoostBps?: bigint };
 
-  context.NFTMultiplierSnapshot.set({
-    id,
-    firstBonus: event.params.newFirstBonus,
-    decayRatio: event.params.newDecayRatio,
-    activePartnershipCount: event.params.totalActivePartnerships,
-    timestamp: Number(event.params.timestamp),
-    txHash: event.transaction.hash,
-  });
+      // Only update staticBoostBps if explicitly provided
+      const staticBoostBps =
+        paramsWithBoost.staticBoostBps !== undefined
+          ? paramsWithBoost.staticBoostBps
+          : partnership.staticBoostBps;
 
-  writeNFTMultiplierConfig(context, {
-    id: 'current',
-    firstBonus: event.params.newFirstBonus,
-    decayRatio: event.params.newDecayRatio,
-    lastUpdate: Number(event.params.timestamp),
-  });
-});
+      writeNFTPartnership(context, {
+        ...partnership,
+        name: event.params.name,
+        active: event.params.active,
+        staticBoostBps,
+        startTimestamp: Number(event.params.startTimestamp),
+        endTimestamp:
+          event.params.endTimestamp > 0n ? Number(event.params.endTimestamp) : undefined,
+        lastUpdate: Number(event.block.timestamp),
+      });
+    }
+
+    await updateActiveCollections(context, id, event.params.active, Number(event.block.timestamp));
+  }
+);
+
+indexer.onEvent(
+  { contract: 'NFTPartnershipRegistry', event: 'PartnershipRemoved' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const id = normalizeAddress(event.params.collection);
+    const timestamp = Number(event.block.timestamp);
+
+    const partnership = await context.NFTPartnership.get(id);
+    if (partnership) {
+      writeNFTPartnership(context, {
+        ...partnership,
+        active: false,
+        lastUpdate: timestamp,
+      });
+    }
+
+    await updateActiveCollections(context, id, false, timestamp);
+  }
+);
+
+indexer.onEvent(
+  { contract: 'NFTPartnershipRegistry', event: 'MultiplierParamsUpdated' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const id = event.params.timestamp.toString();
+
+    context.NFTMultiplierSnapshot.set({
+      id,
+      firstBonus: event.params.newFirstBonus,
+      decayRatio: event.params.newDecayRatio,
+      activePartnershipCount: event.params.totalActivePartnerships,
+      timestamp: Number(event.params.timestamp),
+      txHash: event.transaction.hash,
+    });
+
+    writeNFTMultiplierConfig(context, {
+      id: 'current',
+      firstBonus: event.params.newFirstBonus,
+      decayRatio: event.params.newDecayRatio,
+      lastUpdate: Number(event.params.timestamp),
+    });
+  }
+);
 
 // ============================================
 // PartnerNFT Handlers
 // ============================================
 
-PartnerNFT.Transfer.contractRegister(({ event, context }) => {
-  context.addPartnerNFT(normalizeAddress(event.srcAddress));
-});
+indexer.contractRegister(
+  { contract: 'PartnerNFT', event: 'Transfer' },
+  async ({ event, context }) => {
+    context.chain.PartnerNFT.add(normalizeAddress(event.srcAddress));
+  }
+);
 
-PartnerNFT.Transfer.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'PartnerNFT', event: 'Transfer' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -289,51 +308,30 @@ PartnerNFT.Transfer.handler(async ({ event, context }) => {
     const hasNFT = newBalance > 0n;
     const wasOwning = oldBalance > 0n;
 
-    if (hasNFT) {
-      context.UserNFTOwnership.set({
-        id: ownershipId,
-        user_id: normalizedUser,
-        partnership_id: nftContract,
-        balance: newBalance,
-        hasNFT,
-        lastCheckedAt: timestamp,
-        lastCheckedBlock: BigInt(event.block.number),
-      });
-    } else if (ownership) {
-      context.UserNFTOwnership.deleteUnsafe(ownershipId);
-    }
+    const writeOwnership = () => {
+      if (hasNFT) {
+        context.UserNFTOwnership.set({
+          id: ownershipId,
+          user_id: normalizedUser,
+          partnership_id: nftContract,
+          balance: newBalance,
+          hasNFT,
+          lastCheckedAt: timestamp,
+          lastCheckedBlock: BigInt(event.block.number),
+        });
+      } else if (ownership) {
+        context.UserNFTOwnership.deleteUnsafe(ownershipId);
+      }
+    };
 
     // Update multiplier only if collection ownership changed (0 <-> >0)
     if (wasOwning !== hasNFT) {
-      const state = await getOrCreateUserLeaderboardState(context, normalizedUser, timestamp);
-      const oldMultiplier = state.nftMultiplier;
-
-      let newNftCount = state.nftCount;
-      if (hasNFT && !wasOwning) {
-        newNftCount = state.nftCount + 1n;
-      } else if (!hasNFT && wasOwning) {
-        newNftCount = state.nftCount > 0n ? state.nftCount - 1n : 0n;
-      }
-
-      // Update state first so calculateNFTMultiplierFromUser can read current ownership
-      context.UserLeaderboardState.set({
-        ...state,
-        nftCount: newNftCount,
-        lastUpdate: timestamp,
-      });
-
-      const newNftMultiplier = await calculateNFTMultiplierFromUser(context, normalizedUser);
-
-      let combinedMultiplier = (newNftMultiplier * state.vpMultiplier) / 10000n;
-      if (combinedMultiplier > 100000n) combinedMultiplier = 100000n;
-
-      context.UserLeaderboardState.set({
-        ...state,
-        nftCount: newNftCount,
-        nftMultiplier: newNftMultiplier,
-        combinedMultiplier,
-        lastUpdate: timestamp,
-      });
+      const preChangeState = await getOrCreateUserLeaderboardState(
+        context,
+        normalizedUser,
+        timestamp
+      );
+      const oldMultiplier = preChangeState.nftMultiplier;
 
       await settlePointsForUser(
         context,
@@ -346,6 +344,39 @@ PartnerNFT.Transfer.handler(async ({ event, context }) => {
           skipNftSync: true,
         }
       );
+
+      const state = await getOrCreateUserLeaderboardState(context, normalizedUser, timestamp);
+
+      let newNftCount = state.nftCount;
+      if (hasNFT && !wasOwning) {
+        newNftCount = state.nftCount + 1n;
+      } else if (!hasNFT && wasOwning) {
+        newNftCount = state.nftCount > 0n ? state.nftCount - 1n : 0n;
+      }
+
+      writeOwnership();
+
+      // Update state first so calculateNFTMultiplierFromUser can read current ownership
+      context.UserLeaderboardState.set({
+        ...state,
+        nftCount: newNftCount,
+        lastUpdate: timestamp,
+      });
+
+      const newNftMultiplier = await calculateNFTMultiplierFromUser(context, normalizedUser);
+      const combinedMultiplier = composeCombinedMultiplierBps(
+        newNftMultiplier,
+        state.specialEditionMultiplier,
+        state.vpMultiplier
+      );
+
+      context.UserLeaderboardState.set({
+        ...state,
+        nftCount: newNftCount,
+        nftMultiplier: newNftMultiplier,
+        combinedMultiplier,
+        lastUpdate: timestamp,
+      });
 
       if (oldMultiplier !== newNftMultiplier) {
         const changeReason = hasNFT
@@ -365,6 +396,8 @@ PartnerNFT.Transfer.handler(async ({ event, context }) => {
           Number(event.logIndex)
         );
       }
+    } else {
+      writeOwnership();
     }
   }
 
@@ -382,23 +415,23 @@ PartnerNFT.Transfer.handler(async ({ event, context }) => {
 // ============================================
 
 // The10kSquad uses same handler as PartnerNFT
-The10kSquad.Transfer.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'The10kSquad', event: 'Transfer' }, async ({ event, context }) => {
   // Forward to PartnerNFT handler logic - same event structure
   await handleNFTTransfer(event, context);
 });
 
 // Overnads uses same handler as PartnerNFT
-Overnads.Transfer.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'Overnads', event: 'Transfer' }, async ({ event, context }) => {
   await handleNFTTransfer(event, context);
 });
 
 // LilStars uses same handler as PartnerNFT
-LilStars.Transfer.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'LilStars', event: 'Transfer' }, async ({ event, context }) => {
   await handleNFTTransfer(event, context);
 });
 
 // RealNads uses same handler as PartnerNFT
-RealNads.Transfer.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'RealNads', event: 'Transfer' }, async ({ event, context }) => {
   await handleNFTTransfer(event, context);
 });
 
@@ -452,51 +485,30 @@ async function handleNFTTransfer(
     const hasNFT = newBalance > 0n;
     const wasOwning = oldBalance > 0n;
 
-    if (hasNFT) {
-      context.UserNFTOwnership.set({
-        id: ownershipId,
-        user_id: normalizedUser,
-        partnership_id: nftContract,
-        balance: newBalance,
-        hasNFT,
-        lastCheckedAt: timestamp,
-        lastCheckedBlock: BigInt(event.block.number),
-      });
-    } else if (ownership) {
-      context.UserNFTOwnership.deleteUnsafe(ownershipId);
-    }
+    const writeOwnership = () => {
+      if (hasNFT) {
+        context.UserNFTOwnership.set({
+          id: ownershipId,
+          user_id: normalizedUser,
+          partnership_id: nftContract,
+          balance: newBalance,
+          hasNFT,
+          lastCheckedAt: timestamp,
+          lastCheckedBlock: BigInt(event.block.number),
+        });
+      } else if (ownership) {
+        context.UserNFTOwnership.deleteUnsafe(ownershipId);
+      }
+    };
 
     // Update multiplier only if collection ownership changed (0 <-> >0)
     if (wasOwning !== hasNFT) {
-      const state = await getOrCreateUserLeaderboardState(context, normalizedUser, timestamp);
-      const oldMultiplier = state.nftMultiplier;
-
-      let newNftCount = state.nftCount;
-      if (hasNFT && !wasOwning) {
-        newNftCount = state.nftCount + 1n;
-      } else if (!hasNFT && wasOwning) {
-        newNftCount = state.nftCount > 0n ? state.nftCount - 1n : 0n;
-      }
-
-      // Update state first so calculateNFTMultiplierFromUser can read current ownership
-      context.UserLeaderboardState.set({
-        ...state,
-        nftCount: newNftCount,
-        lastUpdate: timestamp,
-      });
-
-      const newNftMultiplier = await calculateNFTMultiplierFromUser(context, normalizedUser);
-
-      let combinedMultiplier = (newNftMultiplier * state.vpMultiplier) / 10000n;
-      if (combinedMultiplier > 100000n) combinedMultiplier = 100000n;
-
-      context.UserLeaderboardState.set({
-        ...state,
-        nftCount: newNftCount,
-        nftMultiplier: newNftMultiplier,
-        combinedMultiplier,
-        lastUpdate: timestamp,
-      });
+      const preChangeState = await getOrCreateUserLeaderboardState(
+        context,
+        normalizedUser,
+        timestamp
+      );
+      const oldMultiplier = preChangeState.nftMultiplier;
 
       await settlePointsForUser(
         context,
@@ -509,6 +521,39 @@ async function handleNFTTransfer(
           skipNftSync: true,
         }
       );
+
+      const state = await getOrCreateUserLeaderboardState(context, normalizedUser, timestamp);
+
+      let newNftCount = state.nftCount;
+      if (hasNFT && !wasOwning) {
+        newNftCount = state.nftCount + 1n;
+      } else if (!hasNFT && wasOwning) {
+        newNftCount = state.nftCount > 0n ? state.nftCount - 1n : 0n;
+      }
+
+      writeOwnership();
+
+      // Update state first so calculateNFTMultiplierFromUser can read current ownership
+      context.UserLeaderboardState.set({
+        ...state,
+        nftCount: newNftCount,
+        lastUpdate: timestamp,
+      });
+
+      const newNftMultiplier = await calculateNFTMultiplierFromUser(context, normalizedUser);
+      const combinedMultiplier = composeCombinedMultiplierBps(
+        newNftMultiplier,
+        state.specialEditionMultiplier,
+        state.vpMultiplier
+      );
+
+      context.UserLeaderboardState.set({
+        ...state,
+        nftCount: newNftCount,
+        nftMultiplier: newNftMultiplier,
+        combinedMultiplier,
+        lastUpdate: timestamp,
+      });
 
       if (oldMultiplier !== newNftMultiplier) {
         const changeReason = hasNFT
@@ -528,6 +573,8 @@ async function handleNFTTransfer(
           Number(event.logIndex)
         );
       }
+    } else {
+      writeOwnership();
     }
   }
 

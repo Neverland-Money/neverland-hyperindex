@@ -3,8 +3,8 @@
  * RewardsController, RevenueReward, DustToken
  */
 
-import type { handlerContext } from '../../generated';
-import { RewardsController, RevenueReward, DustToken } from '../../generated';
+import type { handlerContext } from '../types/envio';
+import { indexer } from 'envio';
 import { ZERO_ADDRESS, normalizeAddress } from '../helpers/constants';
 import { recordProtocolTransaction, getOrCreateUser, getOrCreateProtocolStats } from './shared';
 
@@ -30,106 +30,109 @@ async function getOrCreateDustTokenStat(context: handlerContext) {
 // RewardsController Handlers
 // ============================================
 
-RewardsController.AssetConfigUpdated.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const timestamp = Number(event.block.timestamp);
-  const controllerId = normalizeAddress(event.srcAddress);
-  const asset = normalizeAddress(event.params.asset);
-  const rewardAddress = normalizeAddress(event.params.reward);
-  const id = `${controllerId}-${asset}-${rewardAddress}`;
-  const previousConfig = await context.RewardAssetConfig.get(id);
+indexer.onEvent(
+  { contract: 'RewardsController', event: 'AssetConfigUpdated' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const timestamp = Number(event.block.timestamp);
+    const controllerId = normalizeAddress(event.srcAddress);
+    const asset = normalizeAddress(event.params.asset);
+    const rewardAddress = normalizeAddress(event.params.reward);
+    const id = `${controllerId}-${asset}-${rewardAddress}`;
+    const previousConfig = await context.RewardAssetConfig.get(id);
 
-  const oldDistributionEnd =
-    previousConfig?.distributionEnd ?? Number(event.params.oldDistributionEnd);
-  const periodStart = previousConfig?.updatedAt ?? timestamp;
-  const periodEnd =
-    oldDistributionEnd > 0 && timestamp > oldDistributionEnd ? oldDistributionEnd : timestamp;
-  const emittedSeconds = periodEnd > periodStart ? periodEnd - periodStart : 0;
-  const emittedAmount = BigInt(emittedSeconds) * event.params.oldEmission;
+    const oldDistributionEnd =
+      previousConfig?.distributionEnd ?? Number(event.params.oldDistributionEnd);
+    const periodStart = previousConfig?.updatedAt ?? timestamp;
+    const periodEnd =
+      oldDistributionEnd > 0 && timestamp > oldDistributionEnd ? oldDistributionEnd : timestamp;
+    const emittedSeconds = periodEnd > periodStart ? periodEnd - periodStart : 0;
+    const emittedAmount = BigInt(emittedSeconds) * event.params.oldEmission;
 
-  context.RewardAssetConfigHistory.set({
-    id: `${event.transaction.hash}-${event.logIndex}`,
-    rewardsController: controllerId,
-    asset,
-    reward: rewardAddress,
-    oldEmission: event.params.oldEmission,
-    newEmission: event.params.newEmission,
-    oldDistributionEnd: Number(event.params.oldDistributionEnd),
-    newDistributionEnd: Number(event.params.newDistributionEnd),
-    assetIndex: event.params.assetIndex,
-    periodStart,
-    periodEnd,
-    emittedAmount,
-    timestamp,
-  });
-
-  const controller = await context.RewardsController.get(controllerId);
-  if (!controller) {
-    context.RewardsController.set({ id: controllerId });
-  }
-
-  const rewardId = `${controllerId}:${asset}:${rewardAddress}`;
-  let reward = await context.Reward.get(rewardId);
-  if (!reward) {
-    const subToken = await context.SubToken.get(asset);
-    const precision = BigInt(subToken?.underlyingAssetDecimals ?? 18);
-
-    reward = {
-      id: rewardId,
-      rewardToken: rewardAddress,
-      asset,
+    context.RewardAssetConfigHistory.set({
+      id: `${event.transaction.hash}-${event.logIndex}`,
       rewardsController: controllerId,
-      index: event.params.assetIndex,
+      asset,
+      reward: rewardAddress,
+      oldEmission: event.params.oldEmission,
+      newEmission: event.params.newEmission,
+      oldDistributionEnd: Number(event.params.oldDistributionEnd),
+      newDistributionEnd: Number(event.params.newDistributionEnd),
+      assetIndex: event.params.assetIndex,
+      periodStart,
+      periodEnd,
+      emittedAmount,
+      timestamp,
+    });
+
+    const controller = await context.RewardsController.get(controllerId);
+    if (!controller) {
+      context.RewardsController.set({ id: controllerId });
+    }
+
+    const rewardId = `${controllerId}:${asset}:${rewardAddress}`;
+    let reward = await context.Reward.get(rewardId);
+    if (!reward) {
+      const subToken = await context.SubToken.get(asset);
+      const precision = BigInt(subToken?.underlyingAssetDecimals ?? 18);
+
+      reward = {
+        id: rewardId,
+        rewardToken: rewardAddress,
+        asset,
+        rewardsController: controllerId,
+        index: event.params.assetIndex,
+        distributionEnd: Number(event.params.newDistributionEnd),
+        emissionsPerSecond: event.params.newEmission,
+        precision,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        rewardTokenDecimals: 18,
+        rewardTokenSymbol: 'RWD',
+        rewardFeedOracle: rewardAddress,
+      };
+    } else {
+      reward = {
+        ...reward,
+        index: event.params.assetIndex,
+        distributionEnd: Number(event.params.newDistributionEnd),
+        emissionsPerSecond: event.params.newEmission,
+        updatedAt: timestamp,
+      };
+    }
+
+    let oracle = await context.RewardFeedOracle.get(rewardAddress);
+    if (!oracle) {
+      oracle = {
+        id: rewardAddress,
+        rewardFeedAddress: ZERO_ADDRESS,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      };
+      context.RewardFeedOracle.set(oracle);
+    }
+
+    context.Reward.set(reward);
+
+    context.RewardAssetConfig.set({
+      id,
+      rewardsController: controllerId,
+      asset,
+      reward: rewardAddress,
+      emission: event.params.newEmission,
       distributionEnd: Number(event.params.newDistributionEnd),
-      emissionsPerSecond: event.params.newEmission,
-      precision,
-      createdAt: timestamp,
+      assetIndex: event.params.assetIndex,
       updatedAt: timestamp,
-      rewardTokenDecimals: 18,
-      rewardTokenSymbol: 'RWD',
-      rewardFeedOracle: rewardAddress,
-    };
-  } else {
-    reward = {
-      ...reward,
-      index: event.params.assetIndex,
-      distributionEnd: Number(event.params.newDistributionEnd),
-      emissionsPerSecond: event.params.newEmission,
-      updatedAt: timestamp,
-    };
+    });
   }
+);
 
-  let oracle = await context.RewardFeedOracle.get(rewardAddress);
-  if (!oracle) {
-    oracle = {
-      id: rewardAddress,
-      rewardFeedAddress: ZERO_ADDRESS,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    };
-    context.RewardFeedOracle.set(oracle);
-  }
-
-  context.Reward.set(reward);
-
-  context.RewardAssetConfig.set({
-    id,
-    rewardsController: controllerId,
-    asset,
-    reward: rewardAddress,
-    emission: event.params.newEmission,
-    distributionEnd: Number(event.params.newDistributionEnd),
-    assetIndex: event.params.assetIndex,
-    updatedAt: timestamp,
-  });
-});
-
-RewardsController.Accrued.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'RewardsController', event: 'Accrued' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -196,257 +199,281 @@ RewardsController.Accrued.handler(async ({ event, context }) => {
   });
 });
 
-RewardsController.RewardsClaimed.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
+indexer.onEvent(
+  { contract: 'RewardsController', event: 'RewardsClaimed' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
 
-  const userAddress = normalizeAddress(event.params.user);
-  await getOrCreateUser(context, userAddress);
-  await getOrCreateUser(context, normalizeAddress(event.params.to));
-  await getOrCreateUser(context, normalizeAddress(event.params.claimer));
+    const userAddress = normalizeAddress(event.params.user);
+    await getOrCreateUser(context, userAddress);
+    await getOrCreateUser(context, normalizeAddress(event.params.to));
+    await getOrCreateUser(context, normalizeAddress(event.params.claimer));
 
-  const amount = event.params.amount;
+    const amount = event.params.amount;
 
-  const user = await context.User.get(userAddress);
-  if (user) {
-    context.User.set({
-      ...user,
-      unclaimedRewards: user.unclaimedRewards > amount ? user.unclaimedRewards - amount : 0n,
-      rewardsLastUpdated: Number(event.block.timestamp),
+    const user = await context.User.get(userAddress);
+    if (user) {
+      context.User.set({
+        ...user,
+        unclaimedRewards: user.unclaimedRewards > amount ? user.unclaimedRewards - amount : 0n,
+        rewardsLastUpdated: Number(event.block.timestamp),
+      });
+    }
+
+    const id = `${event.transaction.hash}-${event.logIndex}`;
+    context.ClaimRewardsCall.set({
+      id,
+      rewardsController: normalizeAddress(event.srcAddress),
+      user: userAddress,
+      to: normalizeAddress(event.params.to),
+      caller: normalizeAddress(event.params.claimer),
+      amount,
+      txHash: event.transaction.hash,
+      action: 'ClaimRewardsCall',
+      timestamp: Number(event.block.timestamp),
     });
   }
+);
 
-  const id = `${event.transaction.hash}-${event.logIndex}`;
-  context.ClaimRewardsCall.set({
-    id,
-    rewardsController: normalizeAddress(event.srcAddress),
-    user: userAddress,
-    to: normalizeAddress(event.params.to),
-    caller: normalizeAddress(event.params.claimer),
-    amount,
-    txHash: event.transaction.hash,
-    action: 'ClaimRewardsCall',
-    timestamp: Number(event.block.timestamp),
-  });
-});
+indexer.onEvent(
+  { contract: 'RewardsController', event: 'ClaimerSet' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const id = `${normalizeAddress(event.srcAddress)}-${normalizeAddress(event.params.user)}`;
 
-RewardsController.ClaimerSet.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const id = `${normalizeAddress(event.srcAddress)}-${normalizeAddress(event.params.user)}`;
+    context.RewardClaimer.set({
+      id,
+      rewardsController: normalizeAddress(event.srcAddress),
+      user: normalizeAddress(event.params.user),
+      claimer: normalizeAddress(event.params.claimer),
+      updatedAt: Number(event.block.timestamp),
+    });
+  }
+);
 
-  context.RewardClaimer.set({
-    id,
-    rewardsController: normalizeAddress(event.srcAddress),
-    user: normalizeAddress(event.params.user),
-    claimer: normalizeAddress(event.params.claimer),
-    updatedAt: Number(event.block.timestamp),
-  });
-});
+indexer.onEvent(
+  { contract: 'RewardsController', event: 'TransferStrategyInstalled' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const id = `${normalizeAddress(event.srcAddress)}-${normalizeAddress(event.params.reward)}`;
 
-RewardsController.TransferStrategyInstalled.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const id = `${normalizeAddress(event.srcAddress)}-${normalizeAddress(event.params.reward)}`;
-
-  context.RewardTransferStrategy.set({
-    id,
-    rewardsController: normalizeAddress(event.srcAddress),
-    reward: normalizeAddress(event.params.reward),
-    strategy: normalizeAddress(event.params.transferStrategy),
-    updatedAt: Number(event.block.timestamp),
-  });
-});
+    context.RewardTransferStrategy.set({
+      id,
+      rewardsController: normalizeAddress(event.srcAddress),
+      reward: normalizeAddress(event.params.reward),
+      strategy: normalizeAddress(event.params.transferStrategy),
+      updatedAt: Number(event.block.timestamp),
+    });
+  }
+);
 
 // ============================================
 // RevenueReward Handlers
 // ============================================
 
-RevenueReward.NotifyReward.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const id = `${event.transaction.hash}-${event.logIndex}`;
-  const from = normalizeAddress(event.params.from);
-  const rewardToken = normalizeAddress(event.params.token);
+indexer.onEvent(
+  { contract: 'RevenueReward', event: 'NotifyReward' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const id = `${event.transaction.hash}-${event.logIndex}`;
+    const from = normalizeAddress(event.params.from);
+    const rewardToken = normalizeAddress(event.params.token);
 
-  context.RevenueRewardNotification.set({
-    id,
-    from,
-    rewardToken,
-    amount: event.params.amount,
-    epochId: event.params.epoch,
-    timestamp: Number(event.block.timestamp),
-    txHash: event.transaction.hash,
-  });
-
-  const tokenAddress = rewardToken;
-  let rewardTokenEntity = await context.RevenueRewardToken.get(tokenAddress);
-  if (!rewardTokenEntity) {
-    rewardTokenEntity = {
-      id: tokenAddress,
-      totalNotified: event.params.amount,
-      totalClaimed: 0n,
-      firstSeen: Number(event.block.timestamp),
-      lastUpdated: Number(event.block.timestamp),
-    };
-  } else {
-    rewardTokenEntity = {
-      ...rewardTokenEntity,
-      totalNotified: rewardTokenEntity.totalNotified + event.params.amount,
-      lastUpdated: Number(event.block.timestamp),
-    };
-  }
-  context.RevenueRewardToken.set(rewardTokenEntity);
-
-  const epochId = `${tokenAddress}:${event.params.epoch}`;
-  let rewardEpoch = await context.RevenueRewardEpoch.get(epochId);
-  if (!rewardEpoch) {
-    rewardEpoch = {
-      id: epochId,
-      token: tokenAddress,
-      epoch: Number(event.params.epoch),
+    context.RevenueRewardNotification.set({
+      id,
+      from,
+      rewardToken,
       amount: event.params.amount,
-    };
-  } else {
-    rewardEpoch = {
-      ...rewardEpoch,
-      amount: rewardEpoch.amount + event.params.amount,
-    };
+      epochId: event.params.epoch,
+      timestamp: Number(event.block.timestamp),
+      txHash: event.transaction.hash,
+    });
+
+    const tokenAddress = rewardToken;
+    let rewardTokenEntity = await context.RevenueRewardToken.get(tokenAddress);
+    if (!rewardTokenEntity) {
+      rewardTokenEntity = {
+        id: tokenAddress,
+        totalNotified: event.params.amount,
+        totalClaimed: 0n,
+        firstSeen: Number(event.block.timestamp),
+        lastUpdated: Number(event.block.timestamp),
+      };
+    } else {
+      rewardTokenEntity = {
+        ...rewardTokenEntity,
+        totalNotified: rewardTokenEntity.totalNotified + event.params.amount,
+        lastUpdated: Number(event.block.timestamp),
+      };
+    }
+    context.RevenueRewardToken.set(rewardTokenEntity);
+
+    const epochId = `${tokenAddress}:${event.params.epoch}`;
+    let rewardEpoch = await context.RevenueRewardEpoch.get(epochId);
+    if (!rewardEpoch) {
+      rewardEpoch = {
+        id: epochId,
+        token: tokenAddress,
+        epoch: Number(event.params.epoch),
+        amount: event.params.amount,
+      };
+    } else {
+      rewardEpoch = {
+        ...rewardEpoch,
+        amount: rewardEpoch.amount + event.params.amount,
+      };
+    }
+    context.RevenueRewardEpoch.set(rewardEpoch);
   }
-  context.RevenueRewardEpoch.set(rewardEpoch);
-});
+);
 
-RevenueReward.ClaimRewards.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const id = `${event.transaction.hash}-${event.logIndex}`;
-  const userAddress = normalizeAddress(event.params.user);
-  const rewardToken = normalizeAddress(event.params.rewardToken);
+indexer.onEvent(
+  { contract: 'RevenueReward', event: 'ClaimRewards' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const id = `${event.transaction.hash}-${event.logIndex}`;
+    const userAddress = normalizeAddress(event.params.user);
+    const rewardToken = normalizeAddress(event.params.rewardToken);
 
-  context.RevenueRewardClaim.set({
-    id,
-    tokenId: event.params.tokenId,
-    user: userAddress,
-    token: rewardToken,
-    amount: event.params.amount,
-    timestamp: Number(event.block.timestamp),
-    txHash: event.transaction.hash,
-  });
+    context.RevenueRewardClaim.set({
+      id,
+      tokenId: event.params.tokenId,
+      user: userAddress,
+      token: rewardToken,
+      amount: event.params.amount,
+      timestamp: Number(event.block.timestamp),
+      txHash: event.transaction.hash,
+    });
 
-  const tokenAddress = rewardToken;
-  const rewardTokenEntity = await context.RevenueRewardToken.get(tokenAddress);
-  if (rewardTokenEntity) {
-    context.RevenueRewardToken.set({
-      ...rewardTokenEntity,
-      totalClaimed: rewardTokenEntity.totalClaimed + event.params.amount,
-      lastUpdated: Number(event.block.timestamp),
+    const tokenAddress = rewardToken;
+    const rewardTokenEntity = await context.RevenueRewardToken.get(tokenAddress);
+    if (rewardTokenEntity) {
+      context.RevenueRewardToken.set({
+        ...rewardTokenEntity,
+        totalClaimed: rewardTokenEntity.totalClaimed + event.params.amount,
+        lastUpdated: Number(event.block.timestamp),
+      });
+    }
+
+    await getOrCreateUser(context, userAddress);
+  }
+);
+
+indexer.onEvent(
+  { contract: 'RevenueReward', event: 'RecoverTokens' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const id = `${event.transaction.hash}-${event.logIndex}`;
+
+    context.RevenueRewardRecovery.set({
+      id,
+      token: normalizeAddress(event.params.token),
+      amount: event.params.amount,
+      timestamp: Number(event.block.timestamp),
+      txHash: event.transaction.hash,
     });
   }
+);
 
-  await getOrCreateUser(context, userAddress);
-});
+indexer.onEvent(
+  { contract: 'RevenueReward', event: 'RewardDistributorUpdated' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const id = `${event.transaction.hash}-${event.logIndex}`;
 
-RevenueReward.RecoverTokens.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const id = `${event.transaction.hash}-${event.logIndex}`;
+    context.RevenueRewardDistributorUpdate.set({
+      id,
+      oldDistributor: normalizeAddress(event.params.oldDistributor),
+      newDistributor: normalizeAddress(event.params.newDistributor),
+      timestamp: Number(event.block.timestamp),
+      txHash: event.transaction.hash,
+    });
+  }
+);
 
-  context.RevenueRewardRecovery.set({
-    id,
-    token: normalizeAddress(event.params.token),
-    amount: event.params.amount,
-    timestamp: Number(event.block.timestamp),
-    txHash: event.transaction.hash,
-  });
-});
+indexer.onEvent(
+  { contract: 'RevenueReward', event: 'SelfRepayingLoanUpdate' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const tokenId = event.params.token.toString();
+    const timestamp = Number(event.block.timestamp);
 
-RevenueReward.RewardDistributorUpdated.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const id = `${event.transaction.hash}-${event.logIndex}`;
-
-  context.RevenueRewardDistributorUpdate.set({
-    id,
-    oldDistributor: normalizeAddress(event.params.oldDistributor),
-    newDistributor: normalizeAddress(event.params.newDistributor),
-    timestamp: Number(event.block.timestamp),
-    txHash: event.transaction.hash,
-  });
-});
-
-RevenueReward.SelfRepayingLoanUpdate.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const tokenId = event.params.token.toString();
-  const timestamp = Number(event.block.timestamp);
-
-  context.SelfRepayingLoan.set({
-    id: tokenId,
-    tokenId: event.params.token,
-    receiver: normalizeAddress(event.params.rewardReceiver),
-    enabled: event.params.isEnabled,
-    updatedAt: timestamp,
-  });
-
-  const token = await context.DustLockToken.get(tokenId);
-  if (token) {
-    context.DustLockToken.set({
-      ...token,
-      selfRepayEnabled: event.params.isEnabled,
-      rewardReceiver: normalizeAddress(event.params.rewardReceiver),
+    context.SelfRepayingLoan.set({
+      id: tokenId,
+      tokenId: event.params.token,
+      receiver: normalizeAddress(event.params.rewardReceiver),
+      enabled: event.params.isEnabled,
       updatedAt: timestamp,
     });
-  }
 
-  const updateId = `${event.transaction.hash}-${event.logIndex}`;
-  context.SelfRepayLoanUpdate.set({
-    id: updateId,
-    tokenId: event.params.token,
-    user: normalizeAddress(token?.owner ?? ''),
-    receiver: normalizeAddress(event.params.rewardReceiver),
-    isEnabled: event.params.isEnabled,
-    txHash: event.transaction.hash,
-    timestamp,
-  });
-});
+    const token = await context.DustLockToken.get(tokenId);
+    if (token) {
+      context.DustLockToken.set({
+        ...token,
+        selfRepayEnabled: event.params.isEnabled,
+        rewardReceiver: normalizeAddress(event.params.rewardReceiver),
+        updatedAt: timestamp,
+      });
+    }
+
+    const updateId = `${event.transaction.hash}-${event.logIndex}`;
+    context.SelfRepayLoanUpdate.set({
+      id: updateId,
+      tokenId: event.params.token,
+      user: normalizeAddress(token?.owner ?? ''),
+      receiver: normalizeAddress(event.params.rewardReceiver),
+      isEnabled: event.params.isEnabled,
+      txHash: event.transaction.hash,
+      timestamp,
+    });
+  }
+);
 
 // ============================================
 // DustToken Handlers
 // ============================================
 
-DustToken.Transfer.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'DustToken', event: 'Transfer' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -488,7 +515,7 @@ DustToken.Transfer.handler(async ({ event, context }) => {
   }
 });
 
-DustToken.Approval.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'DustToken', event: 'Approval' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -524,57 +551,63 @@ DustToken.Approval.handler(async ({ event, context }) => {
   }
 });
 
-DustToken.OwnershipTransferStarted.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const timestamp = Number(event.block.timestamp);
-  const stat = await getOrCreateDustTokenStat(context);
-  context.DustTokenStat.set({
-    ...stat,
-    ownershipChangeCount: stat.ownershipChangeCount + 1n,
-    lastUpdate: timestamp,
-  });
-  const id = `${event.transaction.hash}-${event.logIndex}`;
+indexer.onEvent(
+  { contract: 'DustToken', event: 'OwnershipTransferStarted' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const timestamp = Number(event.block.timestamp);
+    const stat = await getOrCreateDustTokenStat(context);
+    context.DustTokenStat.set({
+      ...stat,
+      ownershipChangeCount: stat.ownershipChangeCount + 1n,
+      lastUpdate: timestamp,
+    });
+    const id = `${event.transaction.hash}-${event.logIndex}`;
 
-  context.DustOwnershipChange.set({
-    id,
-    previousOwner: normalizeAddress(event.params.previousOwner),
-    newOwner: normalizeAddress(event.params.newOwner),
-    timestamp,
-    txHash: event.transaction.hash,
-  });
-});
+    context.DustOwnershipChange.set({
+      id,
+      previousOwner: normalizeAddress(event.params.previousOwner),
+      newOwner: normalizeAddress(event.params.newOwner),
+      timestamp,
+      txHash: event.transaction.hash,
+    });
+  }
+);
 
-DustToken.OwnershipTransferred.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const timestamp = Number(event.block.timestamp);
-  const stat = await getOrCreateDustTokenStat(context);
-  context.DustTokenStat.set({
-    ...stat,
-    ownershipChangeCount: stat.ownershipChangeCount + 1n,
-    lastUpdate: timestamp,
-  });
-  const id = `${event.transaction.hash}-${event.logIndex}`;
+indexer.onEvent(
+  { contract: 'DustToken', event: 'OwnershipTransferred' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const timestamp = Number(event.block.timestamp);
+    const stat = await getOrCreateDustTokenStat(context);
+    context.DustTokenStat.set({
+      ...stat,
+      ownershipChangeCount: stat.ownershipChangeCount + 1n,
+      lastUpdate: timestamp,
+    });
+    const id = `${event.transaction.hash}-${event.logIndex}`;
 
-  context.DustOwnershipChange.set({
-    id,
-    previousOwner: normalizeAddress(event.params.previousOwner),
-    newOwner: normalizeAddress(event.params.newOwner),
-    timestamp,
-    txHash: event.transaction.hash,
-  });
-});
+    context.DustOwnershipChange.set({
+      id,
+      previousOwner: normalizeAddress(event.params.previousOwner),
+      newOwner: normalizeAddress(event.params.newOwner),
+      timestamp,
+      txHash: event.transaction.hash,
+    });
+  }
+);
 
-DustToken.Paused.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'DustToken', event: 'Paused' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -600,7 +633,7 @@ DustToken.Paused.handler(async ({ event, context }) => {
   });
 });
 
-DustToken.Unpaused.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'DustToken', event: 'Unpaused' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,

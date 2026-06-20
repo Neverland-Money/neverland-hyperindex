@@ -40,7 +40,7 @@ import {
   updateUserVotingPower,
   updateUserTokenList,
 } from '../handlers/shared';
-import type { handlerContext } from '../../generated';
+import type { handlerContext } from '../types/envio';
 import type {
   DustLockToken_t,
   LeaderboardEpoch_t,
@@ -54,17 +54,20 @@ import type {
   PriceOracleAsset_t,
   ProtocolStatsSnapshot_t,
   ProtocolStats_t,
+  SpecialEditionConfig_t,
+  SpecialEditionRegistryState_t,
   UserEpochStats_t,
   UserLeaderboardState_t,
   UserMultiplierSnapshot_t,
   UserPoints_t,
   UserReserveList_t,
   UserNFTOwnership_t,
+  UserSpecialEditionState_t,
   UserTokenList_t,
   UserVotingPowerHistory_t,
   User_t,
   VotingPowerTier_t,
-} from '../../generated/src/db/Entities.gen';
+} from '../types/envio';
 
 type UserPointsMaybeEpochs = Omit<UserPoints_t, 'epochsParticipated' | 'lifetimeEpochsIncluded'> & {
   epochsParticipated?: bigint[];
@@ -323,6 +326,8 @@ test('NFT multiplier falls back to user state when registry store is missing', a
     user_id: user,
     nftCount: 2n,
     nftMultiplier: 10000n,
+    specialEditionCount: 0n,
+    specialEditionMultiplier: 10000n,
     votingPower: 0n,
     vpTierIndex: 0n,
     vpMultiplier: 10000n,
@@ -492,6 +497,8 @@ test('recalculateUserTotalVP caps combined multiplier', async () => {
     user_id: user,
     nftCount: 1n,
     nftMultiplier: 50000n,
+    specialEditionCount: 0n,
+    specialEditionMultiplier: 10000n,
     votingPower: 0n,
     vpTierIndex: 0n,
     vpMultiplier: 10000n,
@@ -587,6 +594,8 @@ test('updateUserVotingPower caps combined multiplier and snapshots', async () =>
     user_id: user,
     nftCount: 0n,
     nftMultiplier: 50000n,
+    specialEditionCount: 0n,
+    specialEditionMultiplier: 10000n,
     votingPower: 0n,
     vpTierIndex: 0n,
     vpMultiplier: 10000n,
@@ -1309,6 +1318,8 @@ test('average combined multiplier caps at maximum', async () => {
     user_id: '0xuser',
     nftCount: 1n,
     nftMultiplier: 50000n, // Will be recalculated to 50000 (10000 + 40000)
+    specialEditionCount: 0n,
+    specialEditionMultiplier: 10000n,
     votingPower: 0n,
     vpTierIndex: 0n,
     vpMultiplier: 10000n,
@@ -1351,6 +1362,112 @@ test('average combined multiplier caps at maximum', async () => {
   assert.equal(combined, 100000n); // MAX_COMBINED_MULTIPLIER is 10x
 });
 
+test('average combined multiplier segments special-edition changes before composing with vp tier', async () => {
+  const userState = createStore<UserLeaderboardState_t>();
+  const userTokenList = createStore<UserTokenList_t>();
+  const dustLockToken = createStore<DustLockToken_t>();
+  const votingPowerTier = createStore<VotingPowerTier_t>();
+  const registryState = createStore<NFTPartnershipRegistryState_t>();
+  const specialRegistryState = createStore<SpecialEditionRegistryState_t>();
+  const specialConfig = createStore<SpecialEditionConfig_t>();
+  const userSpecialEditionState = createStore<UserSpecialEditionState_t>();
+  const context = {
+    UserLeaderboardState: userState,
+    UserTokenList: userTokenList,
+    DustLockToken: dustLockToken,
+    VotingPowerTier: votingPowerTier,
+    NFTPartnershipRegistryState: registryState,
+    SpecialEditionRegistryState: specialRegistryState,
+    SpecialEditionConfig: specialConfig,
+    UserSpecialEditionState: userSpecialEditionState,
+  } as unknown as handlerContext;
+
+  userState.set({
+    id: '0xuser',
+    user_id: '0xuser',
+    nftCount: 0n,
+    nftMultiplier: 10000n,
+    specialEditionCount: 1n,
+    specialEditionMultiplier: 30000n,
+    votingPower: 0n,
+    vpTierIndex: 0n,
+    vpMultiplier: 10000n,
+    combinedMultiplier: 10000n,
+    totalEpochsParticipated: 0n,
+    lifetimePoints: 0n,
+    currentEpochId: undefined,
+    currentEpochRank: undefined,
+    lastUpdate: 0,
+  });
+  userTokenList.set({
+    id: '0xuser',
+    user_id: '0xuser',
+    tokenIds: [1n],
+    lastUpdate: 0,
+  });
+  dustLockToken.set({
+    id: '1',
+    owner: '0xuser',
+    lockedAmount: MAX_LOCK_TIME * 100n,
+    end: 100,
+    isPermanent: false,
+    createdAt: 0,
+    updatedAt: 0,
+    lastDepositType: undefined,
+    selfRepayEnabled: false,
+    rewardReceiver: undefined,
+  });
+  votingPowerTier.set({
+    id: '0',
+    tierIndex: 0n,
+    minVotingPower: 0n,
+    multiplierBps: 10000n,
+    createdAt: 0,
+    lastUpdate: 0,
+    isActive: true,
+  });
+  votingPowerTier.set({
+    id: '1',
+    tierIndex: 1n,
+    minVotingPower: 6000n,
+    multiplierBps: 20000n,
+    createdAt: 0,
+    lastUpdate: 0,
+    isActive: true,
+  });
+  specialRegistryState.set({
+    id: 'current',
+    editionIds: [1n],
+    lastUpdate: 50,
+  });
+  specialConfig.set({
+    id: '1',
+    editionId: 1n,
+    key: 'SHINY',
+    name: 'Shiny',
+    perTokenBoostBps: 20000n,
+    enabled: true,
+    exists: true,
+    createdAt: 0,
+    updatedAt: 50,
+    changeTimestamps: [0],
+    boostBpsHistory: [20000n],
+    enabledHistory: [1n],
+  });
+  userSpecialEditionState.set({
+    id: '0xuser:1',
+    user_id: '0xuser',
+    editionId: 1n,
+    tokenCount: 1n,
+    countTimestamps: [0, 50],
+    tokenCountHistory: [0n, 1n],
+    updatedAt: 50,
+  });
+
+  const combined = await calculateAverageCombinedMultiplierBps(context, '0xuser', 0, 100);
+  assert.equal(combined, 25000n);
+});
+
 test('average combined multiplier uses current vp when end before start', async () => {
   const userState = createStore<UserLeaderboardState_t>();
   const userTokenList = createStore<UserTokenList_t>();
@@ -1370,6 +1487,8 @@ test('average combined multiplier uses current vp when end before start', async 
     user_id: '0xuser',
     nftCount: 0n,
     nftMultiplier: 10000n,
+    specialEditionCount: 0n,
+    specialEditionMultiplier: 10000n,
     votingPower: 0n,
     vpTierIndex: 0n,
     vpMultiplier: 10000n,
@@ -1431,6 +1550,8 @@ test('average combined multiplier skips missing dust lock tokens', async () => {
     user_id: '0xuser',
     nftCount: 0n,
     nftMultiplier: 10000n,
+    specialEditionCount: 0n,
+    specialEditionMultiplier: 10000n,
     votingPower: 0n,
     vpTierIndex: 0n,
     vpMultiplier: 10000n,
@@ -1471,6 +1592,8 @@ test('createMultiplierSnapshot defaults log index to zero', async () => {
       id: '0xuser',
       nftCount: 0n,
       nftMultiplier: 10000n,
+      specialEditionCount: 0n,
+      specialEditionMultiplier: 10000n,
       votingPower: 0n,
       vpMultiplier: 10000n,
       combinedMultiplier: 10000n,

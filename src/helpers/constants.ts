@@ -2,6 +2,8 @@
  * Constants for the Neverland Protocol indexer
  */
 
+import type { Address } from 'envio';
+
 // Time constants
 export const SECONDS_PER_DAY = 86400;
 export const HOURS_PER_DAY = 24;
@@ -9,6 +11,10 @@ export const LEADERBOARD_START_BLOCK = 46264051;
 export const DUST_LOCK_START_BLOCK = 39468872;
 export const LP_V2_CUTOVER_BLOCK = 56436798;
 export const LP_V2_CUTOVER_TIMESTAMP = 1771517877;
+export const LP_BALANCER_AUTORANGE_CUTOVER_BLOCK = 78741015;
+export const LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP = 1780444800;
+export const LP_BALANCER_STALE_SETTLEMENT_SECONDS = 1800;
+export const LP_BALANCER_MAX_SETTLEMENTS_PER_SWAP = 50;
 
 // Override epoch 1 start time - set to a timestamp to ignore the EpochStart event for epoch 1
 // and use this timestamp instead. Set to 0 to use the on-chain event.
@@ -127,6 +133,26 @@ export function isGatewayAddress(address: string): boolean {
   return KNOWN_GATEWAYS.includes(address.toLowerCase());
 }
 
+// Statically-configured NFT collections: these addresses are listed in config.yaml
+// `chains[].contracts` with a hardcoded address and their own Transfer handler, so
+// they are already indexed under their own contract name. They must NEVER be
+// re-registered as the dynamic `PartnerNFT` contract. Envio keys dynamic
+// registrations by (contractName, address) and does NOT dedupe across contract
+// names, so a live `NFTPartnershipRegistry.PartnershipAdded` for one of these would
+// dispatch each Transfer log to BOTH the static handler AND the PartnerNFT handler,
+// double-applying +1/-1 balance deltas and corrupting nftCount/nftMultiplier.
+// Keep this list in sync with the static NFT entries in config.yaml.
+export const STATIC_NFT_COLLECTION_ADDRESSES = [
+  '0x818030837e8350ba63e64d7dc01a547fa73c8279', // The10kSquad
+  '0xfb5ba4061f5c50b1daa6c067bb2dfb0a8ebf6a8d', // Overnads
+  '0xcabf3c04b90f4fe1b521fcaf4acb25d5df478e52', // LilStars
+  '0xe20c4f8cacdb1854151f3e12144bdc919e608b9b', // RealNads
+];
+
+export function isStaticNftCollection(address: string): boolean {
+  return STATIC_NFT_COLLECTION_ADDRESSES.includes(address.toLowerCase());
+}
+
 // Aave V3 Protocol Identifiers (bytes32)
 // These are ASCII strings encoded as bytes32, used by PoolAddressesProvider
 // to identify which type of proxy contract is being created in ProxyCreated events
@@ -155,6 +181,8 @@ export const WETH_ADDRESS = '0xee8c0e9f1bffb4eb878d8f15f368a02a35481242';
 export const USDC_ADDRESS = '0x754704bc059f8c67012fed69bc8a327a5aafb603';
 export const USDT0_ADDRESS = '0xe7cd86e13ac4309349f30b3435a9d337750fc82d';
 export const AUSD_ADDRESS = '0x00000000efe302beaa2b3e6e1b18d08d69a9012a';
+export const BALANCER_AUTORANGE_V3_POOL_ADDRESS = '0x27da8a34579fbc99319af1c1a0f0d51065084576';
+export const BALANCER_VAULT_ADDRESS = '0xba1333333333a1ba1108e8412f11850a5c319ba9';
 export const EARNAUSD_ADDRESS = '0x103222f020e98bba0ad9809a011fdf8e6f067496';
 export const SAUSD_ADDRESS = '0xd793c04b87386a6bb84ee61d98e0065fde7fda5e';
 export const GMON_ADDRESS = '0x8498312a6b3cbd158bf0c93abdcf29e6e4f55081';
@@ -189,6 +217,6 @@ export function getTokenMetadata(address: string): TokenMetadata | null {
   return KNOWN_TOKENS[addr] ?? null;
 }
 
-export function normalizeAddress(address: string): string {
-  return address.toLowerCase();
+export function normalizeAddress(address: string): Address {
+  return address.toLowerCase() as Address;
 }

@@ -3,12 +3,8 @@
  * EpochManager, LeaderboardConfig, VotingPowerMultiplier
  */
 
-import type { handlerContext } from '../../generated';
-import {
-  EpochManager,
-  LeaderboardConfig as LeaderboardConfigContract,
-  VotingPowerMultiplier,
-} from '../../generated';
+import type { handlerContext } from '../types/envio';
+import { indexer } from 'envio';
 import {
   addTierToIndex,
   computeTotalPointsWithMultiplier,
@@ -18,7 +14,6 @@ import {
   recordProtocolTransaction,
   refreshUserVotingPowerState,
   removeTierFromIndex,
-  shouldUseEthCalls,
   touchTierIndex,
   updateLifetimePoints,
   writeLeaderboardConfig,
@@ -29,8 +24,8 @@ import {
   normalizeAddress,
   EPOCH_1_START_TIME_OVERRIDE,
   BOOTSTRAP_CONFIG,
+  BALANCER_AUTORANGE_V3_POOL_ADDRESS,
 } from '../helpers/constants';
-import { readPoolFee } from '../helpers/viem';
 import './lp';
 
 async function getOrInitLeaderboardConfig(context: handlerContext, timestamp: number) {
@@ -62,7 +57,7 @@ async function getOrInitLeaderboardConfig(context: handlerContext, timestamp: nu
 // EpochManager Handlers
 // ============================================
 
-EpochManager.EpochStart.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'EpochManager', event: 'EpochStart' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -119,7 +114,7 @@ EpochManager.EpochStart.handler(async ({ event, context }) => {
   await applyScheduledEpochTransitions(context, currentTimestamp, BigInt(event.block.number));
 });
 
-EpochManager.EpochEnd.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'EpochManager', event: 'EpochEnd' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -164,583 +159,633 @@ EpochManager.EpochEnd.handler(async ({ event, context }) => {
 // LeaderboardConfig Handlers
 // ============================================
 
-LeaderboardConfigContract.ConfigSnapshot.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const id = event.params.timestamp.toString();
+indexer.onEvent(
+  { contract: 'LeaderboardConfig', event: 'ConfigSnapshot' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const id = event.params.timestamp.toString();
 
-  // CRITICAL: Normalize daily bonuses by dividing by 1e18
-  // Contract sends 10e18 to represent "10 points"
-  const EIGHTEEN_DECIMALS = 1e18;
+    // CRITICAL: Normalize daily bonuses by dividing by 1e18
+    // Contract sends 10e18 to represent "10 points"
+    const EIGHTEEN_DECIMALS = 1e18;
 
-  context.LeaderboardConfigSnapshot.set({
-    id,
-    depositRateBps: event.params.depositRateBps,
-    borrowRateBps: event.params.borrowRateBps,
-    vpRateBps: event.params.vpRateBps,
-    supplyDailyBonus: Number(event.params.supplyDailyBonus) / EIGHTEEN_DECIMALS,
-    borrowDailyBonus: Number(event.params.borrowDailyBonus) / EIGHTEEN_DECIMALS,
-    repayDailyBonus: Number(event.params.repayDailyBonus) / EIGHTEEN_DECIMALS,
-    withdrawDailyBonus: Number(event.params.withdrawDailyBonus) / EIGHTEEN_DECIMALS,
-    cooldownSeconds: Number(event.params.cooldownSeconds),
-    minDailyBonusUsd: Number(event.params.minDailyBonusUsd),
-    timestamp: Number(event.params.timestamp),
-    txHash: event.transaction.hash,
-  });
+    context.LeaderboardConfigSnapshot.set({
+      id,
+      depositRateBps: event.params.depositRateBps,
+      borrowRateBps: event.params.borrowRateBps,
+      vpRateBps: event.params.vpRateBps,
+      supplyDailyBonus: Number(event.params.supplyDailyBonus) / EIGHTEEN_DECIMALS,
+      borrowDailyBonus: Number(event.params.borrowDailyBonus) / EIGHTEEN_DECIMALS,
+      repayDailyBonus: Number(event.params.repayDailyBonus) / EIGHTEEN_DECIMALS,
+      withdrawDailyBonus: Number(event.params.withdrawDailyBonus) / EIGHTEEN_DECIMALS,
+      cooldownSeconds: Number(event.params.cooldownSeconds),
+      minDailyBonusUsd: Number(event.params.minDailyBonusUsd),
+      timestamp: Number(event.params.timestamp),
+      txHash: event.transaction.hash,
+    });
 
-  const existingConfig = await context.LeaderboardConfig.get('global');
-  writeLeaderboardConfig(context, {
-    id: 'global',
-    depositRateBps: event.params.depositRateBps,
-    borrowRateBps: event.params.borrowRateBps,
-    vpRateBps: event.params.vpRateBps,
-    lpRateBps: existingConfig?.lpRateBps ?? 0n,
-    supplyDailyBonus: Number(event.params.supplyDailyBonus) / EIGHTEEN_DECIMALS,
-    borrowDailyBonus: Number(event.params.borrowDailyBonus) / EIGHTEEN_DECIMALS,
-    repayDailyBonus: Number(event.params.repayDailyBonus) / EIGHTEEN_DECIMALS,
-    withdrawDailyBonus: Number(event.params.withdrawDailyBonus) / EIGHTEEN_DECIMALS,
-    cooldownSeconds: Number(event.params.cooldownSeconds),
-    minDailyBonusUsd: Number(event.params.minDailyBonusUsd),
-    lastUpdate: Number(event.params.timestamp),
-  });
-});
+    const existingConfig = await context.LeaderboardConfig.get('global');
+    writeLeaderboardConfig(context, {
+      id: 'global',
+      depositRateBps: event.params.depositRateBps,
+      borrowRateBps: event.params.borrowRateBps,
+      vpRateBps: event.params.vpRateBps,
+      lpRateBps: existingConfig?.lpRateBps ?? 0n,
+      supplyDailyBonus: Number(event.params.supplyDailyBonus) / EIGHTEEN_DECIMALS,
+      borrowDailyBonus: Number(event.params.borrowDailyBonus) / EIGHTEEN_DECIMALS,
+      repayDailyBonus: Number(event.params.repayDailyBonus) / EIGHTEEN_DECIMALS,
+      withdrawDailyBonus: Number(event.params.withdrawDailyBonus) / EIGHTEEN_DECIMALS,
+      cooldownSeconds: Number(event.params.cooldownSeconds),
+      minDailyBonusUsd: Number(event.params.minDailyBonusUsd),
+      lastUpdate: Number(event.params.timestamp),
+    });
+  }
+);
 
-LeaderboardConfigContract.DepositRateUpdated.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const timestamp = Number(event.params.timestamp);
-  const config = await getOrInitLeaderboardConfig(context, timestamp);
+indexer.onEvent(
+  { contract: 'LeaderboardConfig', event: 'DepositRateUpdated' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const timestamp = Number(event.params.timestamp);
+    const config = await getOrInitLeaderboardConfig(context, timestamp);
 
-  writeLeaderboardConfig(context, {
-    ...config,
-    depositRateBps: event.params.newRate,
-    lastUpdate: timestamp,
-  });
-});
+    writeLeaderboardConfig(context, {
+      ...config,
+      depositRateBps: event.params.newRate,
+      lastUpdate: timestamp,
+    });
+  }
+);
 
-LeaderboardConfigContract.BorrowRateUpdated.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const timestamp = Number(event.params.timestamp);
-  const config = await getOrInitLeaderboardConfig(context, timestamp);
+indexer.onEvent(
+  { contract: 'LeaderboardConfig', event: 'BorrowRateUpdated' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const timestamp = Number(event.params.timestamp);
+    const config = await getOrInitLeaderboardConfig(context, timestamp);
 
-  writeLeaderboardConfig(context, {
-    ...config,
-    borrowRateBps: event.params.newRate,
-    lastUpdate: timestamp,
-  });
-});
+    writeLeaderboardConfig(context, {
+      ...config,
+      borrowRateBps: event.params.newRate,
+      lastUpdate: timestamp,
+    });
+  }
+);
 
-LeaderboardConfigContract.VpRateUpdated.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const timestamp = Number(event.params.timestamp);
-  const config = await getOrInitLeaderboardConfig(context, timestamp);
+indexer.onEvent(
+  { contract: 'LeaderboardConfig', event: 'VpRateUpdated' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const timestamp = Number(event.params.timestamp);
+    const config = await getOrInitLeaderboardConfig(context, timestamp);
 
-  writeLeaderboardConfig(context, {
-    ...config,
-    vpRateBps: event.params.newRate,
-    lastUpdate: timestamp,
-  });
-});
+    writeLeaderboardConfig(context, {
+      ...config,
+      vpRateBps: event.params.newRate,
+      lastUpdate: timestamp,
+    });
+  }
+);
 
-LeaderboardConfigContract.DailyBonusUpdated.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const timestamp = Number(event.params.timestamp);
-  const config = await getOrInitLeaderboardConfig(context, timestamp);
-  const EIGHTEEN_DECIMALS = 1e18;
+indexer.onEvent(
+  { contract: 'LeaderboardConfig', event: 'DailyBonusUpdated' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const timestamp = Number(event.params.timestamp);
+    const config = await getOrInitLeaderboardConfig(context, timestamp);
+    const EIGHTEEN_DECIMALS = 1e18;
 
-  writeLeaderboardConfig(context, {
-    ...config,
-    supplyDailyBonus: Number(event.params.newSupplyBonus) / EIGHTEEN_DECIMALS,
-    borrowDailyBonus: Number(event.params.newBorrowBonus) / EIGHTEEN_DECIMALS,
-    repayDailyBonus: Number(event.params.newRepayBonus) / EIGHTEEN_DECIMALS,
-    withdrawDailyBonus: Number(event.params.newWithdrawBonus) / EIGHTEEN_DECIMALS,
-    lastUpdate: timestamp,
-  });
-});
+    writeLeaderboardConfig(context, {
+      ...config,
+      supplyDailyBonus: Number(event.params.newSupplyBonus) / EIGHTEEN_DECIMALS,
+      borrowDailyBonus: Number(event.params.newBorrowBonus) / EIGHTEEN_DECIMALS,
+      repayDailyBonus: Number(event.params.newRepayBonus) / EIGHTEEN_DECIMALS,
+      withdrawDailyBonus: Number(event.params.newWithdrawBonus) / EIGHTEEN_DECIMALS,
+      lastUpdate: timestamp,
+    });
+  }
+);
 
-LeaderboardConfigContract.CooldownUpdated.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const timestamp = Number(event.params.timestamp);
-  const config = await getOrInitLeaderboardConfig(context, timestamp);
+indexer.onEvent(
+  { contract: 'LeaderboardConfig', event: 'CooldownUpdated' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const timestamp = Number(event.params.timestamp);
+    const config = await getOrInitLeaderboardConfig(context, timestamp);
 
-  writeLeaderboardConfig(context, {
-    ...config,
-    cooldownSeconds: Number(event.params.newSeconds),
-    lastUpdate: timestamp,
-  });
-});
+    writeLeaderboardConfig(context, {
+      ...config,
+      cooldownSeconds: Number(event.params.newSeconds),
+      lastUpdate: timestamp,
+    });
+  }
+);
 
-LeaderboardConfigContract.MinDailyBonusUsdUpdated.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const timestamp = Number(event.params.timestamp);
-  const config = await getOrInitLeaderboardConfig(context, timestamp);
+indexer.onEvent(
+  { contract: 'LeaderboardConfig', event: 'MinDailyBonusUsdUpdated' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const timestamp = Number(event.params.timestamp);
+    const config = await getOrInitLeaderboardConfig(context, timestamp);
 
-  writeLeaderboardConfig(context, {
-    ...config,
-    minDailyBonusUsd: Number(event.params.newMin),
-    lastUpdate: timestamp,
-  });
-});
+    writeLeaderboardConfig(context, {
+      ...config,
+      minDailyBonusUsd: Number(event.params.newMin),
+      lastUpdate: timestamp,
+    });
+  }
+);
 
-LeaderboardConfigContract.AddressBlacklisted.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const userId = normalizeAddress(event.params.account);
-  const timestamp = Number(event.params.timestamp);
+indexer.onEvent(
+  { contract: 'LeaderboardConfig', event: 'AddressBlacklisted' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const userId = normalizeAddress(event.params.account);
+    const timestamp = Number(event.params.timestamp);
 
-  context.LeaderboardBlacklist.set({
-    id: userId,
-    user_id: userId,
-    isBlacklisted: true,
-    lastUpdate: timestamp,
-  });
+    context.LeaderboardBlacklist.set({
+      id: userId,
+      user_id: userId,
+      isBlacklisted: true,
+      lastUpdate: timestamp,
+    });
 
-  const { removeUserFromLeaderboards } = await import('../helpers/leaderboard');
-  await removeUserFromLeaderboards(context, userId, timestamp);
-});
+    const { removeUserFromLeaderboards } = await import('../helpers/leaderboard');
+    await removeUserFromLeaderboards(context, userId, timestamp);
+  }
+);
 
-LeaderboardConfigContract.AddressUnblacklisted.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const userId = normalizeAddress(event.params.account);
-  const timestamp = Number(event.params.timestamp);
+indexer.onEvent(
+  { contract: 'LeaderboardConfig', event: 'AddressUnblacklisted' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const userId = normalizeAddress(event.params.account);
+    const timestamp = Number(event.params.timestamp);
 
-  context.LeaderboardBlacklist.set({
-    id: userId,
-    user_id: userId,
-    isBlacklisted: false,
-    lastUpdate: timestamp,
-  });
-});
+    context.LeaderboardBlacklist.set({
+      id: userId,
+      user_id: userId,
+      isBlacklisted: false,
+      lastUpdate: timestamp,
+    });
+  }
+);
 
-LeaderboardConfigContract.PointsAwarded.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const id = `${event.transaction.hash}-${event.logIndex}`;
-  const userId = normalizeAddress(event.params.user);
+indexer.onEvent(
+  { contract: 'LeaderboardConfig', event: 'PointsAwarded' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const id = `${event.transaction.hash}-${event.logIndex}`;
+    const userId = normalizeAddress(event.params.user);
 
-  await getOrCreateUser(context, userId);
+    await getOrCreateUser(context, userId);
 
-  const state = await context.LeaderboardState.get('current');
-  if (!state || state.currentEpochNumber === 0n) return;
+    const state = await context.LeaderboardState.get('current');
+    if (!state || state.currentEpochNumber === 0n) return;
 
-  const epochNumber = state.currentEpochNumber;
-  const epoch = await context.LeaderboardEpoch.get(epochNumber.toString());
-  if (!epoch) return;
-  // Use BigInt directly to avoid float precision loss
-  const scaledPoints = event.params.points;
-  const displayPoints = Number(scaledPoints) / 1e18;
+    const epochNumber = state.currentEpochNumber;
+    const epoch = await context.LeaderboardEpoch.get(epochNumber.toString());
+    if (!epoch) return;
+    // Use BigInt directly to avoid float precision loss
+    const scaledPoints = event.params.points;
+    const displayPoints = Number(scaledPoints) / 1e18;
 
-  context.ManualPointsAward.set({
-    id,
-    user_id: userId,
-    epochNumber,
-    points: displayPoints,
-    reason: event.params.reason,
-    timestamp: Number(event.params.timestamp),
-    txHash: event.transaction.hash,
-  });
+    context.ManualPointsAward.set({
+      id,
+      user_id: userId,
+      epochNumber,
+      points: displayPoints,
+      reason: event.params.reason,
+      timestamp: Number(event.params.timestamp),
+      txHash: event.transaction.hash,
+    });
 
-  // Update UserEpochStats
-  const stats = await getOrCreateUserEpochStats(
-    context,
-    userId,
-    epochNumber,
-    Number(event.params.timestamp)
-  );
-  const newManualPoints = stats.manualAwardPoints + scaledPoints;
-  const updatedStats = {
-    ...stats,
-    manualAwardPoints: newManualPoints,
-    lastUpdatedAt: Number(event.params.timestamp),
-  };
-  const totalPoints =
-    updatedStats.depositPoints +
-    updatedStats.borrowPoints +
-    updatedStats.lpPoints +
-    updatedStats.dailySupplyPoints +
-    updatedStats.dailyBorrowPoints +
-    updatedStats.dailyRepayPoints +
-    updatedStats.dailyWithdrawPoints +
-    updatedStats.dailyVPPoints +
-    updatedStats.dailyLPPoints +
-    updatedStats.manualAwardPoints;
-  const vpState = await refreshUserVotingPowerState(
-    context,
-    userId,
-    Number(event.params.timestamp)
-  );
-  const totalPointsWithMultiplier = computeTotalPointsWithMultiplier(
-    updatedStats,
-    userId,
-    epochNumber
-  );
+    // Update UserEpochStats
+    const stats = await getOrCreateUserEpochStats(
+      context,
+      userId,
+      epochNumber,
+      Number(event.params.timestamp)
+    );
+    const newManualPoints = stats.manualAwardPoints + scaledPoints;
+    const updatedStats = {
+      ...stats,
+      manualAwardPoints: newManualPoints,
+      lastUpdatedAt: Number(event.params.timestamp),
+    };
+    const totalPoints =
+      updatedStats.depositPoints +
+      updatedStats.borrowPoints +
+      updatedStats.lpPoints +
+      updatedStats.dailySupplyPoints +
+      updatedStats.dailyBorrowPoints +
+      updatedStats.dailyRepayPoints +
+      updatedStats.dailyWithdrawPoints +
+      updatedStats.dailyVPPoints +
+      updatedStats.dailyLPPoints +
+      updatedStats.manualAwardPoints;
+    const vpState = await refreshUserVotingPowerState(
+      context,
+      userId,
+      Number(event.params.timestamp)
+    );
+    const totalPointsWithMultiplier = computeTotalPointsWithMultiplier(
+      updatedStats,
+      userId,
+      epochNumber
+    );
 
-  const testnetBonusBps = epochNumber === 1n ? getTestnetBonusBps(userId) : 0n;
-  context.UserEpochStats.set({
-    ...updatedStats,
-    totalPoints,
-    totalPointsWithMultiplier,
-    totalMultiplierBps: vpState.combinedMultiplierBps,
-    lastAppliedMultiplierBps: vpState.combinedMultiplierBps,
-    testnetBonusBps,
-  });
+    const testnetBonusBps = epochNumber === 1n ? getTestnetBonusBps(userId) : 0n;
+    context.UserEpochStats.set({
+      ...updatedStats,
+      totalPoints,
+      totalPointsWithMultiplier,
+      totalMultiplierBps: vpState.combinedMultiplierBps,
+      lastAppliedMultiplierBps: vpState.combinedMultiplierBps,
+      testnetBonusBps,
+    });
 
-  await updateLifetimePoints(context, userId, {
-    epochNumber: stats.epochNumber,
-    lastUpdatedAt: Number(event.params.timestamp),
-  });
+    await updateLifetimePoints(context, userId, {
+      epochNumber: stats.epochNumber,
+      lastUpdatedAt: Number(event.params.timestamp),
+    });
 
-  const finalPoints = Number(totalPointsWithMultiplier) / 1e18;
+    const finalPoints = Number(totalPointsWithMultiplier) / 1e18;
 
-  // Update leaderboard
-  const { updateLeaderboard } = await import('../helpers/leaderboard');
-  await updateLeaderboard(context, userId, finalPoints, Number(event.params.timestamp));
-});
+    // Update leaderboard
+    const { updateLeaderboard } = await import('../helpers/leaderboard');
+    await updateLeaderboard(context, userId, finalPoints, Number(event.params.timestamp));
+  }
+);
 
-LeaderboardConfigContract.PointsRemoved.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const id = `${event.transaction.hash}-${event.logIndex}`;
-  const userId = normalizeAddress(event.params.user);
+indexer.onEvent(
+  { contract: 'LeaderboardConfig', event: 'PointsRemoved' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const id = `${event.transaction.hash}-${event.logIndex}`;
+    const userId = normalizeAddress(event.params.user);
 
-  await getOrCreateUser(context, userId);
+    await getOrCreateUser(context, userId);
 
-  const state = await context.LeaderboardState.get('current');
-  if (!state || state.currentEpochNumber === 0n) return;
+    const state = await context.LeaderboardState.get('current');
+    if (!state || state.currentEpochNumber === 0n) return;
 
-  const epochNumber = state.currentEpochNumber;
-  const epoch = await context.LeaderboardEpoch.get(epochNumber.toString());
-  if (!epoch) return;
-  // Use BigInt directly to avoid float precision loss
-  const scaledPoints = event.params.points;
-  const displayPoints = Number(scaledPoints) / 1e18;
+    const epochNumber = state.currentEpochNumber;
+    const epoch = await context.LeaderboardEpoch.get(epochNumber.toString());
+    if (!epoch) return;
+    // Use BigInt directly to avoid float precision loss
+    const scaledPoints = event.params.points;
+    const displayPoints = Number(scaledPoints) / 1e18;
 
-  context.ManualPointsAward.set({
-    id,
-    user_id: userId,
-    epochNumber,
-    points: -displayPoints,
-    reason: event.params.reason,
-    timestamp: Number(event.params.timestamp),
-    txHash: event.transaction.hash,
-  });
+    context.ManualPointsAward.set({
+      id,
+      user_id: userId,
+      epochNumber,
+      points: -displayPoints,
+      reason: event.params.reason,
+      timestamp: Number(event.params.timestamp),
+      txHash: event.transaction.hash,
+    });
 
-  // Update UserEpochStats
-  const stats = await getOrCreateUserEpochStats(
-    context,
-    userId,
-    epochNumber,
-    Number(event.params.timestamp)
-  );
-  const newManualPoints = stats.manualAwardPoints - scaledPoints;
-  const updatedStats = {
-    ...stats,
-    manualAwardPoints: newManualPoints,
-    lastUpdatedAt: Number(event.params.timestamp),
-  };
-  const totalPoints =
-    updatedStats.depositPoints +
-    updatedStats.borrowPoints +
-    updatedStats.lpPoints +
-    updatedStats.dailySupplyPoints +
-    updatedStats.dailyBorrowPoints +
-    updatedStats.dailyRepayPoints +
-    updatedStats.dailyWithdrawPoints +
-    updatedStats.dailyVPPoints +
-    updatedStats.dailyLPPoints +
-    updatedStats.manualAwardPoints;
-  const vpState = await refreshUserVotingPowerState(
-    context,
-    userId,
-    Number(event.params.timestamp)
-  );
-  const totalPointsWithMultiplier = computeTotalPointsWithMultiplier(
-    updatedStats,
-    userId,
-    epochNumber
-  );
+    // Update UserEpochStats
+    const stats = await getOrCreateUserEpochStats(
+      context,
+      userId,
+      epochNumber,
+      Number(event.params.timestamp)
+    );
+    const newManualPoints = stats.manualAwardPoints - scaledPoints;
+    const updatedStats = {
+      ...stats,
+      manualAwardPoints: newManualPoints,
+      lastUpdatedAt: Number(event.params.timestamp),
+    };
+    const totalPoints =
+      updatedStats.depositPoints +
+      updatedStats.borrowPoints +
+      updatedStats.lpPoints +
+      updatedStats.dailySupplyPoints +
+      updatedStats.dailyBorrowPoints +
+      updatedStats.dailyRepayPoints +
+      updatedStats.dailyWithdrawPoints +
+      updatedStats.dailyVPPoints +
+      updatedStats.dailyLPPoints +
+      updatedStats.manualAwardPoints;
+    const vpState = await refreshUserVotingPowerState(
+      context,
+      userId,
+      Number(event.params.timestamp)
+    );
+    const totalPointsWithMultiplier = computeTotalPointsWithMultiplier(
+      updatedStats,
+      userId,
+      epochNumber
+    );
 
-  const testnetBonusBps = epochNumber === 1n ? getTestnetBonusBps(userId) : 0n;
-  context.UserEpochStats.set({
-    ...updatedStats,
-    totalPoints,
-    totalPointsWithMultiplier,
-    totalMultiplierBps: vpState.combinedMultiplierBps,
-    lastAppliedMultiplierBps: vpState.combinedMultiplierBps,
-    testnetBonusBps,
-  });
+    const testnetBonusBps = epochNumber === 1n ? getTestnetBonusBps(userId) : 0n;
+    context.UserEpochStats.set({
+      ...updatedStats,
+      totalPoints,
+      totalPointsWithMultiplier,
+      totalMultiplierBps: vpState.combinedMultiplierBps,
+      lastAppliedMultiplierBps: vpState.combinedMultiplierBps,
+      testnetBonusBps,
+    });
 
-  await updateLifetimePoints(context, userId, {
-    epochNumber: stats.epochNumber,
-    lastUpdatedAt: Number(event.params.timestamp),
-  });
+    await updateLifetimePoints(context, userId, {
+      epochNumber: stats.epochNumber,
+      lastUpdatedAt: Number(event.params.timestamp),
+    });
 
-  const finalPoints = Number(totalPointsWithMultiplier) / 1e18;
+    const finalPoints = Number(totalPointsWithMultiplier) / 1e18;
 
-  // Update leaderboard
-  const { updateLeaderboard } = await import('../helpers/leaderboard');
-  await updateLeaderboard(context, userId, finalPoints, Number(event.params.timestamp));
-});
+    // Update leaderboard
+    const { updateLeaderboard } = await import('../helpers/leaderboard');
+    await updateLeaderboard(context, userId, finalPoints, Number(event.params.timestamp));
+  }
+);
 
 // ============================================
 // VotingPowerMultiplier Handlers
 // ============================================
 
-VotingPowerMultiplier.TierAdded.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const tierId = event.params.tierIndex.toString();
-  const timestamp = Number(event.block.timestamp);
+indexer.onEvent(
+  { contract: 'VotingPowerMultiplier', event: 'TierAdded' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const tierId = event.params.tierIndex.toString();
+    const timestamp = Number(event.block.timestamp);
 
-  context.VotingPowerTier.set({
-    id: tierId,
-    tierIndex: event.params.tierIndex,
-    minVotingPower: event.params.minVotingPower,
-    multiplierBps: event.params.multiplierBps,
-    createdAt: timestamp,
-    lastUpdate: timestamp,
-    isActive: true,
-  });
-  await addTierToIndex(context, tierId, timestamp);
-});
-
-VotingPowerMultiplier.TierUpdated.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const tierId = event.params.tierIndex.toString();
-  const timestamp = Number(event.block.timestamp);
-
-  const tier = await context.VotingPowerTier.get(tierId);
-  if (tier) {
     context.VotingPowerTier.set({
-      ...tier,
-      minVotingPower: event.params.newMinVotingPower,
-      multiplierBps: event.params.newMultiplierBps,
+      id: tierId,
+      tierIndex: event.params.tierIndex,
+      minVotingPower: event.params.minVotingPower,
+      multiplierBps: event.params.multiplierBps,
+      createdAt: timestamp,
       lastUpdate: timestamp,
+      isActive: true,
     });
-    await touchTierIndex(context, timestamp);
+    await addTierToIndex(context, tierId, timestamp);
   }
-});
+);
 
-VotingPowerMultiplier.TierRemoved.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const tierId = event.params.tierIndex.toString();
-  const timestamp = Number(event.block.timestamp);
+indexer.onEvent(
+  { contract: 'VotingPowerMultiplier', event: 'TierUpdated' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const tierId = event.params.tierIndex.toString();
+    const timestamp = Number(event.block.timestamp);
 
-  const tier = await context.VotingPowerTier.get(tierId);
-  if (tier) {
-    context.VotingPowerTier.set({
-      ...tier,
-      isActive: false,
-      lastUpdate: timestamp,
-    });
-    await removeTierFromIndex(context, tierId, timestamp);
+    const tier = await context.VotingPowerTier.get(tierId);
+    if (tier) {
+      context.VotingPowerTier.set({
+        ...tier,
+        minVotingPower: event.params.newMinVotingPower,
+        multiplierBps: event.params.newMultiplierBps,
+        lastUpdate: timestamp,
+      });
+      await touchTierIndex(context, timestamp);
+    }
   }
-});
+);
+
+indexer.onEvent(
+  { contract: 'VotingPowerMultiplier', event: 'TierRemoved' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const tierId = event.params.tierIndex.toString();
+    const timestamp = Number(event.block.timestamp);
+
+    const tier = await context.VotingPowerTier.get(tierId);
+    if (tier) {
+      context.VotingPowerTier.set({
+        ...tier,
+        isActive: false,
+        lastUpdate: timestamp,
+      });
+      await removeTierFromIndex(context, tierId, timestamp);
+    }
+  }
+);
 
 // ============================================
 // LP Pool Config Handlers
 // ============================================
 
-LeaderboardConfigContract.LPPoolConfigured.contractRegister(({ event, context }) => {
-  const pool = normalizeAddress(event.params.pool);
-  const positionManager = normalizeAddress(event.params.positionManager);
-  if (pool === positionManager) {
-    context.addUniswapV2Pair(pool);
-    return;
-  }
-  context.addNonfungiblePositionManager(positionManager);
-  context.addUniswapV3Pool(pool);
-});
-
-LeaderboardConfigContract.LPPoolConfigured.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-
-  const pool = normalizeAddress(event.params.pool);
-  const positionManager = normalizeAddress(event.params.positionManager);
-  const token0 = normalizeAddress(event.params.token0);
-  const token1 = normalizeAddress(event.params.token1);
-  const lpRateBps = event.params.lpRateBps;
-  const timestamp = Number(event.params.timestamp);
-  let fee: number | undefined;
-  if (shouldUseEthCalls()) {
-    const fetchedFee = await readPoolFee(pool, BigInt(event.block.number), context.log);
-    if (fetchedFee !== null) {
-      fee = fetchedFee;
+indexer.contractRegister(
+  { contract: 'LeaderboardConfig', event: 'LPPoolConfigured' },
+  async ({ event, context }) => {
+    const pool = normalizeAddress(event.params.pool);
+    const positionManager = normalizeAddress(event.params.positionManager);
+    if (pool === normalizeAddress(BALANCER_AUTORANGE_V3_POOL_ADDRESS)) {
+      context.chain.BalancerAutoRangePool.add(pool);
+      return;
     }
+    if (pool === positionManager) {
+      context.chain.UniswapV2Pair.add(pool);
+      return;
+    }
+    context.chain.NonfungiblePositionManager.add(positionManager);
+    context.chain.UniswapV3Pool.add(pool);
   }
-  if (fee === undefined) {
+);
+
+indexer.onEvent(
+  { contract: 'LeaderboardConfig', event: 'LPPoolConfigured' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+
+    const pool = normalizeAddress(event.params.pool);
+    const positionManager = normalizeAddress(event.params.positionManager);
+    const token0 = normalizeAddress(event.params.token0);
+    const token1 = normalizeAddress(event.params.token1);
+    const lpRateBps = event.params.lpRateBps;
+    const timestamp = Number(event.params.timestamp);
+    let fee: number | undefined;
     const existingConfig = await context.LPPoolConfig.get(pool);
     if (existingConfig?.fee !== undefined) {
       fee = existingConfig.fee;
     }
-  }
 
-  // Get current epoch
-  const leaderboardState = await context.LeaderboardState.get('current');
-  const currentEpoch = leaderboardState?.currentEpochNumber ?? 1n;
-
-  // Create or update LP pool config
-  context.LPPoolConfig.set({
-    id: pool,
-    pool,
-    positionManager,
-    token0,
-    token1,
-    fee,
-    lpRateBps,
-    isActive: true,
-    enabledAtEpoch: currentEpoch,
-    enabledAtTimestamp: timestamp,
-    disabledAtEpoch: undefined,
-    disabledAtTimestamp: undefined,
-    lastUpdate: timestamp,
-  });
-
-  const registry = await context.LPPoolRegistry.get('global');
-  const existingPoolIds = registry?.poolIds ?? [];
-  const poolIds = existingPoolIds.includes(pool) ? existingPoolIds : [...existingPoolIds, pool];
-  if (!registry || poolIds.length !== existingPoolIds.length) {
-    context.LPPoolRegistry.set({
-      id: 'global',
-      poolIds,
-      lastUpdate: timestamp,
-    });
-  }
-
-  // Initialize pool state
-  context.LPPoolState.set({
-    id: pool,
-    pool,
-    currentTick: 0,
-    sqrtPriceX96: 0n,
-    token0Price: 0n,
-    token1Price: 0n,
-    feeProtocol0: 0,
-    feeProtocol1: 0,
-    lastUpdate: timestamp,
-  });
-
-  // Update global LP rate in config
-  const config = await getOrInitLeaderboardConfig(context, timestamp);
-  writeLeaderboardConfig(context, {
-    ...config,
-    lpRateBps,
-    lastUpdate: timestamp,
-  });
-});
-
-LeaderboardConfigContract.LPPoolDisabled.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-
-  const pool = normalizeAddress(event.params.pool);
-  const timestamp = Number(event.params.timestamp);
-
-  const poolConfig = await context.LPPoolConfig.get(pool);
-  if (poolConfig) {
-    const { settleLPPoolPositions } = await import('./lp');
-    await settleLPPoolPositions(context, pool, timestamp);
-
+    // Get current epoch
     const leaderboardState = await context.LeaderboardState.get('current');
     const currentEpoch = leaderboardState?.currentEpochNumber ?? 1n;
 
+    // Create or update LP pool config
     context.LPPoolConfig.set({
-      ...poolConfig,
-      isActive: false,
-      disabledAtEpoch: currentEpoch,
-      disabledAtTimestamp: timestamp,
+      id: pool,
+      pool,
+      positionManager,
+      token0,
+      token1,
+      fee,
+      lpRateBps,
+      isActive: true,
+      enabledAtEpoch: currentEpoch,
+      enabledAtTimestamp: timestamp,
+      disabledAtEpoch: undefined,
+      disabledAtTimestamp: undefined,
+      lastUpdate: timestamp,
+    });
+
+    const registry = await context.LPPoolRegistry.get('global');
+    const existingPoolIds = registry?.poolIds ?? [];
+    const poolIds = existingPoolIds.includes(pool) ? existingPoolIds : [...existingPoolIds, pool];
+    if (!registry || poolIds.length !== existingPoolIds.length) {
+      context.LPPoolRegistry.set({
+        id: 'global',
+        poolIds,
+        lastUpdate: timestamp,
+      });
+    }
+
+    // Initialize pool state
+    context.LPPoolState.set({
+      id: pool,
+      pool,
+      currentTick: 0,
+      sqrtPriceX96: 0n,
+      token0Price: 0n,
+      token1Price: 0n,
+      feeProtocol0: 0,
+      feeProtocol1: 0,
+      lastUpdate: timestamp,
+    });
+
+    // Update global LP rate in config
+    const config = await getOrInitLeaderboardConfig(context, timestamp);
+    writeLeaderboardConfig(context, {
+      ...config,
+      lpRateBps,
       lastUpdate: timestamp,
     });
   }
-});
+);
 
-LeaderboardConfigContract.LPRateUpdated.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
+indexer.onEvent(
+  { contract: 'LeaderboardConfig', event: 'LPPoolDisabled' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
 
-  const timestamp = Number(event.params.timestamp);
-  const config = await getOrInitLeaderboardConfig(context, timestamp);
+    const pool = normalizeAddress(event.params.pool);
+    const timestamp = Number(event.params.timestamp);
 
-  writeLeaderboardConfig(context, {
-    ...config,
-    lpRateBps: event.params.newRate,
-    lastUpdate: timestamp,
-  });
-});
+    const poolConfig = await context.LPPoolConfig.get(pool);
+    if (poolConfig) {
+      const { settleLPPoolPositions } = await import('./lp');
+      await settleLPPoolPositions(context, pool, timestamp);
+
+      const leaderboardState = await context.LeaderboardState.get('current');
+      const currentEpoch = leaderboardState?.currentEpochNumber ?? 1n;
+
+      context.LPPoolConfig.set({
+        ...poolConfig,
+        isActive: false,
+        disabledAtEpoch: currentEpoch,
+        disabledAtTimestamp: timestamp,
+        lastUpdate: timestamp,
+      });
+    }
+  }
+);
+
+indexer.onEvent(
+  { contract: 'LeaderboardConfig', event: 'LPRateUpdated' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+
+    const timestamp = Number(event.params.timestamp);
+    const config = await getOrInitLeaderboardConfig(context, timestamp);
+
+    writeLeaderboardConfig(context, {
+      ...config,
+      lpRateBps: event.params.newRate,
+      lastUpdate: timestamp,
+    });
+  }
+);

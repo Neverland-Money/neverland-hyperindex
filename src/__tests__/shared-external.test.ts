@@ -19,8 +19,8 @@ import {
   setLPPositionOverride,
   setLPTokensOverride,
 } from './viem-mock';
-import type { handlerContext } from '../../generated';
-import type { t as MockDb } from '../../generated/src/TestHelpers_MockDb.gen';
+import type { handlerContext } from '../types/envio';
+import { TestHelpers, type MockDb } from './v3-test-helpers';
 import type {
   DustLockToken_t,
   LeaderboardConfig_t,
@@ -45,7 +45,7 @@ import type {
   UserReserveList_t,
   UserTokenList_t,
   VotingPowerTier_t,
-} from '../../generated/src/db/Entities.gen';
+} from '../types/envio';
 
 const ADDRESSES = {
   user: '0x000000000000000000000000000000000000e001',
@@ -66,9 +66,10 @@ const LP_SQRT_PRICE_X96 = 2n ** 96n;
 const LP_PRICE_E8 = 100000000n;
 const LP_DECIMALS = 6;
 
-type TestHelpersApi = typeof import('../../generated').TestHelpers;
+type TestHelpersApi = typeof TestHelpers;
 
 function loadTestHelpers(): TestHelpersApi {
+  return TestHelpers;
   const cwd = process.cwd();
   const distTestRoot = path.join(cwd, 'dist-test');
   const generatedLink = path.join(distTestRoot, 'generated');
@@ -132,7 +133,7 @@ function createStore<T extends { readonly id: string }>(): StoreEntity<T> {
   };
 }
 
-test('settlements sync NFT ownership from chain when enabled', async () => {
+test('settlements do not sync NFT ownership from chain when env flags are enabled', async () => {
   const previousExternal = process.env.ENVIO_ENABLE_EXTERNAL_CALLS;
   const prevEnableEth = process.env.ENVIO_ENABLE_ETH_CALLS;
   const previousChainSync = process.env.ENVIO_ENABLE_NFT_CHAIN_SYNC;
@@ -199,6 +200,8 @@ test('settlements sync NFT ownership from chain when enabled', async () => {
       user_id: ADDRESSES.user,
       nftCount: 0n,
       nftMultiplier: 10000n,
+      specialEditionCount: 0n,
+      specialEditionMultiplier: 10000n,
       votingPower: 0n,
       vpTierIndex: 0n,
       vpMultiplier: 50000n,
@@ -262,10 +265,12 @@ test('settlements sync NFT ownership from chain when enabled', async () => {
       `${ADDRESSES.user}:${VIEM_PARTIAL_ADDRESS}`
     );
     assert.ok(ownership);
-    assert.ok(mockDb.entities.UserNFTOwnership.get(`${ADDRESSES.user}:${VIEM_SECOND_NFT_ADDRESS}`));
     assert.equal(
-      mockDb.entities.UserNFTOwnership.get(`${ADDRESSES.user}:${VIEM_ZERO_BALANCE_ADDRESS}`),
+      mockDb.entities.UserNFTOwnership.get(`${ADDRESSES.user}:${VIEM_SECOND_NFT_ADDRESS}`),
       undefined
+    );
+    assert.ok(
+      mockDb.entities.UserNFTOwnership.get(`${ADDRESSES.user}:${VIEM_ZERO_BALANCE_ADDRESS}`)
     );
     assert.equal(
       mockDb.entities.UserNFTOwnership.get(`${ADDRESSES.user}:${VIEM_NO_NFT_ADDRESS}`),
@@ -275,12 +280,22 @@ test('settlements sync NFT ownership from chain when enabled', async () => {
       mockDb.entities.UserLeaderboardState.get(ADDRESSES.user)?.combinedMultiplier,
       10000n
     );
-    assert.ok(mockDb.entities.UserNFTBaseline.get(`${ADDRESSES.user}:${VIEM_PARTIAL_ADDRESS}`));
-    assert.ok(mockDb.entities.UserNFTBaseline.get(`${ADDRESSES.user}:${VIEM_SECOND_NFT_ADDRESS}`));
-    assert.ok(
-      mockDb.entities.UserNFTBaseline.get(`${ADDRESSES.user}:${VIEM_ZERO_BALANCE_ADDRESS}`)
+    assert.equal(
+      mockDb.entities.UserNFTBaseline.get(`${ADDRESSES.user}:${VIEM_PARTIAL_ADDRESS}`),
+      undefined
     );
-    assert.ok(mockDb.entities.UserNFTBaseline.get(`${ADDRESSES.user}:${VIEM_NO_NFT_ADDRESS}`));
+    assert.equal(
+      mockDb.entities.UserNFTBaseline.get(`${ADDRESSES.user}:${VIEM_SECOND_NFT_ADDRESS}`),
+      undefined
+    );
+    assert.equal(
+      mockDb.entities.UserNFTBaseline.get(`${ADDRESSES.user}:${VIEM_ZERO_BALANCE_ADDRESS}`),
+      undefined
+    );
+    assert.equal(
+      mockDb.entities.UserNFTBaseline.get(`${ADDRESSES.user}:${VIEM_NO_NFT_ADDRESS}`),
+      undefined
+    );
     assert.equal(
       mockDb.entities.UserNFTBaseline.get(`${ADDRESSES.user}:${VIEM_ERROR_ADDRESS}`),
       undefined
@@ -292,7 +307,7 @@ test('settlements sync NFT ownership from chain when enabled', async () => {
   }
 });
 
-test('settlements sync LP positions from chain when enabled', async () => {
+test('settlements do not sync LP positions from chain when env flags are enabled', async () => {
   const previousExternal = process.env.ENVIO_ENABLE_EXTERNAL_CALLS;
   const prevEnableEth = process.env.ENVIO_ENABLE_ETH_CALLS;
   const previousChainSync = process.env.ENVIO_ENABLE_LP_CHAIN_SYNC;
@@ -449,12 +464,10 @@ test('settlements sync LP positions from chain when enabled', async () => {
     );
 
     const position = await userLPPosition.get(LP_TOKEN_ID.toString());
-    assert.ok(position);
-    assert.equal(position?.pool, ADDRESSES.lpPool);
-    assert.equal(position?.positionManager, ADDRESSES.positionManager);
+    assert.equal(position, undefined);
 
     const baseline = await userLPBaseline.get(`${ADDRESSES.user}:${ADDRESSES.positionManager}`);
-    assert.ok(baseline);
+    assert.equal(baseline, undefined);
   } finally {
     process.env.ENVIO_ENABLE_EXTERNAL_CALLS = previousExternal;
     process.env.ENVIO_ENABLE_ETH_CALLS = prevEnableEth;
@@ -657,6 +670,7 @@ test('settlements baseline uses zero checked block when no change and block miss
     const leaderboardConfig = createStore<LeaderboardConfig_t>();
     const nftMultiplierConfig = createStore<NFTMultiplierConfig_t>();
     const registryState = createStore<NFTPartnershipRegistryState_t>();
+    const nftPartnership = createStore<NFTPartnership_t>();
 
     leaderboardState.set({
       id: 'current',
@@ -695,12 +709,13 @@ test('settlements baseline uses zero checked block when no change and block miss
       LeaderboardConfig: leaderboardConfig,
       NFTMultiplierConfig: nftMultiplierConfig,
       NFTPartnershipRegistryState: registryState,
+      NFTPartnership: nftPartnership,
     } as unknown as handlerContext;
 
     await settlePointsForUser(context, ADDRESSES.user, null, 1000, undefined as unknown as bigint);
 
     const baseline = await userNFTBaseline.get(`${ADDRESSES.user}:${VIEM_NO_NFT_ADDRESS}`);
-    assert.equal(baseline?.checkedBlock, 0n);
+    assert.equal(baseline, undefined);
   } finally {
     process.env.ENVIO_ENABLE_EXTERNAL_CALLS = previousExternal;
     process.env.ENVIO_ENABLE_ETH_CALLS = prevEnableEth;
@@ -776,9 +791,9 @@ test('settlements default lastCheckedBlock when block number is missing', async 
     await settlePointsForUser(context, ADDRESSES.user, null, 1000, undefined as unknown as bigint);
 
     const ownership = await userNFTOwnership.get(`${ADDRESSES.user}:${VIEM_PARTIAL_ADDRESS}`);
-    assert.equal(ownership?.lastCheckedBlock, 0n);
+    assert.equal(ownership, undefined);
     const baseline = await userNFTBaseline.get(`${ADDRESSES.user}:${VIEM_PARTIAL_ADDRESS}`);
-    assert.equal(baseline?.checkedBlock, 0n);
+    assert.equal(baseline, undefined);
   } finally {
     process.env.ENVIO_ENABLE_EXTERNAL_CALLS = previousExternal;
     process.env.ENVIO_ENABLE_ETH_CALLS = prevEnableEth;
@@ -809,6 +824,7 @@ test('settlements clamp nft count when removing last nft', async () => {
     const leaderboardConfig = createStore<LeaderboardConfig_t>();
     const nftMultiplierConfig = createStore<NFTMultiplierConfig_t>();
     const registryState = createStore<NFTPartnershipRegistryState_t>();
+    const nftPartnership = createStore<NFTPartnership_t>();
 
     leaderboardState.set({
       id: 'current',
@@ -837,6 +853,8 @@ test('settlements clamp nft count when removing last nft', async () => {
       user_id: ADDRESSES.user,
       nftCount: 0n,
       nftMultiplier: 10000n,
+      specialEditionCount: 0n,
+      specialEditionMultiplier: 10000n,
       votingPower: 0n,
       vpTierIndex: 0n,
       vpMultiplier: 10000n,
@@ -871,6 +889,7 @@ test('settlements clamp nft count when removing last nft', async () => {
       LeaderboardConfig: leaderboardConfig,
       NFTMultiplierConfig: nftMultiplierConfig,
       NFTPartnershipRegistryState: registryState,
+      NFTPartnership: nftPartnership,
     } as unknown as handlerContext;
 
     await settlePointsForUser(
@@ -883,10 +902,7 @@ test('settlements clamp nft count when removing last nft', async () => {
 
     const state = await userLeaderboardState.get(ADDRESSES.user);
     assert.equal(state?.nftCount, 0n);
-    assert.equal(
-      await userNFTOwnership.get(`${ADDRESSES.user}:${VIEM_ZERO_BALANCE_ADDRESS}`),
-      undefined
-    );
+    assert.ok(await userNFTOwnership.get(`${ADDRESSES.user}:${VIEM_ZERO_BALANCE_ADDRESS}`));
   } finally {
     process.env.ENVIO_ENABLE_EXTERNAL_CALLS = previousExternal;
     process.env.ENVIO_ENABLE_ETH_CALLS = prevEnableEth;

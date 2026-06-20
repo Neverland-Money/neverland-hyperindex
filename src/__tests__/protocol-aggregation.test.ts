@@ -10,8 +10,8 @@ import {
   updateProtocolStatsIncremental,
   updateReserveUsdValues,
 } from '../helpers/protocolAggregation';
-import type { handlerContext } from '../../generated';
-import type { t as MockDb } from '../../generated/src/TestHelpers_MockDb.gen';
+import type { handlerContext } from '../types/envio';
+import { TestHelpers, type MockDb } from './v3-test-helpers';
 
 process.env.ENVIO_ENABLE_EXTERNAL_CALLS = 'false';
 process.env.ENVIO_ENABLE_ETH_CALLS = 'false';
@@ -31,9 +31,10 @@ const ADDRESSES = {
   user: '0x0000000000000000000000000000000000001008',
 };
 
-type TestHelpersApi = typeof import('../../generated').TestHelpers;
+type TestHelpersApi = typeof TestHelpers;
 
 function loadTestHelpers(): TestHelpersApi {
+  return TestHelpers;
   const cwd = process.cwd();
   const distTestRoot = path.join(cwd, 'dist-test');
   const generatedLink = path.join(distTestRoot, 'generated');

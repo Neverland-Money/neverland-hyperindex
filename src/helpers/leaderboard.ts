@@ -1,42 +1,27 @@
 /**
- * TopK + Histogram Leaderboard System
+ * Histogram Leaderboard System (rank-for-everyone)
  * Migrated from neverland-subgraphs
+ *
+ * Maintains the ScoreBucket histogram + UserIndex + LeaderboardTotals that power
+ * every user's approximate rank, and the per-user/epoch points the read layer ranks
+ * on. The exact ordered top-N is NOT precomputed here: the API derives it with
+ * `ORDER BY <points> DESC LIMIT n` over the indexed UserEpochStats.totalPointsWithMultiplier
+ * (per epoch) and UserPoints.lifetimeTotalPoints / UserLeaderboardState.lifetimePoints
+ * (all-time) fields, which is exactly as fresh (written in the same handler pass) and
+ * more precise (BigInt vs the old Float) than a materialized top-K would be.
  */
 
-import type { handlerContext } from '../../generated';
+import type { handlerContext } from '../types/envio';
 import { getOrCreateUserLeaderboardState } from '../handlers/shared';
 
-const MAX_TOP_K = 100;
 const MAX_BUCKETS = 120;
 const ALL_TIME_EPOCH_NUMBER = 0n;
-
-type TopKEntryEntity = {
-  id: string;
-  epochNumber: bigint;
-  userId: string;
-  points: number;
-  rank: number;
-};
 
 function normalizePoints(points: number): number {
   if (!Number.isFinite(points) || points < 0) {
     return 0;
   }
   return points;
-}
-
-function sortTopKEntries(entries: TopKEntryEntity[]): TopKEntryEntity[] {
-  return [...entries].sort((a, b) => {
-    if (a.points !== b.points) {
-      return b.points - a.points;
-    }
-    /* c8 ignore start */
-    if (a.userId === b.userId) {
-      return 0;
-    }
-    /* c8 ignore end */
-    return a.userId < b.userId ? -1 : 1;
-  });
 }
 
 export async function isUserBlacklisted(context: handlerContext, userId: string): Promise<boolean> {
@@ -96,70 +81,6 @@ export function bucketBounds(index: number): [number, number] {
   return [lower, upper];
 }
 
-async function getOrInitTopK(context: handlerContext, epochNumber: bigint, idOverride?: string) {
-  const id = idOverride ?? `epoch:${epochNumber}`;
-  let topK = await context.TopK.get(id);
-  if (!topK) {
-    topK = {
-      id,
-      epochNumber,
-      k: MAX_TOP_K,
-      entries: [],
-      updatedAt: 0,
-    };
-    context.TopK.set(topK);
-  }
-  return topK;
-}
-
-async function removeUserFromTopK(
-  context: handlerContext,
-  epochNumber: bigint,
-  userId: string,
-  timestamp: number,
-  idOverride?: string
-) {
-  const id = idOverride ?? `epoch:${epochNumber}`;
-  const topK = await context.TopK.get(id);
-  if (!topK || !topK.entries || topK.entries.length === 0) {
-    return;
-  }
-
-  const remaining: TopKEntryEntity[] = [];
-  let removed = false;
-
-  for (const entryId of topK.entries) {
-    const entry = await context.TopKEntry.get(entryId);
-    if (!entry) continue;
-    if (entry.userId === userId) {
-      removed = true;
-      context.TopKEntry.deleteUnsafe(entryId);
-      continue;
-    }
-    remaining.push({ ...entry, points: normalizePoints(entry.points) });
-  }
-
-  if (!removed) return;
-
-  const sortedEntries = sortTopKEntries(remaining);
-  const nextEntries: string[] = [];
-
-  for (let i = 0; i < sortedEntries.length; i++) {
-    const entry = sortedEntries[i];
-    nextEntries.push(entry.id);
-    context.TopKEntry.set({
-      ...entry,
-      rank: i + 1,
-    });
-  }
-
-  context.TopK.set({
-    ...topK,
-    entries: nextEntries,
-    updatedAt: timestamp,
-  });
-}
-
 async function removeUserFromLeaderboardForEpoch(
   context: handlerContext,
   userId: string,
@@ -214,11 +135,6 @@ async function removeUserFromLeaderboardForEpoch(
       context.UserIndex.deleteUnsafe(userId);
     }
   }
-
-  await removeUserFromTopK(context, epochNumber, userId, timestamp);
-  if (syncGlobal) {
-    await removeUserFromTopK(context, epochNumber, userId, timestamp, 'global');
-  }
 }
 
 export async function removeUserFromLeaderboards(
@@ -238,43 +154,6 @@ export async function removeUserFromLeaderboards(
   }
 
   await removeUserFromLeaderboardForEpoch(context, userId, ALL_TIME_EPOCH_NUMBER, timestamp, false);
-}
-
-async function syncGlobalTopK(
-  context: handlerContext,
-  epochNumber: bigint,
-  entries: TopKEntryEntity[],
-  timestamp: number
-) {
-  const globalTopK = await getOrInitTopK(context, epochNumber, 'global');
-  const nextEntries: string[] = [];
-
-  for (let i = 0; i < entries.length; i++) {
-    const entry = entries[i];
-    const globalEntryId = `global:${entry.userId}`;
-    nextEntries.push(globalEntryId);
-    context.TopKEntry.set({
-      id: globalEntryId,
-      epochNumber,
-      userId: entry.userId,
-      points: entry.points,
-      rank: i + 1,
-    });
-  }
-
-  const keepIds = new Set(nextEntries);
-  for (const entryId of globalTopK.entries ?? []) {
-    if (!keepIds.has(entryId)) {
-      context.TopKEntry.deleteUnsafe(entryId);
-    }
-  }
-
-  context.TopK.set({
-    ...globalTopK,
-    epochNumber,
-    entries: nextEntries,
-    updatedAt: timestamp,
-  });
 }
 
 async function getOrInitLeaderboardTotals(context: handlerContext, epochNumber: bigint) {
@@ -343,70 +222,6 @@ async function syncGlobalScoreBucket(
       ...globalBucket,
       count: bucket.count,
     });
-  }
-}
-
-/**
- * Update TopK with new user points
- * Maintains sorted order (desc by points), max length k
- */
-async function upsertTopK(
-  context: handlerContext,
-  epochNumber: bigint,
-  userId: string,
-  points: number,
-  timestamp: number,
-  syncGlobal = true
-) {
-  const normalizedPoints = normalizePoints(points);
-  const topK = await getOrInitTopK(context, epochNumber);
-  const entryMap = new Map<string, TopKEntryEntity>();
-
-  for (const entryId of topK.entries ?? []) {
-    const entry = await context.TopKEntry.get(entryId);
-    if (!entry) continue;
-    entryMap.set(entry.userId, {
-      ...entry,
-      points: normalizePoints(entry.points),
-    });
-  }
-
-  entryMap.set(userId, {
-    id: `epoch:${epochNumber.toString()}:${userId}`,
-    epochNumber,
-    userId,
-    points: normalizedPoints,
-    rank: 0,
-  });
-
-  const sortedEntries = sortTopKEntries([...entryMap.values()]);
-  const topEntries = sortedEntries.slice(0, MAX_TOP_K);
-  const nextEntries: string[] = [];
-
-  for (let i = 0; i < topEntries.length; i++) {
-    const entry = topEntries[i];
-    nextEntries.push(entry.id);
-    context.TopKEntry.set({
-      ...entry,
-      rank: i + 1,
-    });
-  }
-
-  const keepIds = new Set(nextEntries);
-  for (const entryId of topK.entries ?? []) {
-    if (!keepIds.has(entryId)) {
-      context.TopKEntry.deleteUnsafe(entryId);
-    }
-  }
-
-  context.TopK.set({
-    ...topK,
-    entries: nextEntries,
-    updatedAt: timestamp,
-  });
-
-  if (syncGlobal) {
-    await syncGlobalTopK(context, epochNumber, topEntries, timestamp);
   }
 }
 
@@ -487,7 +302,6 @@ async function updateLeaderboardForEpoch(
       });
     }
 
-    await upsertTopK(context, epochNumber, userId, newPoints, timestamp, syncGlobal);
     return;
   }
 
@@ -501,7 +315,6 @@ async function updateLeaderboardForEpoch(
       points: newPoints,
       updatedAt: timestamp,
     });
-    await upsertTopK(context, epochNumber, userId, newPoints, timestamp, syncGlobal);
     return;
   }
 
@@ -559,9 +372,6 @@ async function updateLeaderboardForEpoch(
       updatedAt: timestamp,
     });
   }
-
-  // Update TopK
-  await upsertTopK(context, epochNumber, userId, newPoints, timestamp, syncGlobal);
 
   if (!syncGlobal) {
     return;
