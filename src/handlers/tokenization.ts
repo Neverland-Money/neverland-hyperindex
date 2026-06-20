@@ -3,8 +3,6 @@
  * AToken, VariableDebtToken, StableDebtToken
  */
 
-import type { handlerContext } from '../../generated';
-import { AToken, VariableDebtToken, StableDebtToken } from '../../generated';
 import { rayDiv, rayMul, toDecimal } from '../helpers/math';
 import {
   isGatewayAddress,
@@ -13,7 +11,6 @@ import {
   getTokenMetadata,
   normalizeAddress,
 } from '../helpers/constants';
-import { tryReadTokenMetadata } from '../helpers/viem';
 import {
   recordProtocolTransaction,
   addReserveToUserList,
@@ -34,6 +31,9 @@ import {
   getHistoryEntityId,
   isTreasuryAddress,
 } from '../helpers/entityHelpers';
+
+import { AToken, StableDebtToken, VariableDebtToken } from '../../generated';
+import type { handlerContext } from '../../generated';
 
 async function getOrCreateUserReserveForAllowance(
   context: handlerContext,
@@ -137,7 +137,8 @@ AToken.Mint.handler(async ({ event, context }) => {
       userAddress,
       reserveId,
       Number(event.block.timestamp),
-      BigInt(event.block.number)
+      BigInt(event.block.number),
+      { ignoreCooldown: true }
     );
 
     const calculatedAmount = rayDiv(userBalanceChange, event.params.index);
@@ -287,7 +288,8 @@ AToken.Burn.handler(async ({ event, context }) => {
     userAddress,
     reserveId,
     Number(event.block.timestamp),
-    BigInt(event.block.number)
+    BigInt(event.block.number),
+    { ignoreCooldown: true }
   );
 
   if (userReserve) {
@@ -497,10 +499,14 @@ AToken.BalanceTransfer.handler(async ({ event, context }) => {
 
   // Settle points for real users, not gateway contracts
   if (fromAddress !== ZERO_ADDRESS && !isFromGateway) {
-    await settlePointsForUser(context, fromAddress, reserveId, timestamp, blockNumber);
+    await settlePointsForUser(context, fromAddress, reserveId, timestamp, blockNumber, {
+      ignoreCooldown: true,
+    });
   }
   if (toAddress !== ZERO_ADDRESS && !isToGateway) {
-    await settlePointsForUser(context, toAddress, reserveId, timestamp, blockNumber);
+    await settlePointsForUser(context, toAddress, reserveId, timestamp, blockNumber, {
+      ignoreCooldown: true,
+    });
   }
 
   const scaledAmount = event.params.value;
@@ -665,13 +671,6 @@ AToken.Initialized.handler(async ({ event, context }) => {
       decimals = tokenInfo.decimals;
     } else {
       /* c8 ignore end */
-      const chainMetadata = await tryReadTokenMetadata(underlyingAsset, BigInt(event.block.number));
-      if (chainMetadata) {
-        if (chainMetadata.symbol) symbol = chainMetadata.symbol;
-        if (chainMetadata.name) name = chainMetadata.name;
-        if (chainMetadata.decimals !== undefined) decimals = chainMetadata.decimals;
-      }
-
       if (!symbol && !name) {
         // Extract symbol from aToken symbol by stripping "n" prefix
         const aTokenSymbol = event.params.aTokenSymbol;
@@ -828,7 +827,8 @@ VariableDebtToken.Mint.handler(async ({ event, context }) => {
     userAddress,
     reserveId,
     Number(event.block.timestamp),
-    BigInt(event.block.number)
+    BigInt(event.block.number),
+    { ignoreCooldown: true }
   );
 
   // Subgraph: userBalanceChange = value - balanceIncrease (actual borrow)
@@ -948,7 +948,8 @@ VariableDebtToken.Burn.handler(async ({ event, context }) => {
     userAddress,
     reserveId,
     Number(event.block.timestamp),
-    BigInt(event.block.number)
+    BigInt(event.block.number),
+    { ignoreCooldown: true }
   );
 
   // Subgraph: userBalanceChange = value + balanceIncrease (total repayment)
@@ -1093,7 +1094,8 @@ StableDebtToken.Mint.handler(async ({ event, context }) => {
     userAddress,
     reserveId,
     Number(event.block.timestamp),
-    BigInt(event.block.number)
+    BigInt(event.block.number),
+    { ignoreCooldown: true }
   );
 
   const reserve = await context.Reserve.get(reserveId);
@@ -1251,7 +1253,8 @@ StableDebtToken.Burn.handler(async ({ event, context }) => {
     userAddress,
     reserveId,
     Number(event.block.timestamp),
-    BigInt(event.block.number)
+    BigInt(event.block.number),
+    { ignoreCooldown: true }
   );
 
   const historyId = `${event.transaction.hash}-${event.logIndex}`;

@@ -42,14 +42,19 @@ export function getLPRatePerHour(lpRateBps: bigint | undefined): number {
 
 /**
  * Apply multipliers to raw points
- * Combined = NFT multiplier × VP multiplier / 10000
+ * Combined = NFT multiplier × special edition multiplier × VP multiplier
+ * (each in basis points; specialEditionMultiplier defaults to 1x so callers
+ * that do not track special editions are unaffected)
  */
 export function applyMultipliers(
   rawPoints: number,
   nftMultiplier: bigint,
-  vpMultiplier: bigint
+  vpMultiplier: bigint,
+  specialEditionMultiplier: bigint = 10000n
 ): number {
-  const combinedBps = (Number(nftMultiplier) * Number(vpMultiplier)) / BASIS_POINTS_FLOAT;
+  const combinedBps =
+    (Number(nftMultiplier) * Number(specialEditionMultiplier) * Number(vpMultiplier)) /
+    (BASIS_POINTS_FLOAT * BASIS_POINTS_FLOAT);
   let multiplier = combinedBps / BASIS_POINTS_FLOAT;
 
   // Cap at 10x

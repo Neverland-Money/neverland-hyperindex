@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import { createDefaultReserve } from '../helpers/entityHelpers';
 import { LEADERBOARD_START_BLOCK, ZERO_ADDRESS } from '../helpers/constants';
 import { calculateLinearInterest, rayMul, toDecimal } from '../helpers/math';
-import type { t as MockDb } from '../../generated/src/TestHelpers_MockDb.gen';
+import { TestHelpers, type MockDb } from './v3-test-helpers';
 
 const DAY = 86400;
 const RAY = 10n ** 27n;
@@ -35,9 +35,10 @@ const ADDRESSES = {
   dustLock: '0x00000000000000000000000000000000000000f6',
 };
 
-type TestHelpersApi = typeof import('../../generated').TestHelpers;
+type TestHelpersApi = typeof TestHelpers;
 
 function loadTestHelpers(): TestHelpersApi {
+  return TestHelpers;
   const cwd = process.cwd();
   const distTestRoot = path.join(cwd, 'dist-test');
   const generatedLink = path.join(distTestRoot, 'generated');
@@ -846,7 +847,7 @@ test('gap settlements use epoch-end indices snapshots', async () => {
   assert.equal(points.lastDepositTokens, toDecimal(expectedSupply, DECIMALS));
 });
 
-test('cooldown only settles the interacted reserve', async () => {
+test('lending actions settle supply and borrow reserves during cooldown', async () => {
   const TestHelpers = loadTestHelpers();
   let mockDb = TestHelpers.MockDb.createMockDb();
   const eventData = createEventDataFactory();
@@ -917,7 +918,7 @@ test('cooldown only settles the interacted reserve', async () => {
 
   const configEvent = TestHelpers.LeaderboardConfig.ConfigSnapshot.createMockEvent({
     depositRateBps: 10000n,
-    borrowRateBps: 0n,
+    borrowRateBps: 10000n,
     vpRateBps: 0n,
     supplyDailyBonus: 0n,
     borrowDailyBonus: 0n,
@@ -949,13 +950,13 @@ test('cooldown only settles the interacted reserve', async () => {
     pool_id: ADDRESSES.pool,
     user_id: ADDRESSES.user,
     reserve_id: reserveTwoId,
-    scaledATokenBalance: 500n * UNIT,
-    currentATokenBalance: 500n * UNIT,
-    scaledVariableDebt: 0n,
-    currentVariableDebt: 0n,
+    scaledATokenBalance: 0n,
+    currentATokenBalance: 0n,
+    scaledVariableDebt: 500n * UNIT,
+    currentVariableDebt: 500n * UNIT,
     principalStableDebt: 0n,
     currentStableDebt: 0n,
-    currentTotalDebt: 0n,
+    currentTotalDebt: 500n * UNIT,
     stableBorrowRate: 0n,
     oldStableBorrowRate: 0n,
     liquidityRate: 0n,
@@ -993,7 +994,8 @@ test('cooldown only settles the interacted reserve', async () => {
 
   const statsAfterFirst = mockDb.entities.UserEpochStats.get(`${ADDRESSES.user}:1`);
   assert.ok(statsAfterFirst);
-  assertApprox(statsAfterFirst.depositPoints, 1500);
+  assertApprox(statsAfterFirst.depositPoints, 1000);
+  assertApprox(statsAfterFirst.borrowPoints, 500);
 
   const cooldownSettle = TestHelpers.AToken.Mint.createMockEvent({
     caller: ADDRESSES.user,
@@ -1007,7 +1009,8 @@ test('cooldown only settles the interacted reserve', async () => {
 
   const statsAfterCooldown = mockDb.entities.UserEpochStats.get(`${ADDRESSES.user}:1`);
   assert.ok(statsAfterCooldown);
-  assertApprox(statsAfterCooldown.depositPoints, 1500 + 1000 / 24);
+  assertApprox(statsAfterCooldown.depositPoints, 1000 + 1000 / 24);
+  assertApprox(statsAfterCooldown.borrowPoints, 500 + 500 / 24);
 });
 
 test('daily supply bonus respects min usd threshold', async () => {

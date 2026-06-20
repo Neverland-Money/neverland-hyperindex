@@ -686,7 +686,7 @@ type UserPoints {
   lifetimeDailyRepayPoints: BigInt!
   lifetimeDailyWithdrawPoints: BigInt!
   lifetimeDailyVPPoints: BigInt!
-  lifetimeTotalPoints: BigInt!
+  lifetimeTotalPoints: BigInt! @index
   epochsParticipated: [BigInt!]!
   lifetimeEpochsIncluded: [BigInt!]!
   lastUpdatedAt: Int!
@@ -1036,6 +1036,189 @@ type DustPauseEvent {
   txHash: String!
 }
 
+# Profile Shop
+type ProfileShopState {
+  id: ID!
+  seller: String! @index
+  owner: String
+  pendingOwner: String
+  fundsRecipient: String
+  paused: Boolean!
+  initializedVersion: Int
+  itemCount: BigInt!
+  purchaseCount: BigInt!
+  purchaseLineCount: BigInt!
+  totalQuantitySold: BigInt!
+  totalRevenueDust: BigInt!
+  lastPurchaseId: BigInt!
+  firstEventAt: Int
+  lastUpdate: Int!
+}
+
+type ProfileShopItem
+  @index(fields: ["seller", "category"])
+  @index(fields: ["seller", "available"])
+  @index(fields: ["seller", "itemSlugHash"]) {
+  id: ID!
+  seller: String! @index
+  itemSlugHash: String! @index
+  itemSlug: String! @index
+  price: BigInt!
+  category: String! @index
+  available: Boolean!
+  configured: Boolean!
+  configCount: BigInt!
+  totalQuantityPurchased: BigInt!
+  totalPurchaseLines: BigInt!
+  totalRevenueDust: BigInt!
+  firstConfiguredAt: Int
+  lastConfiguredAt: Int
+  firstPurchasedAt: Int
+  lastPurchasedAt: Int
+}
+
+type ProfileShopItemConfigHistory
+  @index(fields: ["seller", "itemSlugHash", "timestamp"])
+  @index(fields: ["seller", "timestamp"]) {
+  id: ID!
+  seller: String! @index
+  itemSlugHash: String! @index
+  itemSlug: String! @index
+  oldPrice: BigInt!
+  newPrice: BigInt!
+  category: String! @index
+  available: Boolean!
+  timestamp: Int! @index
+  blockNumber: BigInt! @index
+  txHash: String! @index
+  logIndex: Int!
+}
+
+type ProfileShopPurchase
+  @index(fields: ["seller", "buyer", "timestamp"])
+  @index(fields: ["seller", "recipient", "timestamp"])
+  @index(fields: ["seller", "purchaseId"]) {
+  id: ID!
+  seller: String! @index
+  purchaseId: BigInt! @index
+  buyer: String! @index
+  recipient: String! @index
+  isGift: Boolean!
+  lineCount: BigInt!
+  totalPrice: BigInt!
+  lineIds: [String!]!
+  timestamp: Int! @index
+  blockNumber: BigInt! @index
+  txHash: String! @index
+  firstLogIndex: Int!
+  lastLogIndex: Int!
+}
+
+type ProfileShopPurchaseLine
+  @index(fields: ["seller", "buyer", "timestamp"])
+  @index(fields: ["seller", "recipient", "timestamp"])
+  @index(fields: ["seller", "itemSlugHash", "timestamp"]) {
+  id: ID!
+  seller: String! @index
+  purchase_id: String! @index
+  purchaseId: BigInt! @index
+  lineIndex: Int!
+  buyer: String! @index
+  recipient: String! @index
+  isGift: Boolean!
+  itemSlugHash: String! @index
+  itemSlug: String! @index
+  category: String! @index
+  quantity: BigInt!
+  unitPrice: BigInt!
+  totalPrice: BigInt!
+  timestamp: Int! @index
+  blockNumber: BigInt! @index
+  txHash: String! @index
+  logIndex: Int!
+}
+
+type ProfileShopUserItem
+  @index(fields: ["seller", "user_id"])
+  @index(fields: ["seller", "user_id", "category"]) {
+  id: ID!
+  seller: String! @index
+  user_id: String! @index
+  itemSlugHash: String! @index
+  itemSlug: String! @index
+  category: String! @index
+  permanentOwned: Boolean!
+  consumableQuantity: BigInt!
+  totalQuantityReceived: BigInt!
+  totalValueReceivedDust: BigInt!
+  firstPurchasedAt: Int
+  lastPurchasedAt: Int
+  lastPurchaseTxHash: String
+}
+
+type ProfileShopUserStats @index(fields: ["seller", "user_id"]) {
+  id: ID!
+  seller: String! @index
+  user_id: String! @index
+  buyerPurchaseCount: BigInt!
+  buyerLineCount: BigInt!
+  buyerQuantity: BigInt!
+  buyerSpentDust: BigInt!
+  recipientPurchaseCount: BigInt!
+  recipientLineCount: BigInt!
+  recipientQuantity: BigInt!
+  recipientValueDust: BigInt!
+  permanentItemsOwned: BigInt!
+  consumableUnitsReceived: BigInt!
+  firstPurchaseAt: Int
+  lastPurchaseAt: Int
+  updatedAt: Int!
+}
+
+type ProfileShopFundsRecipientUpdate {
+  id: ID!
+  seller: String! @index
+  oldFundsRecipient: String!
+  newFundsRecipient: String!
+  timestamp: Int! @index
+  blockNumber: BigInt! @index
+  txHash: String! @index
+  logIndex: Int!
+}
+
+type ProfileShopOwnershipEvent {
+  id: ID!
+  seller: String! @index
+  eventType: String! @index
+  previousOwner: String!
+  newOwner: String!
+  timestamp: Int! @index
+  blockNumber: BigInt! @index
+  txHash: String! @index
+  logIndex: Int!
+}
+
+type ProfileShopPauseEvent {
+  id: ID!
+  seller: String! @index
+  account: String! @index
+  paused: Boolean!
+  timestamp: Int! @index
+  blockNumber: BigInt! @index
+  txHash: String! @index
+  logIndex: Int!
+}
+
+type ProfileShopInitialized {
+  id: ID!
+  seller: String! @index
+  version: Int!
+  timestamp: Int! @index
+  blockNumber: BigInt! @index
+  txHash: String! @index
+  logIndex: Int!
+}
+
 # User Vault / Self-Repayment
 type UserVault {
   id: ID!
@@ -1379,12 +1562,14 @@ type UserLeaderboardState {
   user_id: String! @index
   nftCount: BigInt!
   nftMultiplier: BigInt!
+  specialEditionCount: BigInt!
+  specialEditionMultiplier: BigInt!
   votingPower: BigInt!
   vpTierIndex: BigInt
   vpMultiplier: BigInt!
   combinedMultiplier: BigInt!
   totalEpochsParticipated: BigInt!
-  lifetimePoints: BigInt!
+  lifetimePoints: BigInt! @index
   currentEpochId: String
   currentEpochRank: BigInt
   lastUpdate: Int!
@@ -1419,7 +1604,7 @@ type UserEpochStats {
   lastVPPointsDay: Int!
   lastVPAccrualTimestamp: Int!
   totalPoints: BigInt!
-  totalPointsWithMultiplier: BigInt!
+  totalPointsWithMultiplier: BigInt! @index
   totalMultiplierBps: BigInt!
   lastAppliedMultiplierBps: BigInt!
   testnetBonusBps: BigInt!
@@ -1434,11 +1619,100 @@ type UserMultiplierSnapshot {
   timestamp: Int!
   nftCount: BigInt!
   nftMultiplier: BigInt!
+  specialEditionCount: BigInt!
+  specialEditionMultiplier: BigInt!
   votingPower: BigInt!
   vpMultiplier: BigInt!
   combinedMultiplier: BigInt!
   changeReason: String!
   txHash: String!
+}
+
+type SpecialEditionRegistryState {
+  id: ID!
+  editionIds: [BigInt!]!
+  lastUpdate: Int!
+}
+
+type SpecialEditionConfig {
+  id: ID!
+  editionId: BigInt! @index
+  key: String!
+  name: String!
+  perTokenBoostBps: BigInt!
+  enabled: Boolean!
+  exists: Boolean!
+  createdAt: Int!
+  updatedAt: Int!
+  changeTimestamps: [Int!]!
+  boostBpsHistory: [BigInt!]!
+  enabledHistory: [BigInt!]!
+}
+
+type SpecialEditionConfigSnapshot {
+  id: ID!
+  editionId: BigInt! @index
+  key: String
+  name: String!
+  perTokenBoostBps: BigInt!
+  enabled: Boolean!
+  timestamp: Int!
+  txHash: String!
+  logIndex: Int!
+  changeReason: String!
+}
+
+type SpecialEditionTokenState {
+  id: ID!
+  tokenId: BigInt! @index
+  editionBitmap: BigInt!
+  editionIds: [BigInt!]!
+  updatedAt: Int!
+}
+
+type SpecialEditionTokenMembership @index(fields: ["tokenId", "editionId"]) {
+  id: ID!
+  tokenId: BigInt! @index
+  editionId: BigInt! @index
+  active: Boolean!
+  sourceHash: String!
+  registeredAt: Int!
+  correctedAt: Int
+  txHash: String!
+  logIndex: Int!
+}
+
+type UserSpecialEditionState @index(fields: ["user_id", "editionId"]) {
+  id: ID!
+  user_id: String! @index
+  editionId: BigInt! @index
+  tokenCount: BigInt!
+  countTimestamps: [Int!]!
+  tokenCountHistory: [BigInt!]!
+  updatedAt: Int!
+}
+
+type UserSpecialEditionAggregate {
+  id: ID!
+  user_id: String! @index
+  specialEditionCount: BigInt!
+  specialEditionMultiplier: BigInt!
+  updatedAt: Int!
+}
+
+type UserSpecialEditionHistory
+  @index(fields: ["user_id", "editionId", "timestamp"])
+  @index(fields: ["user_id", "timestamp"]) {
+  id: ID!
+  user_id: String! @index
+  editionId: BigInt! @index
+  tokenCount: BigInt!
+  specialEditionCount: BigInt!
+  specialEditionMultiplier: BigInt!
+  timestamp: Int!
+  txHash: String!
+  logIndex: Int!
+  changeReason: String!
 }
 
 type UserVotingPowerHistory {
@@ -1539,6 +1813,14 @@ type LPPoolV2State {
   reserve0: BigInt!
   reserve1: BigInt!
   lpTotalSupply: BigInt!
+  lastUpdate: Int!
+}
+
+type LPPoolSettlementCursor {
+  id: ID!
+  pool: String! @index
+  cursorIndex: Int!
+  lastSweepTimestamp: Int!
   lastUpdate: Int!
 }
 

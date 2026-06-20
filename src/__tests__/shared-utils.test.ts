@@ -40,33 +40,36 @@ import {
   updateUserVotingPower,
   updateUserTokenList,
 } from '../handlers/shared';
-import type { handlerContext } from '../../generated';
 import type {
-  DustLockToken_t,
-  LeaderboardEpoch_t,
-  LeaderboardConfig_t,
-  LPPoolConfig_t,
-  LPPoolRegistry_t,
-  LeaderboardState_t,
-  NFTMultiplierConfig_t,
-  NFTPartnership_t,
-  NFTPartnershipRegistryState_t,
-  PriceOracleAsset_t,
-  ProtocolStatsSnapshot_t,
-  ProtocolStats_t,
-  UserEpochStats_t,
-  UserLeaderboardState_t,
-  UserMultiplierSnapshot_t,
-  UserPoints_t,
-  UserReserveList_t,
-  UserNFTOwnership_t,
-  UserTokenList_t,
-  UserVotingPowerHistory_t,
-  User_t,
-  VotingPowerTier_t,
-} from '../../generated/src/db/Entities.gen';
+  DustLockToken,
+  LPPoolConfig,
+  LPPoolRegistry,
+  leaderboardConfig as LeaderboardConfig,
+  LeaderboardEpoch,
+  LeaderboardState,
+  NFTMultiplierConfig,
+  NFTPartnership,
+  NFTPartnershipRegistryState,
+  PriceOracleAsset,
+  ProtocolStats,
+  ProtocolStatsSnapshot,
+  SpecialEditionConfig,
+  SpecialEditionRegistryState,
+  User,
+  UserEpochStats,
+  UserLeaderboardState,
+  UserMultiplierSnapshot,
+  UserNFTOwnership,
+  UserPoints,
+  UserReserveList,
+  UserSpecialEditionState,
+  UserTokenList,
+  UserVotingPowerHistory,
+  VotingPowerTier,
+  handlerContext,
+} from '../../generated';
 
-type UserPointsMaybeEpochs = Omit<UserPoints_t, 'epochsParticipated' | 'lifetimeEpochsIncluded'> & {
+type UserPointsMaybeEpochs = Omit<UserPoints, 'epochsParticipated' | 'lifetimeEpochsIncluded'> & {
   epochsParticipated?: bigint[];
   lifetimeEpochsIncluded?: bigint[];
 };
@@ -102,7 +105,7 @@ function createStoreWithSize<T extends { readonly id: string }>(): StoreEntityWi
 }
 
 test('token list helpers handle duplicates and removals', async () => {
-  const userStore = createStore<UserTokenList_t>();
+  const userStore = createStore<UserTokenList>();
   const context = { UserTokenList: userStore } as unknown as handlerContext;
 
   await updateUserTokenList(context, '0xuser', 1n, 1, 'add');
@@ -115,10 +118,10 @@ test('token list helpers handle duplicates and removals', async () => {
 });
 
 test('protocol stats snapshots overwrite within the same timestamp', async () => {
-  const statsStore = createStore<ProtocolStats_t>();
-  const snapshotStore = createStoreWithSize<ProtocolStatsSnapshot_t>();
-  const leaderboardState = createStore<LeaderboardState_t>();
-  const leaderboardEpoch = createStore<LeaderboardEpoch_t>();
+  const statsStore = createStore<ProtocolStats>();
+  const snapshotStore = createStoreWithSize<ProtocolStatsSnapshot>();
+  const leaderboardState = createStore<LeaderboardState>();
+  const leaderboardEpoch = createStore<LeaderboardEpoch>();
   const context = {
     ProtocolStats: statsStore,
     ProtocolStatsSnapshot: snapshotStore,
@@ -142,7 +145,7 @@ test('protocol stats snapshots overwrite within the same timestamp', async () =>
 });
 
 test('reserve list helpers update timestamps for existing entries', async () => {
-  const reserveStore = createStore<UserReserveList_t>();
+  const reserveStore = createStore<UserReserveList>();
   const context = { UserReserveList: reserveStore } as unknown as handlerContext;
 
   await addReserveToUserList(context, '0xuser', 'reserve-1', 1);
@@ -155,7 +158,7 @@ test('reserve list helpers update timestamps for existing entries', async () => 
 });
 
 test('asset price helpers set defaults and fallback to priceInEth', async () => {
-  const priceStore = createStore<PriceOracleAsset_t>();
+  const priceStore = createStore<PriceOracleAsset>();
   const context = { PriceOracleAsset: priceStore } as unknown as handlerContext;
 
   await ensureAssetPrice(context, USDC_ADDRESS, 1);
@@ -201,7 +204,7 @@ test('getAssetPriceUSD returns zero when price is still missing', async () => {
 });
 
 test('ensureAssetPrice preserves existing metadata fields', async () => {
-  const priceStore = createStore<PriceOracleAsset_t>();
+  const priceStore = createStore<PriceOracleAsset>();
   const context = { PriceOracleAsset: priceStore } as unknown as handlerContext;
 
   priceStore.set({
@@ -239,8 +242,8 @@ test('ensureAssetPrice preserves existing metadata fields', async () => {
 
 test('calculateCurrentVPFromStorage skips missing tokens', async () => {
   const user = '0xuser';
-  const userTokenList = createStore<UserTokenList_t>();
-  const dustLockToken = createStore<DustLockToken_t>();
+  const userTokenList = createStore<UserTokenList>();
+  const dustLockToken = createStore<DustLockToken>();
 
   userTokenList.set({
     id: user,
@@ -260,8 +263,8 @@ test('calculateCurrentVPFromStorage skips missing tokens', async () => {
 
 test('calculateCurrentVPFromStorage uses stored token balances', async () => {
   const user = '0xuser';
-  const userTokenList = createStore<UserTokenList_t>();
-  const dustLockToken = createStore<DustLockToken_t>();
+  const userTokenList = createStore<UserTokenList>();
+  const dustLockToken = createStore<DustLockToken>();
 
   userTokenList.set({
     id: user,
@@ -305,7 +308,7 @@ test('calculateCurrentVPFromStorage uses stored token balances', async () => {
 });
 
 test('NFT multiplier returns base when config missing', async () => {
-  const configStore = createStore<NFTMultiplierConfig_t>();
+  const configStore = createStore<NFTMultiplierConfig>();
   const context = { NFTMultiplierConfig: configStore } as unknown as handlerContext;
 
   const multiplier = await calculateNFTMultiplierFromCount(context, 2n);
@@ -315,14 +318,16 @@ test('NFT multiplier returns base when config missing', async () => {
 
 test('NFT multiplier falls back to user state when registry store is missing', async () => {
   const user = '0x0000000000000000000000000000000000000abc';
-  const userState = createStore<UserLeaderboardState_t>();
-  const nftConfig = createStore<NFTMultiplierConfig_t>();
+  const userState = createStore<UserLeaderboardState>();
+  const nftConfig = createStore<NFTMultiplierConfig>();
 
   userState.set({
     id: user,
     user_id: user,
     nftCount: 2n,
     nftMultiplier: 10000n,
+    specialEditionCount: 0n,
+    specialEditionMultiplier: 10000n,
     votingPower: 0n,
     vpTierIndex: 0n,
     vpMultiplier: 10000n,
@@ -352,10 +357,10 @@ test('NFT multiplier falls back to user state when registry store is missing', a
 test('NFT multiplier applies static boost from active collection ownership', async () => {
   const user = '0x0000000000000000000000000000000000000abd';
   const collection = '0x0000000000000000000000000000000000000abe';
-  const registryState = createStore<NFTPartnershipRegistryState_t>();
-  const ownershipStore = createStore<UserNFTOwnership_t>();
-  const partnershipStore = createStore<NFTPartnership_t>();
-  const nftConfig = createStore<NFTMultiplierConfig_t>();
+  const registryState = createStore<NFTPartnershipRegistryState>();
+  const ownershipStore = createStore<UserNFTOwnership>();
+  const partnershipStore = createStore<NFTPartnership>();
+  const nftConfig = createStore<NFTMultiplierConfig>();
 
   registryState.set({
     id: 'current',
@@ -408,15 +413,15 @@ test('bootstrap leaderboard seeds voting power tiers when provided', async () =>
   BOOTSTRAP_VP_TIERS.push([42n, 12345n]);
 
   try {
-    const leaderboardState = createStore<LeaderboardState_t>();
-    const leaderboardEpoch = createStore<LeaderboardEpoch_t>();
-    const votingPowerTier = createStore<VotingPowerTier_t>();
-    const nftPartnership = createStore<NFTPartnership_t>();
-    const nftRegistry = createStore<NFTPartnershipRegistryState_t>();
-    const nftConfig = createStore<NFTMultiplierConfig_t>();
-    const lpPoolConfig = createStore<LPPoolConfig_t>();
-    const lpPoolRegistry = createStore<LPPoolRegistry_t>();
-    const leaderboardConfig = createStore<LeaderboardConfig_t>();
+    const leaderboardState = createStore<LeaderboardState>();
+    const leaderboardEpoch = createStore<LeaderboardEpoch>();
+    const votingPowerTier = createStore<VotingPowerTier>();
+    const nftPartnership = createStore<NFTPartnership>();
+    const nftRegistry = createStore<NFTPartnershipRegistryState>();
+    const nftConfig = createStore<NFTMultiplierConfig>();
+    const lpPoolConfig = createStore<LPPoolConfig>();
+    const lpPoolRegistry = createStore<LPPoolRegistry>();
+    const leaderboardConfig = createStore<LeaderboardConfig>();
 
     const context = {
       LeaderboardState: leaderboardState,
@@ -443,7 +448,7 @@ test('bootstrap leaderboard seeds voting power tiers when provided', async () =>
 });
 
 test('recalculateUserTotalVP returns early before dust lock start block', async () => {
-  const stateStore = createStore<UserLeaderboardState_t>();
+  const stateStore = createStore<UserLeaderboardState>();
   const context = { UserLeaderboardState: stateStore } as unknown as handlerContext;
 
   await recalculateUserTotalVP(
@@ -462,12 +467,12 @@ test('recalculateUserTotalVP returns early before dust lock start block', async 
 test('recalculateUserTotalVP caps combined multiplier', async () => {
   const user = '0xuser';
   const tokenId = 1n;
-  const userTokenList = createStore<UserTokenList_t>();
-  const dustLockToken = createStore<DustLockToken_t>();
-  const leaderboardState = createStore<UserLeaderboardState_t>();
-  const vpTiers = createStore<VotingPowerTier_t>();
-  const multiplierSnapshots = createStore<UserMultiplierSnapshot_t>();
-  const vpHistory = createStore<UserVotingPowerHistory_t>();
+  const userTokenList = createStore<UserTokenList>();
+  const dustLockToken = createStore<DustLockToken>();
+  const leaderboardState = createStore<UserLeaderboardState>();
+  const vpTiers = createStore<VotingPowerTier>();
+  const multiplierSnapshots = createStore<UserMultiplierSnapshot>();
+  const vpHistory = createStore<UserVotingPowerHistory>();
 
   userTokenList.set({
     id: user,
@@ -492,6 +497,8 @@ test('recalculateUserTotalVP caps combined multiplier', async () => {
     user_id: user,
     nftCount: 1n,
     nftMultiplier: 50000n,
+    specialEditionCount: 0n,
+    specialEditionMultiplier: 10000n,
     votingPower: 0n,
     vpTierIndex: 0n,
     vpMultiplier: 10000n,
@@ -537,12 +544,12 @@ test('recalculateUserTotalVP caps combined multiplier', async () => {
 
 test('recalculateUserTotalVP skips missing tokens', async () => {
   const user = '0xuser';
-  const userTokenList = createStore<UserTokenList_t>();
-  const dustLockToken = createStore<DustLockToken_t>();
-  const leaderboardState = createStore<UserLeaderboardState_t>();
-  const vpTiers = createStore<VotingPowerTier_t>();
-  const multiplierSnapshots = createStore<UserMultiplierSnapshot_t>();
-  const vpHistory = createStore<UserVotingPowerHistory_t>();
+  const userTokenList = createStore<UserTokenList>();
+  const dustLockToken = createStore<DustLockToken>();
+  const leaderboardState = createStore<UserLeaderboardState>();
+  const vpTiers = createStore<VotingPowerTier>();
+  const multiplierSnapshots = createStore<UserMultiplierSnapshot>();
+  const vpHistory = createStore<UserVotingPowerHistory>();
 
   userTokenList.set({
     id: user,
@@ -577,16 +584,18 @@ test('recalculateUserTotalVP skips missing tokens', async () => {
 test('updateUserVotingPower caps combined multiplier and snapshots', async () => {
   const user = '0xuser';
   const tokenId = 1n;
-  const leaderboardState = createStore<UserLeaderboardState_t>();
-  const vpTiers = createStore<VotingPowerTier_t>();
-  const snapshots = createStore<UserMultiplierSnapshot_t>();
-  const vpHistory = createStore<UserVotingPowerHistory_t>();
+  const leaderboardState = createStore<UserLeaderboardState>();
+  const vpTiers = createStore<VotingPowerTier>();
+  const snapshots = createStore<UserMultiplierSnapshot>();
+  const vpHistory = createStore<UserVotingPowerHistory>();
 
   leaderboardState.set({
     id: user,
     user_id: user,
     nftCount: 0n,
     nftMultiplier: 50000n,
+    specialEditionCount: 0n,
+    specialEditionMultiplier: 10000n,
     votingPower: 0n,
     vpTierIndex: 0n,
     vpMultiplier: 10000n,
@@ -625,9 +634,9 @@ test('updateLifetimePoints keeps existing epoch list', async () => {
   const user = '0xuser';
   const epochNumber = 1n;
   const userPoints = createStore<UserPointsMaybeEpochs>();
-  const userEpochStats = createStore<UserEpochStats_t>();
-  const users = createStore<User_t>();
-  const leaderboardState = createStore<UserLeaderboardState_t>();
+  const userEpochStats = createStore<UserEpochStats>();
+  const users = createStore<User>();
+  const leaderboardState = createStore<UserLeaderboardState>();
   const globalLeaderboardState = createStore<{ id: string; currentEpochNumber: bigint }>();
   const userIndex = createStore<{
     id: string;
@@ -724,9 +733,9 @@ test('updateLifetimePoints initializes epoch list when missing', async () => {
   const user = '0xuser';
   const epochNumber = 2n;
   const userPoints = createStore<UserPointsMaybeEpochs>();
-  const userEpochStats = createStore<UserEpochStats_t>();
-  const users = createStore<User_t>();
-  const leaderboardState = createStore<UserLeaderboardState_t>();
+  const userEpochStats = createStore<UserEpochStats>();
+  const users = createStore<User>();
+  const leaderboardState = createStore<UserLeaderboardState>();
   const globalLeaderboardState = createStore<{ id: string; currentEpochNumber: bigint }>();
   const userIndex = createStore<{
     id: string;
@@ -811,10 +820,10 @@ test('updateLifetimePoints initializes epoch list when missing', async () => {
 
 test('multiplier helpers cap and apply correctly', async () => {
   const userId = '0x000000000000000000000000000000000000babe';
-  const userStateStore = createStore<UserLeaderboardState_t>();
-  const userTokenListStore = createStore<UserTokenList_t>();
-  const dustLockStore = createStore<DustLockToken_t>();
-  const vpTierStore = createStore<VotingPowerTier_t>();
+  const userStateStore = createStore<UserLeaderboardState>();
+  const userTokenListStore = createStore<UserTokenList>();
+  const dustLockStore = createStore<DustLockToken>();
+  const vpTierStore = createStore<VotingPowerTier>();
 
   userTokenListStore.set({
     id: userId,
@@ -862,8 +871,8 @@ test('computeTotalPointsWithMultiplier applies testnet bonus', () => {
 });
 
 test('applyScheduledEpochTransitions covers end/start block fallbacks', async () => {
-  const leaderboardState = createStore<LeaderboardState_t>();
-  const leaderboardEpoch = createStore<LeaderboardEpoch_t>();
+  const leaderboardState = createStore<LeaderboardState>();
+  const leaderboardEpoch = createStore<LeaderboardEpoch>();
   const context = {
     LeaderboardState: leaderboardState,
     LeaderboardEpoch: leaderboardEpoch,
@@ -905,8 +914,8 @@ test('applyScheduledEpochTransitions covers end/start block fallbacks', async ()
 });
 
 test('applyScheduledEpochTransitions starts next epoch when scheduled', async () => {
-  const leaderboardState = createStore<LeaderboardState_t>();
-  const leaderboardEpoch = createStore<LeaderboardEpoch_t>();
+  const leaderboardState = createStore<LeaderboardState>();
+  const leaderboardEpoch = createStore<LeaderboardEpoch>();
   const context = {
     LeaderboardState: leaderboardState,
     LeaderboardEpoch: leaderboardEpoch,
@@ -948,8 +957,8 @@ test('applyScheduledEpochTransitions starts next epoch when scheduled', async ()
 });
 
 test('applyScheduledEpochTransitions starts first epoch from inactive state', async () => {
-  const leaderboardState = createStore<LeaderboardState_t>();
-  const leaderboardEpoch = createStore<LeaderboardEpoch_t>();
+  const leaderboardState = createStore<LeaderboardState>();
+  const leaderboardEpoch = createStore<LeaderboardEpoch>();
   const context = {
     LeaderboardState: leaderboardState,
     LeaderboardEpoch: leaderboardEpoch,
@@ -979,8 +988,8 @@ test('applyScheduledEpochTransitions starts first epoch from inactive state', as
 });
 
 test('applyScheduledEpochTransitions ends epoch with defined endTime and missing block number', async () => {
-  const leaderboardState = createStore<LeaderboardState_t>();
-  const leaderboardEpoch = createStore<LeaderboardEpoch_t>();
+  const leaderboardState = createStore<LeaderboardState>();
+  const leaderboardEpoch = createStore<LeaderboardEpoch>();
   const context = {
     LeaderboardState: leaderboardState,
     LeaderboardEpoch: leaderboardEpoch,
@@ -1012,8 +1021,8 @@ test('applyScheduledEpochTransitions ends epoch with defined endTime and missing
 });
 
 test('applyScheduledEpochTransitions starts next epoch using existing endBlock', async () => {
-  const leaderboardState = createStore<LeaderboardState_t>();
-  const leaderboardEpoch = createStore<LeaderboardEpoch_t>();
+  const leaderboardState = createStore<LeaderboardState>();
+  const leaderboardEpoch = createStore<LeaderboardEpoch>();
   const context = {
     LeaderboardState: leaderboardState,
     LeaderboardEpoch: leaderboardEpoch,
@@ -1058,8 +1067,8 @@ test('applyScheduledEpochTransitions starts next epoch using existing endBlock',
 });
 
 test('applyScheduledEpochTransitions starts next epoch without endBlock when block number missing', async () => {
-  const leaderboardState = createStore<LeaderboardState_t>();
-  const leaderboardEpoch = createStore<LeaderboardEpoch_t>();
+  const leaderboardState = createStore<LeaderboardState>();
+  const leaderboardEpoch = createStore<LeaderboardEpoch>();
   const context = {
     LeaderboardState: leaderboardState,
     LeaderboardEpoch: leaderboardEpoch,
@@ -1101,8 +1110,8 @@ test('applyScheduledEpochTransitions starts next epoch without endBlock when blo
 });
 
 test('applyScheduledEpochTransitions skips when scheduled start is missing', async () => {
-  const leaderboardState = createStore<LeaderboardState_t>();
-  const leaderboardEpoch = createStore<LeaderboardEpoch_t>();
+  const leaderboardState = createStore<LeaderboardState>();
+  const leaderboardEpoch = createStore<LeaderboardEpoch>();
   const context = {
     LeaderboardState: leaderboardState,
     LeaderboardEpoch: leaderboardEpoch,
@@ -1132,8 +1141,8 @@ test('applyScheduledEpochTransitions skips when scheduled start is missing', asy
 });
 
 test('applyScheduledEpochTransitions uses startTime fallback without block number', async () => {
-  const leaderboardState = createStore<LeaderboardState_t>();
-  const leaderboardEpoch = createStore<LeaderboardEpoch_t>();
+  const leaderboardState = createStore<LeaderboardState>();
+  const leaderboardEpoch = createStore<LeaderboardEpoch>();
   const context = {
     LeaderboardState: leaderboardState,
     LeaderboardEpoch: leaderboardEpoch,
@@ -1164,8 +1173,8 @@ test('applyScheduledEpochTransitions uses startTime fallback without block numbe
 });
 
 test('applyScheduledEpochTransitions skips when scheduled end is missing', async () => {
-  const leaderboardState = createStore<LeaderboardState_t>();
-  const leaderboardEpoch = createStore<LeaderboardEpoch_t>();
+  const leaderboardState = createStore<LeaderboardState>();
+  const leaderboardEpoch = createStore<LeaderboardEpoch>();
   const context = {
     LeaderboardState: leaderboardState,
     LeaderboardEpoch: leaderboardEpoch,
@@ -1195,8 +1204,8 @@ test('applyScheduledEpochTransitions skips when scheduled end is missing', async
 });
 
 test('applyScheduledEpochTransitions uses fallback when next epoch startBlock is undefined', async () => {
-  const leaderboardState = createStore<LeaderboardState_t>();
-  const leaderboardEpoch = createStore<LeaderboardEpoch_t>();
+  const leaderboardState = createStore<LeaderboardState>();
+  const leaderboardEpoch = createStore<LeaderboardEpoch>();
   const context = {
     LeaderboardState: leaderboardState,
     LeaderboardEpoch: leaderboardEpoch,
@@ -1281,12 +1290,12 @@ test('average token voting power covers edge cases', async () => {
 });
 
 test('average combined multiplier caps at maximum', async () => {
-  const userState = createStore<UserLeaderboardState_t>();
-  const userTokenList = createStore<UserTokenList_t>();
-  const dustLockToken = createStore<DustLockToken_t>();
-  const votingPowerTier = createStore<VotingPowerTier_t>();
-  const nftMultiplierConfig = createStore<NFTMultiplierConfig_t>();
-  const registryState = createStore<NFTPartnershipRegistryState_t>();
+  const userState = createStore<UserLeaderboardState>();
+  const userTokenList = createStore<UserTokenList>();
+  const dustLockToken = createStore<DustLockToken>();
+  const votingPowerTier = createStore<VotingPowerTier>();
+  const nftMultiplierConfig = createStore<NFTMultiplierConfig>();
+  const registryState = createStore<NFTPartnershipRegistryState>();
   const context = {
     UserLeaderboardState: userState,
     UserTokenList: userTokenList,
@@ -1309,6 +1318,8 @@ test('average combined multiplier caps at maximum', async () => {
     user_id: '0xuser',
     nftCount: 1n,
     nftMultiplier: 50000n, // Will be recalculated to 50000 (10000 + 40000)
+    specialEditionCount: 0n,
+    specialEditionMultiplier: 10000n,
     votingPower: 0n,
     vpTierIndex: 0n,
     vpMultiplier: 10000n,
@@ -1351,12 +1362,118 @@ test('average combined multiplier caps at maximum', async () => {
   assert.equal(combined, 100000n); // MAX_COMBINED_MULTIPLIER is 10x
 });
 
+test('average combined multiplier segments special-edition changes before composing with vp tier', async () => {
+  const userState = createStore<UserLeaderboardState>();
+  const userTokenList = createStore<UserTokenList>();
+  const dustLockToken = createStore<DustLockToken>();
+  const votingPowerTier = createStore<VotingPowerTier>();
+  const registryState = createStore<NFTPartnershipRegistryState>();
+  const specialRegistryState = createStore<SpecialEditionRegistryState>();
+  const specialConfig = createStore<SpecialEditionConfig>();
+  const userSpecialEditionState = createStore<UserSpecialEditionState>();
+  const context = {
+    UserLeaderboardState: userState,
+    UserTokenList: userTokenList,
+    DustLockToken: dustLockToken,
+    VotingPowerTier: votingPowerTier,
+    NFTPartnershipRegistryState: registryState,
+    SpecialEditionRegistryState: specialRegistryState,
+    SpecialEditionConfig: specialConfig,
+    UserSpecialEditionState: userSpecialEditionState,
+  } as unknown as handlerContext;
+
+  userState.set({
+    id: '0xuser',
+    user_id: '0xuser',
+    nftCount: 0n,
+    nftMultiplier: 10000n,
+    specialEditionCount: 1n,
+    specialEditionMultiplier: 30000n,
+    votingPower: 0n,
+    vpTierIndex: 0n,
+    vpMultiplier: 10000n,
+    combinedMultiplier: 10000n,
+    totalEpochsParticipated: 0n,
+    lifetimePoints: 0n,
+    currentEpochId: undefined,
+    currentEpochRank: undefined,
+    lastUpdate: 0,
+  });
+  userTokenList.set({
+    id: '0xuser',
+    user_id: '0xuser',
+    tokenIds: [1n],
+    lastUpdate: 0,
+  });
+  dustLockToken.set({
+    id: '1',
+    owner: '0xuser',
+    lockedAmount: MAX_LOCK_TIME * 100n,
+    end: 100,
+    isPermanent: false,
+    createdAt: 0,
+    updatedAt: 0,
+    lastDepositType: undefined,
+    selfRepayEnabled: false,
+    rewardReceiver: undefined,
+  });
+  votingPowerTier.set({
+    id: '0',
+    tierIndex: 0n,
+    minVotingPower: 0n,
+    multiplierBps: 10000n,
+    createdAt: 0,
+    lastUpdate: 0,
+    isActive: true,
+  });
+  votingPowerTier.set({
+    id: '1',
+    tierIndex: 1n,
+    minVotingPower: 6000n,
+    multiplierBps: 20000n,
+    createdAt: 0,
+    lastUpdate: 0,
+    isActive: true,
+  });
+  specialRegistryState.set({
+    id: 'current',
+    editionIds: [1n],
+    lastUpdate: 50,
+  });
+  specialConfig.set({
+    id: '1',
+    editionId: 1n,
+    key: 'SHINY',
+    name: 'Shiny',
+    perTokenBoostBps: 20000n,
+    enabled: true,
+    exists: true,
+    createdAt: 0,
+    updatedAt: 50,
+    changeTimestamps: [0],
+    boostBpsHistory: [20000n],
+    enabledHistory: [1n],
+  });
+  userSpecialEditionState.set({
+    id: '0xuser:1',
+    user_id: '0xuser',
+    editionId: 1n,
+    tokenCount: 1n,
+    countTimestamps: [0, 50],
+    tokenCountHistory: [0n, 1n],
+    updatedAt: 50,
+  });
+
+  const combined = await calculateAverageCombinedMultiplierBps(context, '0xuser', 0, 100);
+  assert.equal(combined, 25000n);
+});
+
 test('average combined multiplier uses current vp when end before start', async () => {
-  const userState = createStore<UserLeaderboardState_t>();
-  const userTokenList = createStore<UserTokenList_t>();
-  const dustLockToken = createStore<DustLockToken_t>();
-  const votingPowerTier = createStore<VotingPowerTier_t>();
-  const registryState = createStore<NFTPartnershipRegistryState_t>();
+  const userState = createStore<UserLeaderboardState>();
+  const userTokenList = createStore<UserTokenList>();
+  const dustLockToken = createStore<DustLockToken>();
+  const votingPowerTier = createStore<VotingPowerTier>();
+  const registryState = createStore<NFTPartnershipRegistryState>();
   const context = {
     UserLeaderboardState: userState,
     UserTokenList: userTokenList,
@@ -1370,6 +1487,8 @@ test('average combined multiplier uses current vp when end before start', async 
     user_id: '0xuser',
     nftCount: 0n,
     nftMultiplier: 10000n,
+    specialEditionCount: 0n,
+    specialEditionMultiplier: 10000n,
     votingPower: 0n,
     vpTierIndex: 0n,
     vpMultiplier: 10000n,
@@ -1413,11 +1532,11 @@ test('average combined multiplier uses current vp when end before start', async 
 });
 
 test('average combined multiplier skips missing dust lock tokens', async () => {
-  const userState = createStore<UserLeaderboardState_t>();
-  const userTokenList = createStore<UserTokenList_t>();
-  const dustLockToken = createStore<DustLockToken_t>();
-  const votingPowerTier = createStore<VotingPowerTier_t>();
-  const registryState = createStore<NFTPartnershipRegistryState_t>();
+  const userState = createStore<UserLeaderboardState>();
+  const userTokenList = createStore<UserTokenList>();
+  const dustLockToken = createStore<DustLockToken>();
+  const votingPowerTier = createStore<VotingPowerTier>();
+  const registryState = createStore<NFTPartnershipRegistryState>();
   const context = {
     UserLeaderboardState: userState,
     UserTokenList: userTokenList,
@@ -1431,6 +1550,8 @@ test('average combined multiplier skips missing dust lock tokens', async () => {
     user_id: '0xuser',
     nftCount: 0n,
     nftMultiplier: 10000n,
+    specialEditionCount: 0n,
+    specialEditionMultiplier: 10000n,
     votingPower: 0n,
     vpTierIndex: 0n,
     vpMultiplier: 10000n,
@@ -1462,7 +1583,7 @@ test('average combined multiplier skips missing dust lock tokens', async () => {
 });
 
 test('createMultiplierSnapshot defaults log index to zero', async () => {
-  const userMultiplierSnapshot = createStore<UserMultiplierSnapshot_t>();
+  const userMultiplierSnapshot = createStore<UserMultiplierSnapshot>();
   const context = { UserMultiplierSnapshot: userMultiplierSnapshot } as unknown as handlerContext;
 
   createMultiplierSnapshot(
@@ -1471,6 +1592,8 @@ test('createMultiplierSnapshot defaults log index to zero', async () => {
       id: '0xuser',
       nftCount: 0n,
       nftMultiplier: 10000n,
+      specialEditionCount: 0n,
+      specialEditionMultiplier: 10000n,
       votingPower: 0n,
       vpMultiplier: 10000n,
       combinedMultiplier: 10000n,
@@ -1485,7 +1608,7 @@ test('createMultiplierSnapshot defaults log index to zero', async () => {
 });
 
 test('vp tier helpers break on lower tiers', async () => {
-  const votingPowerTier = createStore<VotingPowerTier_t>();
+  const votingPowerTier = createStore<VotingPowerTier>();
   const context = { VotingPowerTier: votingPowerTier } as unknown as handlerContext;
 
   votingPowerTier.set({

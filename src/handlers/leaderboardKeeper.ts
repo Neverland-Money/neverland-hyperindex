@@ -3,11 +3,10 @@
  * VotingPowerSynced, NFTBalanceSynced, LPBalanceSynced, UserSettled
  */
 
-import { LeaderboardKeeper } from '../../generated';
-import type { handlerContext } from '../../generated';
 import {
   calculateNFTMultiplierFromCount,
   calculateVPMultiplier,
+  composeCombinedMultiplierBps,
   findVPTierIndex,
   getOrCreateUserLeaderboardState,
   recordProtocolTransaction,
@@ -15,11 +14,49 @@ import {
 } from './shared';
 import { normalizeAddress } from '../helpers/constants';
 
-const BASIS_POINTS = 10000n;
-const MAX_COMBINED_MULTIPLIER = 100000n;
+import { LeaderboardKeeper } from '../../generated';
+import type { handlerContext } from '../../generated';
 
 function shouldSyncChainStateOnKeeperSettlement(): boolean {
   return process.env.ENVIO_KEEPER_USER_SETTLED_SYNC_CHAIN === 'true';
+}
+
+/**
+ * Backfill optimization gate for keeper `UserSettled`.
+ *
+ * The indexer can't know the live Tide in advance while replaying history, so the operator sets
+ * `ENVIO_LEADERBOARD_LIVE_EPOCH` to the current live epoch number before a backfill. With it set,
+ * a keeper settlement that lands MID-EPOCH (`isActive`) inside a PAST/closed epoch (below the live
+ * one) only re-forces points accrual that each balance-change settlement plus the epoch's gap
+ * settlement already capture — a no-op for the final points — so the heavy reserve sweep is skipped.
+ *
+ * Always kept: GAP-period settlements (`isActive === false`, which finalize the epoch), the live
+ * epoch, and any future epoch. Unset/0 disables the gate (original behavior). The raw
+ * `LeaderboardKeeperUserSettled` event is still recorded regardless.
+ *
+ * CAVEAT: reserve points use the point-in-time combined multiplier sampled at each settlement
+ * (VP points are averaged, so they're unaffected). Because `VotingPowerSynced` does not settle
+ * reserves, skipping keeper settlements can shift reserve points for users whose VP-driven
+ * multiplier changes between their own activity events. Validate against the prod parity check
+ * (scripts/compare-leaderboard-parity.ts) before trusting it on a production index.
+ */
+export function getConfiguredLiveEpoch(): bigint {
+  const raw = process.env.ENVIO_LEADERBOARD_LIVE_EPOCH;
+  if (!raw) return 0n;
+  try {
+    const value = BigInt(raw);
+    return value > 0n ? value : 0n;
+  } catch {
+    return 0n;
+  }
+}
+
+export async function shouldSkipMidEpochKeeperSettle(context: handlerContext): Promise<boolean> {
+  const liveEpoch = getConfiguredLiveEpoch();
+  if (liveEpoch === 0n) return false;
+  const state = await context.LeaderboardState.get('current');
+  if (!state) return false;
+  return state.currentEpochNumber < liveEpoch && state.isActive === true;
 }
 
 async function getOrCreateKeeperState(context: handlerContext, timestamp: number) {
@@ -53,11 +90,11 @@ LeaderboardKeeper.VotingPowerSynced.handler(async ({ event, context }) => {
   const vpMultiplier = await calculateVPMultiplier(context, votingPower);
   const vpTierIndex = await findVPTierIndex(context, votingPower);
   const nftMultiplier = await calculateNFTMultiplierFromCount(context, state.nftCount);
-
-  let combinedMultiplier = (nftMultiplier * vpMultiplier) / BASIS_POINTS;
-  if (combinedMultiplier > MAX_COMBINED_MULTIPLIER) {
-    combinedMultiplier = MAX_COMBINED_MULTIPLIER;
-  }
+  const combinedMultiplier = composeCombinedMultiplierBps(
+    nftMultiplier,
+    state.specialEditionMultiplier,
+    vpMultiplier
+  );
 
   context.UserLeaderboardState.set({
     ...state,
@@ -129,10 +166,11 @@ LeaderboardKeeper.NFTBalanceSynced.handler(async ({ event, context }) => {
     }
 
     const nftMultiplier = await calculateNFTMultiplierFromCount(context, newNftCount);
-    let combinedMultiplier = (nftMultiplier * state.vpMultiplier) / BASIS_POINTS;
-    if (combinedMultiplier > MAX_COMBINED_MULTIPLIER) {
-      combinedMultiplier = MAX_COMBINED_MULTIPLIER;
-    }
+    const combinedMultiplier = composeCombinedMultiplierBps(
+      nftMultiplier,
+      state.specialEditionMultiplier,
+      state.vpMultiplier
+    );
 
     context.UserLeaderboardState.set({
       ...state,
@@ -205,6 +243,24 @@ LeaderboardKeeper.UserSettled.handler(async ({ event, context }) => {
     timestamp,
     txHash: event.transaction.hash,
   });
+
+  // Backfill gate: skip the HEAVY reserve sweep for a mid-epoch keeper settlement
+  // in a closed past epoch — for reserve users that accrual is recaptured by later
+  // balance changes + the gap settlement, so the mid-epoch pass is redundant.
+  //
+  // BUT a pure-VP user (no lending reserves) must still settle here: veDUST events
+  // do not accrue points, so for a closed past epoch the keeper UserSettled is the
+  // ONLY ungated touch that can credit their VP decay tail (e.g. a lock that
+  // decayed in epoch N whose owner had no other event in N — there is no later
+  // balance change to recapture it). The pure-VP path is cheap (empty reserve
+  // loop, no eth_call) and idempotent via the per-(user,epoch) accrual cursor, so
+  // running it even mid-epoch is safe. The raw event above is recorded regardless.
+  if (await shouldSkipMidEpochKeeperSettle(context)) {
+    const userReserveList = await context.UserReserveList.get(userId);
+    const hasReserves = (userReserveList?.reserveIds?.length ?? 0) > 0;
+    if (hasReserves) return; // keep skipping the expensive reserve sweep for reserve users
+    // else fall through and settle the cheap pure-VP path
+  }
 
   const syncChainState = shouldSyncChainStateOnKeeperSettlement();
   await settlePointsForAllReserves(context, userId, timestamp, blockNumber, {

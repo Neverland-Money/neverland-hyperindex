@@ -10,6 +10,20 @@ export const DUST_LOCK_START_BLOCK = 39468872;
 export const LP_V2_CUTOVER_BLOCK = 56436798;
 export const LP_V2_CUTOVER_TIMESTAMP = 1771517877;
 
+// Balancer AutoRange V3 USDC/DUST pool — active LP points source after the
+// UniswapV2 cutover. LP points cut over from the V2 pair to Balancer AutoRange
+// at this block/timestamp.
+export const LP_BALANCER_AUTORANGE_CUTOVER_BLOCK = 78741015;
+export const LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP = 1780444800;
+// A settlement cursor entry is considered stale after this many seconds and is
+// force-settled on the next clockwise sweep.
+export const LP_BALANCER_STALE_SETTLEMENT_SECONDS = 1800;
+// Upper bound on how many LP positions a single Balancer swap will settle, to
+// keep per-event work bounded.
+export const LP_BALANCER_MAX_SETTLEMENTS_PER_SWAP = 50;
+export const BALANCER_AUTORANGE_V3_POOL_ADDRESS = '0x27da8a34579fbc99319af1c1a0f0d51065084576';
+export const BALANCER_VAULT_ADDRESS = '0xba1333333333a1ba1108e8412f11850a5c319ba9';
+
 // Override epoch 1 start time - set to a timestamp to ignore the EpochStart event for epoch 1
 // and use this timestamp instead. Set to 0 to use the on-chain event.
 export const EPOCH_1_START_TIME_OVERRIDE = 1767434400;
@@ -125,6 +139,27 @@ export const KNOWN_GATEWAYS = ['0x800409dbd7157813bb76501c30e04596cc478f25']; //
 
 export function isGatewayAddress(address: string): boolean {
   return KNOWN_GATEWAYS.includes(address.toLowerCase());
+}
+
+// Statically-configured NFT collections: these addresses are listed in
+// config.yaml `networks[].contracts` with a hardcoded address and their own
+// Transfer handler, so they are already indexed under their own contract name.
+// They must NEVER be re-registered as the dynamic `PartnerNFT` contract. Envio
+// keys dynamic registrations by (contractName, address) and does NOT dedupe
+// across contract names, so a live `NFTPartnershipRegistry.PartnershipAdded` for
+// one of these would dispatch each Transfer log to BOTH the static handler AND
+// the PartnerNFT handler, double-applying +1/-1 balance deltas and corrupting
+// nftCount/nftMultiplier. Keep this list in sync with the static NFT entries in
+// config.yaml.
+export const STATIC_NFT_COLLECTION_ADDRESSES = [
+  '0x818030837e8350ba63e64d7dc01a547fa73c8279', // The10kSquad
+  '0xfb5ba4061f5c50b1daa6c067bb2dfb0a8ebf6a8d', // Overnads
+  '0xcabf3c04b90f4fe1b521fcaf4acb25d5df478e52', // LilStars
+  '0xe20c4f8cacdb1854151f3e12144bdc919e608b9b', // RealNads
+];
+
+export function isStaticNftCollection(address: string): boolean {
+  return STATIC_NFT_COLLECTION_ADDRESSES.includes(address.toLowerCase());
 }
 
 // Aave V3 Protocol Identifiers (bytes32)

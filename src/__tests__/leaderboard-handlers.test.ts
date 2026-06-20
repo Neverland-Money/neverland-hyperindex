@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 
+import { TestHelpers } from './v3-test-helpers';
+
 import { installViemMock } from './viem-mock';
 
 process.env.ENVIO_ENABLE_EXTERNAL_CALLS = 'false';
@@ -21,6 +23,7 @@ const ADDRESSES = {
 };
 
 function loadTestHelpers() {
+  return TestHelpers;
   const cwd = process.cwd();
   const distTestRoot = path.join(cwd, 'dist-test');
   const generatedLink = path.join(distTestRoot, 'generated');
@@ -211,6 +214,8 @@ test('epochs and config updates apply leaderboard changes', async () => {
     user_id: ADDRESSES.user,
     nftCount: 1n,
     nftMultiplier: 50000n,
+    specialEditionCount: 0n,
+    specialEditionMultiplier: 10000n,
     votingPower: 0n,
     vpTierIndex: 0n,
     vpMultiplier: 10000n,
@@ -230,21 +235,6 @@ test('epochs and config updates apply leaderboard changes', async () => {
     lastUpdate: 0,
     isActive: true,
   });
-  mockDb = mockDb.entities.TopK.set({
-    id: 'epoch:2',
-    epochNumber: 2n,
-    k: 100,
-    entries: ['stale'],
-    updatedAt: 0,
-  });
-  mockDb = mockDb.entities.TopK.set({
-    id: 'global',
-    epochNumber: 2n,
-    k: 100,
-    entries: ['global:stale'],
-    updatedAt: 0,
-  });
-
   const pointsAwarded = TestHelpers.LeaderboardConfig.PointsAwarded.createMockEvent({
     user: ADDRESSES.user,
     points: 100n * 10n ** 18n,
@@ -347,7 +337,7 @@ test('lp pool config handlers register pools and rates', async () => {
 
     const poolConfig = mockDb.entities.LPPoolConfig.get(pool.toLowerCase());
     assert.ok(poolConfig);
-    assert.equal(poolConfig?.fee, 3000);
+    assert.equal(poolConfig?.fee, undefined);
     assert.equal(poolConfig?.lpRateBps, 2000n);
 
     const registry = mockDb.entities.LPPoolRegistry.get('global');
@@ -748,114 +738,6 @@ test('negative points normalize to zero', async () => {
   assert.equal(updatedIndex?.points, 0);
 });
 
-test('topK sorts tied points by user id', async () => {
-  const TestHelpers = loadTestHelpers();
-  let mockDb = TestHelpers.MockDb.createMockDb();
-  const eventData = createEventDataFactory();
-
-  mockDb = mockDb.entities.LeaderboardState.set({
-    id: 'current',
-    currentEpochNumber: 1n,
-    isActive: true,
-  });
-  mockDb = mockDb.entities.LeaderboardEpoch.set({
-    id: '1',
-    epochNumber: 1n,
-    startBlock: 1n,
-    startTime: 100,
-    endBlock: undefined,
-    endTime: undefined,
-    isActive: true,
-    duration: undefined,
-    scheduledStartTime: 0,
-    scheduledEndTime: 0,
-  });
-
-  const pointsA = TestHelpers.LeaderboardConfig.PointsAwarded.createMockEvent({
-    user: ADDRESSES.user,
-    points: 10n * 10n ** 18n,
-    reason: 'tie',
-    timestamp: 800n,
-    ...eventData(32, 800, ADDRESSES.config),
-  });
-  mockDb = await TestHelpers.LeaderboardConfig.PointsAwarded.processEvent({
-    event: pointsA,
-    mockDb,
-  });
-
-  const pointsB = TestHelpers.LeaderboardConfig.PointsAwarded.createMockEvent({
-    user: ADDRESSES.userTwo,
-    points: 10n * 10n ** 18n,
-    reason: 'tie',
-    timestamp: 810n,
-    ...eventData(33, 810, ADDRESSES.config),
-  });
-  mockDb = await TestHelpers.LeaderboardConfig.PointsAwarded.processEvent({
-    event: pointsB,
-    mockDb,
-  });
-
-  const topK = mockDb.entities.TopK.get('epoch:1');
-  assert.ok(topK);
-  const firstEntry = mockDb.entities.TopKEntry.get(topK?.entries[0] || '');
-  const secondEntry = mockDb.entities.TopKEntry.get(topK?.entries[1] || '');
-  assert.ok(firstEntry);
-  assert.ok(secondEntry);
-  assert.ok(firstEntry?.userId < secondEntry?.userId);
-});
-
-test('topK sorts higher points first', async () => {
-  const TestHelpers = loadTestHelpers();
-  let mockDb = TestHelpers.MockDb.createMockDb();
-  const eventData = createEventDataFactory();
-
-  mockDb = mockDb.entities.LeaderboardState.set({
-    id: 'current',
-    currentEpochNumber: 1n,
-    isActive: true,
-  });
-  mockDb = mockDb.entities.LeaderboardEpoch.set({
-    id: '1',
-    epochNumber: 1n,
-    startBlock: 1n,
-    startTime: 100,
-    endBlock: undefined,
-    endTime: undefined,
-    isActive: true,
-    duration: undefined,
-    scheduledStartTime: 0,
-    scheduledEndTime: 0,
-  });
-
-  const pointsHigh = TestHelpers.LeaderboardConfig.PointsAwarded.createMockEvent({
-    user: ADDRESSES.user,
-    points: 20n * 10n ** 18n,
-    reason: 'rank',
-    timestamp: 900n,
-    ...eventData(34, 900, ADDRESSES.config),
-  });
-  mockDb = await TestHelpers.LeaderboardConfig.PointsAwarded.processEvent({
-    event: pointsHigh,
-    mockDb,
-  });
-
-  const pointsLow = TestHelpers.LeaderboardConfig.PointsAwarded.createMockEvent({
-    user: ADDRESSES.userTwo,
-    points: 10n * 10n ** 18n,
-    reason: 'rank',
-    timestamp: 910n,
-    ...eventData(35, 910, ADDRESSES.config),
-  });
-  mockDb = await TestHelpers.LeaderboardConfig.PointsAwarded.processEvent({
-    event: pointsLow,
-    mockDb,
-  });
-
-  const topK = mockDb.entities.TopK.get('epoch:1');
-  const firstEntry = mockDb.entities.TopKEntry.get(topK?.entries[0] || '');
-  assert.equal(firstEntry?.userId, ADDRESSES.user);
-});
-
 test('voting power tier events update tiers', async () => {
   const TestHelpers = loadTestHelpers();
   let mockDb = TestHelpers.MockDb.createMockDb();
@@ -917,38 +799,6 @@ test('blacklisted users are removed from leaderboard lists', async () => {
     duration: undefined,
     scheduledStartTime: 0,
     scheduledEndTime: 0,
-  });
-
-  const entryId = `epoch:1:${ADDRESSES.user}`;
-  mockDb = mockDb.entities.TopKEntry.set({
-    id: entryId,
-    epochNumber: 1n,
-    userId: ADDRESSES.user,
-    points: 10,
-    rank: 1,
-  });
-  mockDb = mockDb.entities.TopK.set({
-    id: 'epoch:1',
-    epochNumber: 1n,
-    k: 100,
-    entries: [entryId],
-    updatedAt: 0,
-  });
-
-  const globalEntryId = `global:${ADDRESSES.user}`;
-  mockDb = mockDb.entities.TopKEntry.set({
-    id: globalEntryId,
-    epochNumber: 1n,
-    userId: ADDRESSES.user,
-    points: 10,
-    rank: 1,
-  });
-  mockDb = mockDb.entities.TopK.set({
-    id: 'global',
-    epochNumber: 1n,
-    k: 100,
-    entries: [globalEntryId],
-    updatedAt: 0,
   });
 
   mockDb = mockDb.entities.ScoreBucket.set({
@@ -1014,8 +864,6 @@ test('blacklisted users are removed from leaderboard lists', async () => {
 
   assert.equal(mockDb.entities.UserIndex.get(`${ADDRESSES.user}:1`), undefined);
   assert.equal(mockDb.entities.UserIndex.get(ADDRESSES.user), undefined);
-  assert.equal(mockDb.entities.TopKEntry.get(entryId), undefined);
-  assert.equal(mockDb.entities.TopKEntry.get(globalEntryId), undefined);
 
   const bucket = mockDb.entities.ScoreBucket.get('epoch:1:b:3');
   assert.equal(bucket?.count, 0);

@@ -2,14 +2,13 @@
  * DustLock (veNFT) Event Handlers
  */
 
-import type { handlerContext } from '../../generated';
-import { DustLock } from '../../generated';
 import {
   recalculateUserTotalVP,
   recordProtocolTransaction,
   getOrCreateUser,
   updateUserTokenList,
   updateUserVotingPower,
+  settlePointsForAllReserves,
 } from './shared';
 import {
   DUST_LOCK_START_BLOCK,
@@ -17,9 +16,40 @@ import {
   ZERO_ADDRESS,
   normalizeAddress,
 } from '../helpers/constants';
+import { handleDustLockSpecialEditionTransfer } from './specialEditions';
+
+import { DustLock } from '../../generated';
+import type { handlerContext } from '../../generated';
 
 function shouldUpdateVotingPower(blockNumber: number): boolean {
   return blockNumber >= DUST_LOCK_START_BLOCK;
+}
+
+// Self-settle a VP owner's accrued points BEFORE we mutate their lock for this
+// event. Settling first lets the time-integral award the OLD (pre-mutate) VP
+// slope up to `timestamp` — including the slope all the way down to 0 on a full
+// withdraw or a fully-decayed lock. CRITICAL: never gate this on instantaneous
+// VP (a "VP == 0 now" check would drop the legitimate decay tail); always settle
+// before the lock write and let `calculateAverageVPFromStorage` decide.
+//
+// veDUST state changes do not otherwise trigger point accrual, so without this a
+// pure-VP user only accrues when the keeper settles them — which the backfill
+// gate (ENVIO_LEADERBOARD_LIVE_EPOCH) skips for closed past epochs. Cheap for
+// pure-VP users (empty reserve loop, no eth_call) and idempotent: the monotonic
+// per-(user,epoch) `lastVPAccrualTimestamp` cursor makes repeat settles no-ops.
+async function settleVpOwnerBeforeMutate(
+  context: handlerContext,
+  owner: string | undefined,
+  timestamp: number,
+  blockNumber: bigint
+): Promise<void> {
+  if (!owner || owner === '' || owner === ZERO_ADDRESS) return;
+  if (Number(blockNumber) < DUST_LOCK_START_BLOCK) return;
+  await settlePointsForAllReserves(context, owner, timestamp, blockNumber, {
+    ignoreCooldown: true,
+    skipNftSync: true,
+    skipLPChainSync: true,
+  });
 }
 
 const SECONDS_PER_WEEK = 7 * 24 * 60 * 60;
@@ -63,6 +93,15 @@ DustLock.Deposit.handler(async ({ event, context }) => {
   const depositType = event.params.depositType.toString();
 
   const token = await getOrInitDustLockToken(context, tokenId, Number(event.block.timestamp));
+
+  // Settle the owner's accrued VP on the OLD amount before increasing it.
+  await settleVpOwnerBeforeMutate(
+    context,
+    token.owner,
+    Number(event.block.timestamp),
+    BigInt(event.block.number)
+  );
+
   const lockedAmount = token.lockedAmount + event.params.value;
   const locktime = Number(event.params.locktime);
 
@@ -125,6 +164,16 @@ DustLock.Withdraw.handler(async ({ event, context }) => {
   });
 
   const token = await getOrInitDustLockToken(context, tokenId, Number(event.block.timestamp));
+
+  // Settle the owner's accrued VP (the decaying slope, possibly to 0) before the
+  // lock is drained — otherwise the integral would see the zeroed amount.
+  await settleVpOwnerBeforeMutate(
+    context,
+    token.owner,
+    Number(event.block.timestamp),
+    BigInt(event.block.number)
+  );
+
   const newAmount =
     token.lockedAmount > event.params.value ? token.lockedAmount - event.params.value : 0n;
 
@@ -174,6 +223,15 @@ DustLock.EarlyWithdraw.handler(async ({ event, context }) => {
   });
 
   const token = await getOrInitDustLockToken(context, tokenId, Number(event.block.timestamp));
+
+  // Settle the owner's accrued VP slope before the lock is drained.
+  await settleVpOwnerBeforeMutate(
+    context,
+    token.owner,
+    Number(event.block.timestamp),
+    BigInt(event.block.number)
+  );
+
   const newAmount =
     token.lockedAmount > event.params.value ? token.lockedAmount - event.params.value : 0n;
 
@@ -209,6 +267,15 @@ DustLock.LockPermanent.handler(async ({ event, context }) => {
   const id = `${event.transaction.hash}-${event.logIndex}`;
 
   const token = await getOrInitDustLockToken(context, tokenId, Number(event.block.timestamp));
+
+  // Settle the decaying-slope era before VP becomes a flat permanent value.
+  await settleVpOwnerBeforeMutate(
+    context,
+    token.owner,
+    Number(event.block.timestamp),
+    BigInt(event.block.number)
+  );
+
   context.DustLockToken.set({
     ...token,
     isPermanent: true,
@@ -254,6 +321,15 @@ DustLock.UnlockPermanent.handler(async ({ event, context }) => {
     Math.floor((unlockTimestamp + Number(MAX_LOCK_TIME)) / SECONDS_PER_WEEK) * SECONDS_PER_WEEK;
 
   const token = await getOrInitDustLockToken(context, tokenId, Number(event.block.timestamp));
+
+  // Settle the flat permanent-VP era before decay resumes from the new end.
+  await settleVpOwnerBeforeMutate(
+    context,
+    token.owner,
+    Number(event.block.timestamp),
+    BigInt(event.block.number)
+  );
+
   context.DustLockToken.set({
     ...token,
     isPermanent: false,
@@ -331,6 +407,16 @@ DustLock.Merge.handler(async ({ event, context }) => {
     event.params.to.toString(),
     Number(event.block.timestamp)
   );
+
+  // Settle the surviving token's owner before its amount/end change. The burned
+  // `from` token's owner is settled by the paired Transfer(->0x0) it emits.
+  await settleVpOwnerBeforeMutate(
+    context,
+    toToken.owner,
+    Number(event.block.timestamp),
+    BigInt(event.block.number)
+  );
+
   context.DustLockToken.set({
     ...toToken,
     lockedAmount: event.params.amountFinal,
@@ -385,6 +471,16 @@ DustLock.Split.handler(async ({ event, context }) => {
     event.params.tokenId1.toString(),
     Number(event.block.timestamp)
   );
+
+  // Settle the source owner once before the split rewrites the position. Both new
+  // tokens share this owner, so a single settle covers the whole position.
+  await settleVpOwnerBeforeMutate(
+    context,
+    token1.owner,
+    Number(event.block.timestamp),
+    BigInt(event.block.number)
+  );
+
   context.DustLockToken.set({
     ...token1,
     lockedAmount: event.params.splitAmount1,
@@ -428,8 +524,29 @@ DustLock.Transfer.handler(async ({ event, context }) => {
   const tokenId = event.params.tokenId.toString();
   const from = normalizeAddress(event.params.from);
   const to = normalizeAddress(event.params.to);
+  const timestamp = Number(event.block.timestamp);
+  const blockNumber = BigInt(event.block.number);
 
-  const token = await getOrInitDustLockToken(context, tokenId, Number(event.block.timestamp));
+  // Settle BOTH parties before the token moves. `from` is settled while the token
+  // still counts in their list — capturing the outgoing decay slope (including to
+  // 0 on a burn). `to` is settled before the token is added to their list, so it
+  // accrues 0 for the just-received token (its accrual starts now). The helper
+  // no-ops for the zero address.
+  await settleVpOwnerBeforeMutate(context, from, timestamp, blockNumber);
+  await settleVpOwnerBeforeMutate(context, to, timestamp, blockNumber);
+
+  await handleDustLockSpecialEditionTransfer(
+    context,
+    event.params.tokenId,
+    from,
+    to,
+    timestamp,
+    blockNumber,
+    event.transaction.hash,
+    Number(event.logIndex)
+  );
+
+  const token = await getOrInitDustLockToken(context, tokenId, timestamp);
   const isBurn = to === ZERO_ADDRESS;
   context.DustLockToken.set({
     ...token,
@@ -437,26 +554,14 @@ DustLock.Transfer.handler(async ({ event, context }) => {
     lockedAmount: isBurn ? 0n : token.lockedAmount,
     end: isBurn ? 0 : token.end,
     isPermanent: isBurn ? false : token.isPermanent,
-    updatedAt: Number(event.block.timestamp),
+    updatedAt: timestamp,
   });
 
   if (from !== ZERO_ADDRESS) {
-    await updateUserTokenList(
-      context,
-      from,
-      event.params.tokenId,
-      Number(event.block.timestamp),
-      'remove'
-    );
+    await updateUserTokenList(context, from, event.params.tokenId, timestamp, 'remove');
   }
   if (to !== ZERO_ADDRESS) {
-    await updateUserTokenList(
-      context,
-      to,
-      event.params.tokenId,
-      Number(event.block.timestamp),
-      'add'
-    );
+    await updateUserTokenList(context, to, event.params.tokenId, timestamp, 'add');
   }
 
   if (from !== ZERO_ADDRESS) {
@@ -471,22 +576,22 @@ DustLock.Transfer.handler(async ({ event, context }) => {
       await recalculateUserTotalVP(
         context,
         from,
-        Number(event.block.timestamp),
+        timestamp,
         event.transaction.hash,
         'TRANSFER_OUT',
         Number(event.logIndex),
-        BigInt(event.block.number)
+        blockNumber
       );
     }
     if (to !== ZERO_ADDRESS) {
       await recalculateUserTotalVP(
         context,
         to,
-        Number(event.block.timestamp),
+        timestamp,
         event.transaction.hash,
         'TRANSFER_IN',
         Number(event.logIndex),
-        BigInt(event.block.number)
+        blockNumber
       );
     }
   }

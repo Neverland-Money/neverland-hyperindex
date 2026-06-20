@@ -18,6 +18,7 @@
     "test:coverage": "npm run test:build && c8 --reporter=text --reporter=lcov --reporter=html node --test dist-test/src/__tests__/*.test.js",
     "test:coverage:check": "npm run test:coverage -- --check-coverage --lines 100 --functions 100 --branches 100 --statements 100",
     "type-check": "envio codegen && tsc --noEmit",
+    "check:special-edition-config": "tsx scripts/check-special-edition-config.ts",
     "prepare": "husky",
     "prod:deploy": "./deploy.sh",
     "prod:up": "docker compose -f docker-compose.prod.yml up -d",

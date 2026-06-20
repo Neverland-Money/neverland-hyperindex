@@ -3,12 +3,6 @@
  * EpochManager, LeaderboardConfig, VotingPowerMultiplier
  */
 
-import type { handlerContext } from '../../generated';
-import {
-  EpochManager,
-  LeaderboardConfig as LeaderboardConfigContract,
-  VotingPowerMultiplier,
-} from '../../generated';
 import {
   addTierToIndex,
   computeTotalPointsWithMultiplier,
@@ -18,7 +12,6 @@ import {
   recordProtocolTransaction,
   refreshUserVotingPowerState,
   removeTierFromIndex,
-  shouldUseEthCalls,
   touchTierIndex,
   updateLifetimePoints,
   writeLeaderboardConfig,
@@ -29,9 +22,12 @@ import {
   normalizeAddress,
   EPOCH_1_START_TIME_OVERRIDE,
   BOOTSTRAP_CONFIG,
+  BALANCER_AUTORANGE_V3_POOL_ADDRESS,
 } from '../helpers/constants';
-import { readPoolFee } from '../helpers/viem';
 import './lp';
+
+import { EpochManager, LeaderboardConfig, VotingPowerMultiplier } from '../../generated';
+import type { handlerContext } from '../../generated';
 
 async function getOrInitLeaderboardConfig(context: handlerContext, timestamp: number) {
   let config = await context.LeaderboardConfig.get('global');
@@ -164,7 +160,7 @@ EpochManager.EpochEnd.handler(async ({ event, context }) => {
 // LeaderboardConfig Handlers
 // ============================================
 
-LeaderboardConfigContract.ConfigSnapshot.handler(async ({ event, context }) => {
+LeaderboardConfig.ConfigSnapshot.handler(async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -209,7 +205,7 @@ LeaderboardConfigContract.ConfigSnapshot.handler(async ({ event, context }) => {
   });
 });
 
-LeaderboardConfigContract.DepositRateUpdated.handler(async ({ event, context }) => {
+LeaderboardConfig.DepositRateUpdated.handler(async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -226,7 +222,7 @@ LeaderboardConfigContract.DepositRateUpdated.handler(async ({ event, context }) 
   });
 });
 
-LeaderboardConfigContract.BorrowRateUpdated.handler(async ({ event, context }) => {
+LeaderboardConfig.BorrowRateUpdated.handler(async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -243,7 +239,7 @@ LeaderboardConfigContract.BorrowRateUpdated.handler(async ({ event, context }) =
   });
 });
 
-LeaderboardConfigContract.VpRateUpdated.handler(async ({ event, context }) => {
+LeaderboardConfig.VpRateUpdated.handler(async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -260,7 +256,7 @@ LeaderboardConfigContract.VpRateUpdated.handler(async ({ event, context }) => {
   });
 });
 
-LeaderboardConfigContract.DailyBonusUpdated.handler(async ({ event, context }) => {
+LeaderboardConfig.DailyBonusUpdated.handler(async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -281,7 +277,7 @@ LeaderboardConfigContract.DailyBonusUpdated.handler(async ({ event, context }) =
   });
 });
 
-LeaderboardConfigContract.CooldownUpdated.handler(async ({ event, context }) => {
+LeaderboardConfig.CooldownUpdated.handler(async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -298,7 +294,7 @@ LeaderboardConfigContract.CooldownUpdated.handler(async ({ event, context }) => 
   });
 });
 
-LeaderboardConfigContract.MinDailyBonusUsdUpdated.handler(async ({ event, context }) => {
+LeaderboardConfig.MinDailyBonusUsdUpdated.handler(async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -315,7 +311,7 @@ LeaderboardConfigContract.MinDailyBonusUsdUpdated.handler(async ({ event, contex
   });
 });
 
-LeaderboardConfigContract.AddressBlacklisted.handler(async ({ event, context }) => {
+LeaderboardConfig.AddressBlacklisted.handler(async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -336,7 +332,7 @@ LeaderboardConfigContract.AddressBlacklisted.handler(async ({ event, context }) 
   await removeUserFromLeaderboards(context, userId, timestamp);
 });
 
-LeaderboardConfigContract.AddressUnblacklisted.handler(async ({ event, context }) => {
+LeaderboardConfig.AddressUnblacklisted.handler(async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -354,7 +350,7 @@ LeaderboardConfigContract.AddressUnblacklisted.handler(async ({ event, context }
   });
 });
 
-LeaderboardConfigContract.PointsAwarded.handler(async ({ event, context }) => {
+LeaderboardConfig.PointsAwarded.handler(async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -443,7 +439,7 @@ LeaderboardConfigContract.PointsAwarded.handler(async ({ event, context }) => {
   await updateLeaderboard(context, userId, finalPoints, Number(event.params.timestamp));
 });
 
-LeaderboardConfigContract.PointsRemoved.handler(async ({ event, context }) => {
+LeaderboardConfig.PointsRemoved.handler(async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -605,9 +601,13 @@ VotingPowerMultiplier.TierRemoved.handler(async ({ event, context }) => {
 // LP Pool Config Handlers
 // ============================================
 
-LeaderboardConfigContract.LPPoolConfigured.contractRegister(({ event, context }) => {
+LeaderboardConfig.LPPoolConfigured.contractRegister(async ({ event, context }) => {
   const pool = normalizeAddress(event.params.pool);
   const positionManager = normalizeAddress(event.params.positionManager);
+  if (pool === normalizeAddress(BALANCER_AUTORANGE_V3_POOL_ADDRESS)) {
+    context.addBalancerAutoRangePool(pool);
+    return;
+  }
   if (pool === positionManager) {
     context.addUniswapV2Pair(pool);
     return;
@@ -616,7 +616,7 @@ LeaderboardConfigContract.LPPoolConfigured.contractRegister(({ event, context })
   context.addUniswapV3Pool(pool);
 });
 
-LeaderboardConfigContract.LPPoolConfigured.handler(async ({ event, context }) => {
+LeaderboardConfig.LPPoolConfigured.handler(async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -631,17 +631,9 @@ LeaderboardConfigContract.LPPoolConfigured.handler(async ({ event, context }) =>
   const lpRateBps = event.params.lpRateBps;
   const timestamp = Number(event.params.timestamp);
   let fee: number | undefined;
-  if (shouldUseEthCalls()) {
-    const fetchedFee = await readPoolFee(pool, BigInt(event.block.number), context.log);
-    if (fetchedFee !== null) {
-      fee = fetchedFee;
-    }
-  }
-  if (fee === undefined) {
-    const existingConfig = await context.LPPoolConfig.get(pool);
-    if (existingConfig?.fee !== undefined) {
-      fee = existingConfig.fee;
-    }
+  const existingConfig = await context.LPPoolConfig.get(pool);
+  if (existingConfig?.fee !== undefined) {
+    fee = existingConfig.fee;
   }
 
   // Get current epoch
@@ -698,7 +690,7 @@ LeaderboardConfigContract.LPPoolConfigured.handler(async ({ event, context }) =>
   });
 });
 
-LeaderboardConfigContract.LPPoolDisabled.handler(async ({ event, context }) => {
+LeaderboardConfig.LPPoolDisabled.handler(async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -727,7 +719,7 @@ LeaderboardConfigContract.LPPoolDisabled.handler(async ({ event, context }) => {
   }
 });
 
-LeaderboardConfigContract.LPRateUpdated.handler(async ({ event, context }) => {
+LeaderboardConfig.LPRateUpdated.handler(async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
