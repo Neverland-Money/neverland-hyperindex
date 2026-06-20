@@ -153,12 +153,15 @@ test('special-edition membership boosts accrued VP points by its multiplier (lik
   assert.ok(bp > 0n, 'baseline (no special edition) accrued VP points');
   assert.ok(mp > 0n, 'member accrued VP points');
 
-  // The special-edition holder must accrue exactly the SHINY multiplier more: 10500/10000.
-  // Compare as a ratio with a tiny tolerance for the float/scaling rounding in accrual.
-  const ratio = Number(mp) / Number(bp);
-  assert.ok(
-    Math.abs(ratio - 1.05) < 0.002,
-    `special-edition member should accrue 1.05x the non-member (got ratio=${ratio.toFixed(5)}, member=${mp}, base=${bp})`
+  // The special-edition holder accrues exactly the SHINY multiplier more. The boost is
+  // applied as floor(rawPoints * 10500 / 10000) (applyCombinedMultiplierScaled), and the
+  // non-member's points are the un-floored raw (* 10000 / 10000 === raw), so the member's
+  // points equal the non-member's run through the same integer-floored 1.05x. Verified
+  // with exact bigint arithmetic — no float ratio, no precision loss.
+  assert.equal(
+    mp,
+    (bp * 10500n) / 10000n,
+    `special-edition member should accrue floor(1.05x) of the non-member (member=${mp}, base=${bp})`
   );
 
   // And the multiplier must be reflected on the leaderboard state, exactly like NFT.
