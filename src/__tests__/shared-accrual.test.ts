@@ -8,8 +8,9 @@ process.env.ENVIO_DISABLE_BOOTSTRAP = 'true';
 import { LEADERBOARD_START_BLOCK } from '../helpers/constants';
 import { createDefaultReserve } from '../helpers/entityHelpers';
 import { accruePointsForUserReserve, syncUserReservePointsBaseline } from '../handlers/shared';
+import { TestHelpers, type MockDb } from './v3-test-helpers';
+
 import type { handlerContext } from '../../generated';
-import type { t as MockDb } from '../../generated/src/TestHelpers_MockDb.gen';
 
 process.env.ENVIO_ENABLE_EXTERNAL_CALLS = 'false';
 process.env.ENVIO_ENABLE_ETH_CALLS = 'false';
@@ -23,6 +24,7 @@ const ADDRESSES = {
 };
 
 function loadTestHelpers() {
+  return TestHelpers;
   const cwd = process.cwd();
   const distTestRoot = path.join(cwd, 'dist-test');
   const generatedLink = path.join(distTestRoot, 'generated');

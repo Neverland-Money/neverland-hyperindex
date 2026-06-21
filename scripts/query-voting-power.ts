@@ -30,6 +30,15 @@ interface QueryResponse {
   DustLockToken: DustLockToken[];
 }
 
+interface GraphQLResponse {
+  data?: QueryResponse;
+  errors?: unknown;
+}
+
+function isGraphQLResponse(value: unknown): value is GraphQLResponse {
+  return typeof value === 'object' && value !== null && ('data' in value || 'errors' in value);
+}
+
 async function queryUserVotingPower(userAddress: string): Promise<void> {
   const normalizedAddress = userAddress.toLowerCase();
 
@@ -75,13 +84,20 @@ async function queryUserVotingPower(userAddress: string): Promise<void> {
     }
 
     const result = await response.json();
+    if (!isGraphQLResponse(result)) {
+      throw new Error('Invalid GraphQL response');
+    }
 
     if (result.errors) {
       console.error('GraphQL Errors:', JSON.stringify(result.errors, null, 2));
       process.exit(1);
     }
 
-    const data: QueryResponse = result.data;
+    if (!result.data) {
+      throw new Error('GraphQL response did not include data');
+    }
+
+    const data = result.data;
 
     console.log('\n=== User Voting Power Data ===\n');
     console.log(`User Address: ${normalizedAddress}\n`);

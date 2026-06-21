@@ -4,10 +4,13 @@ import { test } from 'node:test';
 import {
   DEFAULT_BORROW_RATE_BPS,
   DEFAULT_DEPOSIT_RATE_BPS,
+  STATIC_NFT_COLLECTION_ADDRESSES,
   TREASURY_ADDRESSES,
   WMON_ADDRESS,
+  ZERO_ADDRESS,
   fromScaledPoints,
   getTokenMetadata,
+  isStaticNftCollection,
   toScaledPoints,
 } from '../helpers/constants';
 import {
@@ -159,8 +162,11 @@ test('points helpers cover default, caps, and thresholds', () => {
   assert.equal(getLPRatePerHour(undefined), 0);
   assert.equal(getLPRatePerHour(200n), 200 / 10000 / 24);
 
-  assert.equal(applyMultipliers(10, 20000n, 20000n), 40);
-  assert.equal(applyMultipliers(10, 100000n, 100000n), 100);
+  // Category multipliers join additively on their bonus over 1x, not multiplicatively:
+  // nft 2x + vp 2x => +100% +100% = +200% => 3x => 30 (not 4x). With se 1.5x => +250% => 35.
+  assert.equal(applyMultipliers(10, 20000n, 20000n), 30);
+  assert.equal(applyMultipliers(10, 20000n, 20000n, 15000n), 35);
+  assert.equal(applyMultipliers(10, 100000n, 100000n), 100); // clamped at MAX_MULTIPLIER (10x)
 
   assert.equal(calculateVotingPower(0n, 100, false, 0), 0n);
   assert.equal(calculateVotingPower(100n, 100, true, 0), 100n);
@@ -312,4 +318,19 @@ test('readPoolFee handles bigint results', async () => {
   } finally {
     publicClient.readContract = originalRead;
   }
+});
+
+test('isStaticNftCollection matches the statically-configured collections case-insensitively', () => {
+  // Guards against re-registering a statically-configured NFT collection as a
+  // dynamic PartnerNFT (which would double-dispatch its Transfer logs). Every
+  // address in the set must be recognized regardless of case.
+  for (const addr of STATIC_NFT_COLLECTION_ADDRESSES) {
+    assert.equal(isStaticNftCollection(addr), true, `lowercase ${addr}`);
+    assert.equal(isStaticNftCollection(addr.toUpperCase()), true, `uppercase ${addr}`);
+  }
+  // The10kSquad with a checksum/mixed-case spelling is still matched.
+  assert.equal(isStaticNftCollection('0x818030837E8350bA63E64d7DC01a547Fa73C8279'), true);
+  // A genuine partner collection (not statically configured) is NOT skipped.
+  assert.equal(isStaticNftCollection('0x000000000000000000000000000000000000d002'), false);
+  assert.equal(isStaticNftCollection(ZERO_ADDRESS), false);
 });

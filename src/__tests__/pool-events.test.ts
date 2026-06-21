@@ -1,10 +1,8 @@
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import path from 'node:path';
 import { test } from 'node:test';
 
 import { createDefaultReserve } from '../helpers/entityHelpers';
-import type { t as MockDb } from '../../generated/src/TestHelpers_MockDb.gen';
+import { TestHelpers, type MockDb } from './v3-test-helpers';
 
 process.env.ENVIO_ENABLE_EXTERNAL_CALLS = 'false';
 process.env.ENVIO_ENABLE_ETH_CALLS = 'false';
@@ -23,36 +21,10 @@ const ADDRESSES = {
   collateralAlt: '0x0000000000000000000000000000000000003007',
 };
 
-type TestHelpersApi = typeof import('../../generated').TestHelpers;
+type TestHelpersApi = typeof TestHelpers;
 
 function loadTestHelpers(): TestHelpersApi {
-  const cwd = process.cwd();
-  const distTestRoot = path.join(cwd, 'dist-test');
-  const generatedLink = path.join(distTestRoot, 'generated');
-
-  const generatedIndex = path.join(generatedLink, 'index.js');
-  if (!fs.existsSync(generatedIndex)) {
-    if (fs.existsSync(generatedLink)) {
-      fs.rmSync(generatedLink, { recursive: true, force: true });
-    }
-    fs.symlinkSync(path.join(cwd, 'generated'), generatedLink, 'dir');
-  }
-
-  const handlerModules = [
-    'tokenization',
-    'leaderboard',
-    'leaderboardKeeper',
-    'dustlock',
-    'pool',
-    'nft',
-    'config',
-    'rewards',
-  ];
-  for (const handler of handlerModules) {
-    require(path.join(distTestRoot, 'src', 'handlers', `${handler}.js`));
-  }
-
-  return require(path.join(cwd, 'generated', 'src', 'TestHelpers.res.js'));
+  return TestHelpers;
 }
 
 function createEventDataFactory() {

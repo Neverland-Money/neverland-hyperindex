@@ -3,16 +3,7 @@
  * PoolAddressesProviderRegistry, PoolAddressesProvider, PoolConfigurator, UserVaultFactory, UserVault
  */
 
-import type { handlerContext } from '../../generated';
-import {
-  PoolAddressesProviderRegistry,
-  PoolAddressesProvider,
-  PoolConfigurator,
-  UserVaultFactory,
-  UserVault,
-} from '../../generated';
 import { recordProtocolTransaction, getOrCreateUser, getOrCreateProtocolStats } from './shared';
-import { tryReadTokenMetadata } from '../helpers/viem';
 import { getHistoryEntityId } from '../helpers/entityHelpers';
 import {
   POOL_ID,
@@ -23,6 +14,15 @@ import {
   getTokenMetadata,
   normalizeAddress,
 } from '../helpers/constants';
+
+import {
+  PoolAddressesProvider,
+  PoolAddressesProviderRegistry,
+  PoolConfigurator,
+  UserVault,
+  UserVaultFactory,
+} from '../../generated';
+import type { handlerContext } from '../../generated';
 
 function recordReserveConfigurationHistory(
   context: handlerContext,
@@ -92,85 +92,29 @@ async function tryReadATokenMetadata(
   aTokenAddress: string,
   blockNumber?: bigint
 ): Promise<{ symbol?: string; name?: string; decimals?: number } | null> {
-  const metadata = await tryReadTokenMetadata(aTokenAddress, blockNumber);
-  if (!metadata) {
-    return null;
-  }
-
-  let symbol = metadata.symbol || '';
-  let name = metadata.name || '';
-  const decimals = metadata.decimals;
-
-  if (symbol.length > 1 && symbol.charAt(0) === 'n') {
-    symbol = symbol.substring(1);
-  }
-
-  const prefix = 'Neverland Interest Bearing ';
-  if (name.startsWith(prefix)) {
-    name = name.substring(prefix.length);
-  }
-
-  if (!name && symbol) {
-    name = symbol;
-  }
-
-  if (!symbol && name) {
-    symbol = name;
-  }
-
-  /* c8 ignore start */
-  if (!symbol && !name && decimals === undefined) {
-    return null;
-  }
-  /* c8 ignore end */
-
-  return {
-    symbol,
-    name: name || symbol,
-    decimals,
-  };
+  void aTokenAddress;
+  void blockNumber;
+  return null;
 }
 
 async function tryReadUnderlyingMetadata(
   assetAddress: string,
   blockNumber?: bigint
 ): Promise<{ symbol?: string; name?: string; decimals?: number } | null> {
-  const metadata = await tryReadTokenMetadata(assetAddress, blockNumber);
-  if (!metadata) {
-    return null;
-  }
-
-  let symbol = metadata.symbol || '';
-  let name = metadata.name || '';
-  const decimals = metadata.decimals;
-
-  if (!name && symbol) {
-    name = symbol;
-  }
-
-  if (!symbol && name) {
-    symbol = name;
-  }
-
-  /* c8 ignore next */
-  if (!symbol && !name && decimals === undefined) {
-    return null;
-  }
-
-  return {
-    symbol,
-    name: name || symbol,
-    decimals,
-  };
+  void assetAddress;
+  void blockNumber;
+  return null;
 }
 
 // ============================================
 // PoolAddressesProviderRegistry Handlers
 // ============================================
 
-PoolAddressesProviderRegistry.AddressesProviderRegistered.contractRegister(({ event, context }) => {
-  context.addPoolAddressesProvider(normalizeAddress(event.params.addressesProvider));
-});
+PoolAddressesProviderRegistry.AddressesProviderRegistered.contractRegister(
+  async ({ event, context }) => {
+    context.addPoolAddressesProvider(normalizeAddress(event.params.addressesProvider));
+  }
+);
 
 PoolAddressesProviderRegistry.AddressesProviderRegistered.handler(async ({ event, context }) => {
   const id = normalizeAddress(event.params.addressesProvider);
@@ -222,7 +166,7 @@ PoolAddressesProviderRegistry.AddressesProviderUnregistered.handler(async ({ eve
 // PoolAddressesProvider Handlers
 // ============================================
 
-PoolAddressesProvider.ProxyCreated.contractRegister(({ event, context }) => {
+PoolAddressesProvider.ProxyCreated.contractRegister(async ({ event, context }) => {
   const contractId = event.params.id.toString();
   const proxyAddress = normalizeAddress(event.params.proxyAddress);
 
@@ -510,7 +454,7 @@ PoolAddressesProvider.PriceOracleSentinelUpdated.handler(async ({ event, context
 // PoolConfigurator Handlers
 // ============================================
 
-PoolConfigurator.ReserveInitialized.contractRegister(({ event, context }) => {
+PoolConfigurator.ReserveInitialized.contractRegister(async ({ event, context }) => {
   context.addAToken(normalizeAddress(event.params.aToken));
   context.addVariableDebtToken(normalizeAddress(event.params.variableDebtToken));
   if (normalizeAddress(event.params.stableDebtToken) !== ZERO_ADDRESS) {
@@ -1280,7 +1224,7 @@ PoolConfigurator.BridgeProtocolFeeUpdated.handler(async ({ event, context }) => 
 // UserVaultFactory Handlers
 // ============================================
 
-UserVaultFactory.UserVaultCreated.contractRegister(({ event, context }) => {
+UserVaultFactory.UserVaultCreated.contractRegister(async ({ event, context }) => {
   context.addUserVault(normalizeAddress(event.params.vault));
 });
 

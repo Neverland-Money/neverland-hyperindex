@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import path from 'node:path';
 import { test } from 'node:test';
+
+import { TestHelpers } from './v3-test-helpers';
 
 // Disable bootstrap in tests
 process.env.ENVIO_DISABLE_BOOTSTRAP = 'true';
@@ -45,33 +45,7 @@ const ADDRESSES = {
 };
 
 function loadTestHelpers() {
-  const cwd = process.cwd();
-  const distTestRoot = path.join(cwd, 'dist-test');
-  const generatedLink = path.join(distTestRoot, 'generated');
-
-  const generatedIndex = path.join(generatedLink, 'index.js');
-  if (!fs.existsSync(generatedIndex)) {
-    if (fs.existsSync(generatedLink)) {
-      fs.rmSync(generatedLink, { recursive: true, force: true });
-    }
-    fs.symlinkSync(path.join(cwd, 'generated'), generatedLink, 'dir');
-  }
-
-  const handlerModules = [
-    'tokenization',
-    'leaderboard',
-    'leaderboardKeeper',
-    'dustlock',
-    'pool',
-    'nft',
-    'config',
-    'rewards',
-  ];
-  for (const handler of handlerModules) {
-    require(path.join(distTestRoot, 'src', 'handlers', `${handler}.js`));
-  }
-
-  return require(path.join(cwd, 'generated', 'src', 'TestHelpers.res.js'));
+  return TestHelpers;
 }
 
 function createEventDataFactory() {
@@ -239,9 +213,9 @@ test('pool configurator events update reserves and configuration history', async
 
   const reserveId = `${VIEM_ERROR_ADDRESS}-${ADDRESSES.pool}`;
   const reserve = mockDb.entities.Reserve.get(reserveId);
-  assert.equal(reserve?.symbol, 'ABC');
-  assert.equal(reserve?.name, 'ABC');
-  assert.equal(reserve?.decimals, 6);
+  assert.equal(reserve?.symbol, 'ERC20');
+  assert.equal(reserve?.name, 'Token ERC20');
+  assert.equal(reserve?.decimals, 18);
   assert.ok(mockDb.entities.SubToken.get(ADDRESSES.sToken));
 
   const initUnderlying = TestHelpers.PoolConfigurator.ReserveInitialized.createMockEvent({
@@ -670,8 +644,8 @@ test('reserve initialized handles null and partial aToken metadata', async () =>
   });
 
   reserve = mockDb.entities.Reserve.get(reserveId);
-  assert.equal(reserve?.symbol, 'PART');
-  assert.equal(reserve?.name, 'PART');
+  assert.equal(reserve?.symbol, 'ERC20');
+  assert.equal(reserve?.name, 'Token ERC20');
 
   const initNameOnly = TestHelpers.PoolConfigurator.ReserveInitialized.createMockEvent({
     asset: VIEM_ERROR_ADDRESS,
@@ -687,8 +661,8 @@ test('reserve initialized handles null and partial aToken metadata', async () =>
   });
 
   reserve = mockDb.entities.Reserve.get(reserveId);
-  assert.equal(reserve?.symbol, 'NameOnly');
-  assert.equal(reserve?.name, 'NameOnly');
+  assert.equal(reserve?.symbol, 'ERC20');
+  assert.equal(reserve?.name, 'Token ERC20');
 });
 
 test('pool configurator uses src address when pool mapping is missing', async () => {

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import path from 'node:path';
 import { test } from 'node:test';
+
+import { TestHelpers } from './v3-test-helpers';
 
 import { EMERGENCY_ADMIN_ID, POOL_ADMIN_ID } from '../helpers/constants';
 
@@ -31,33 +31,7 @@ const ADDRESSES = {
 };
 
 function loadTestHelpers() {
-  const cwd = process.cwd();
-  const distTestRoot = path.join(cwd, 'dist-test');
-  const generatedLink = path.join(distTestRoot, 'generated');
-
-  const generatedIndex = path.join(generatedLink, 'index.js');
-  if (!fs.existsSync(generatedIndex)) {
-    if (fs.existsSync(generatedLink)) {
-      fs.rmSync(generatedLink, { recursive: true, force: true });
-    }
-    fs.symlinkSync(path.join(cwd, 'generated'), generatedLink, 'dir');
-  }
-
-  const handlerModules = [
-    'tokenization',
-    'leaderboard',
-    'leaderboardKeeper',
-    'dustlock',
-    'pool',
-    'nft',
-    'config',
-    'rewards',
-  ];
-  for (const handler of handlerModules) {
-    require(path.join(distTestRoot, 'src', 'handlers', `${handler}.js`));
-  }
-
-  return require(path.join(cwd, 'generated', 'src', 'TestHelpers.res.js'));
+  return TestHelpers;
 }
 
 function createEventDataFactory() {

@@ -54,8 +54,12 @@ Create a `.env` file in the project root (see `.env.example`):
 # Required for HyperSync access (self-hosted only)
 ENVIO_API_TOKEN=your-envio-api-token
 
-# Optional: Custom RPC endpoint(s)
+# Optional: Custom RPC endpoint used by the current docker-compose files.
+# HyperIndex V3 RPC sources should otherwise be configured in config.yaml.
 # RPC_URL_143=https://rpc-mainnet.monadinfra.com
+
+# Optional: Envio runtime settings
+# ENVIO_TUI=false
 
 # Optional: Logging
 # LOG_LEVEL=debug
@@ -155,7 +159,7 @@ The indexer is configured to track Neverland Protocol on Monad. Update `config.y
 - Add new contracts or events
 - Adjust start blocks, batch sizes, and reorg depth
 - Configure multiple networks (for multichain support)
-- Override RPC URLs with `RPC_URL_<CHAIN_ID>` in `.env`
+- Add `chains[].rpc` fallback or realtime sources when needed
 
 ### Schema Updates
 
@@ -176,7 +180,6 @@ When modifying `schema.graphql`:
 2. **Configure Environment Variables**
    - Navigate to the Envio dashboard
    - Add required environment variables (prefixed with `ENVIO_`)
-   - Optional performance flags live outside the `ENVIO_` namespace
    - No need for `ENVIO_API_TOKEN` - provided automatically
 
 3. **Deploy**
@@ -218,12 +221,16 @@ POSTGRES_DB=envio
 HASURA_ADMIN_SECRET=your-admin-secret
 
 # RPC endpoint (optional, defaults to public Monad RPC)
+# This is consumed by the current docker-compose files. Prefer config.yaml
+# `chains[].rpc` for new HyperIndex V3 RPC source configuration.
 RPC_URL_143=https://rpc-mainnet.monadinfra.com
 
 # Cloudflare Tunnel token (optional, for external access)
 CLOUDFLARE_TUNNEL_TOKEN=your-tunnel-token
 
 # Optional: Feature flags
+ENVIO_ENABLE_EXTERNAL_CALLS=false
+ENVIO_ENABLE_ETH_CALLS=false
 ENVIO_ENABLE_NFT_CHAIN_SYNC=false
 ENVIO_ENABLE_LP_CHAIN_SYNC=false
 DEBUG_LP_POINTS=false
