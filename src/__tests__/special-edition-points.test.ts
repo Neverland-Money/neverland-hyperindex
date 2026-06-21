@@ -9,7 +9,7 @@ process.env.ENVIO_ENABLE_ETH_CALLS = 'false';
 process.env.ENVIO_LEADERBOARD_LIVE_EPOCH = '';
 
 // End-to-end proof that the special-edition multiplier BOOSTS accrued points, the
-// same multiplicative way an NFT-collection multiplier does. Two identical pure-VP
+// same additive-join way an NFT-collection multiplier does. Two identical pure-VP
 // users (same permanent veDUST lock => flat VP, same accrual window) are settled by
 // the keeper; one holds a SHINY special edition (perTokenBoostBps=500 => 1.05x), the
 // other holds none. The member must accrue exactly 1.05x the non-member's VP points.
@@ -171,7 +171,12 @@ test('special-edition membership boosts accrued VP points by its multiplier (lik
     10500n,
     'member specialEditionMultiplier = 10000 + 1*500'
   );
-  assert.equal(memberState?.combinedMultiplier, 10500n, 'combined = nft(1x) * se(1.05x) * vp(1x)');
+  // additive join with neutral nft/vp: 1x + (se 1.05x - 1x) = 1.05x.
+  assert.equal(
+    memberState?.combinedMultiplier,
+    10500n,
+    'combined join = nft(1x) + se(+5%) + vp(1x)'
+  );
   const baseState = mockDb.entities.UserLeaderboardState.get(BASE);
   assert.equal(
     baseState?.specialEditionMultiplier,

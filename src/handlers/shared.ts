@@ -1200,8 +1200,17 @@ export function composeCombinedMultiplierBps(
   specialEditionMultiplier: bigint,
   vpMultiplier: bigint
 ): bigint {
+  // calculateNFTMultiplierFromUser sums each collection's boost on top of BASIS_POINTS.
+  // e.g. NFT 14500 (+45%) joined with SE 12000 (+20%) => 16500 (+65%). -2n to remove the
+  // double-counted BASIS_POINTS from each multiplier. The final combined multiplier is
+  // clamped to [BASIS_POINTS, MAX_COMBINED_MULTIPLIER] to avoid any future sub-1x input.
   let combinedMultiplierBps =
-    (nftMultiplier * specialEditionMultiplier * vpMultiplier) / (BASIS_POINTS * BASIS_POINTS);
+    nftMultiplier + specialEditionMultiplier + vpMultiplier - 2n * BASIS_POINTS;
+  // Multipliers are bonuses-only (each >= 1x), so the join can never fall below 1x; clamp
+  // defensively against any future sub-1x input rather than emitting a penalty multiplier.
+  if (combinedMultiplierBps < BASIS_POINTS) {
+    combinedMultiplierBps = BASIS_POINTS;
+  }
   if (combinedMultiplierBps > MAX_COMBINED_MULTIPLIER) {
     combinedMultiplierBps = MAX_COMBINED_MULTIPLIER;
   }

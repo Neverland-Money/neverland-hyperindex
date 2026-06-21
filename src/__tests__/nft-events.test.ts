@@ -366,7 +366,8 @@ test('transfer composes collection multiplier with special edition multiplier', 
   const state = mockDb.entities.UserLeaderboardState.get(ADDRESSES.user);
   assert.equal(state?.nftMultiplier, 11000n);
   assert.equal(state?.specialEditionMultiplier, 12000n);
-  assert.equal(state?.combinedMultiplier, 13200n);
+  // additive join: nft +10% and se +20% => +30% => 13000 (not 11000*1.2 = 13200).
+  assert.equal(state?.combinedMultiplier, 13000n);
 });
 
 test('transfer caps multiplier at max', async () => {

@@ -162,9 +162,11 @@ test('points helpers cover default, caps, and thresholds', () => {
   assert.equal(getLPRatePerHour(undefined), 0);
   assert.equal(getLPRatePerHour(200n), 200 / 10000 / 24);
 
-  assert.equal(applyMultipliers(10, 20000n, 20000n), 40);
-  assert.equal(applyMultipliers(10, 20000n, 20000n, 15000n), 60);
-  assert.equal(applyMultipliers(10, 100000n, 100000n), 100);
+  // Category multipliers join additively on their bonus over 1x, not multiplicatively:
+  // nft 2x + vp 2x => +100% +100% = +200% => 3x => 30 (not 4x). With se 1.5x => +250% => 35.
+  assert.equal(applyMultipliers(10, 20000n, 20000n), 30);
+  assert.equal(applyMultipliers(10, 20000n, 20000n, 15000n), 35);
+  assert.equal(applyMultipliers(10, 100000n, 100000n), 100); // clamped at MAX_MULTIPLIER (10x)
 
   assert.equal(calculateVotingPower(0n, 100, false, 0), 0n);
   assert.equal(calculateVotingPower(100n, 100, true, 0), 100n);

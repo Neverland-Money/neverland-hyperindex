@@ -83,7 +83,7 @@ test('keeper events update leaderboard state and ownership', async () => {
     id: '0',
     tierIndex: 0n,
     minVotingPower: 0n,
-    multiplierBps: 60000n,
+    multiplierBps: 50000n, // clamped to MAX_VP_MULTIPLIER (5x)
     createdAt: 0,
     lastUpdate: 0,
     isActive: true,
@@ -169,7 +169,8 @@ test('keeper events update leaderboard state and ownership', async () => {
 
   const state = mockDb.entities.UserLeaderboardState.get(ADDRESSES.user);
   assert.ok(state);
-  assert.equal(state?.combinedMultiplier, 100000n);
+  // Additive join of the two capped categories: nft 5x + vp 5x => 9x (90000).
+  assert.equal(state?.combinedMultiplier, 90000n);
 
   const settle = TestHelpers.LeaderboardKeeper.UserSettled.createMockEvent({
     user: ADDRESSES.user,
@@ -331,7 +332,8 @@ test('keeper sync events preserve special edition multiplier in combined state',
   });
 
   let state = mockDb.entities.UserLeaderboardState.get(ADDRESSES.user);
-  assert.equal(state?.combinedMultiplier, 30000n);
+  // additive join: se +50% and vp +100% => +150% => 25000 (not 1.5*2.0 = 30000).
+  assert.equal(state?.combinedMultiplier, 25000n);
 
   const nftSynced = TestHelpers.LeaderboardKeeper.NFTBalanceSynced.createMockEvent({
     user: ADDRESSES.user,
@@ -347,7 +349,8 @@ test('keeper sync events preserve special edition multiplier in combined state',
 
   state = mockDb.entities.UserLeaderboardState.get(ADDRESSES.user);
   assert.equal(state?.nftMultiplier, 11000n);
-  assert.equal(state?.combinedMultiplier, 33000n);
+  // additive join: nft +10% se +50% vp +100% => +160% => 26000 (not 1.1*1.5*2.0 = 33000).
+  assert.equal(state?.combinedMultiplier, 26000n);
 });
 
 test('nft balance sync clamps when state count is already zero', async () => {
@@ -668,7 +671,7 @@ test('keeper user settled: pure-VP user still settles for a closed past epoch (g
   }
 });
 
-test('voting power synced caps combined multiplier', async () => {
+test('voting power synced joins capped nft and vp multipliers additively', async () => {
   const TestHelpers = loadTestHelpers();
   let mockDb = TestHelpers.MockDb.createMockDb();
   const eventData = createEventDataFactory();
@@ -683,7 +686,7 @@ test('voting power synced caps combined multiplier', async () => {
     id: '0',
     tierIndex: 0n,
     minVotingPower: 0n,
-    multiplierBps: 50000n,
+    multiplierBps: 50000n, // clamped to MAX_VP_MULTIPLIER (5x)
     createdAt: 0,
     lastUpdate: 0,
     isActive: true,
@@ -718,7 +721,8 @@ test('voting power synced caps combined multiplier', async () => {
   });
 
   const updated = mockDb.entities.UserLeaderboardState.get(ADDRESSES.user);
-  assert.equal(updated?.combinedMultiplier, 100000n);
+  // Additive join of the two capped categories: nft 5x + vp 5x => 9x (90000).
+  assert.equal(updated?.combinedMultiplier, 90000n);
 });
 
 test('lp balance synced records event without chain sync', async () => {

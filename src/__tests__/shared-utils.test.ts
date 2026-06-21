@@ -29,6 +29,7 @@ import {
   calculateNFTMultiplierFromCount,
   calculateNFTMultiplierFromUser,
   calculateVPMultiplier,
+  composeCombinedMultiplierBps,
   createMultiplierSnapshot,
   computeTotalPointsWithMultiplier,
   ensureAssetPrice,
@@ -464,7 +465,7 @@ test('recalculateUserTotalVP returns early before dust lock start block', async 
   assert.equal(await stateStore.get('0xuser'), undefined);
 });
 
-test('recalculateUserTotalVP caps combined multiplier', async () => {
+test('recalculateUserTotalVP joins capped nft and vp multipliers additively', async () => {
   const user = '0xuser';
   const tokenId = 1n;
   const userTokenList = createStore<UserTokenList>();
@@ -513,7 +514,7 @@ test('recalculateUserTotalVP caps combined multiplier', async () => {
     id: '0',
     tierIndex: 0n,
     minVotingPower: 0n,
-    multiplierBps: 50000n,
+    multiplierBps: 50000n, // clamped to MAX_VP_MULTIPLIER (5x)
     createdAt: 0,
     lastUpdate: 0,
     isActive: true,
@@ -539,7 +540,10 @@ test('recalculateUserTotalVP caps combined multiplier', async () => {
   );
 
   const updated = await leaderboardState.get(user);
-  assert.equal(updated?.combinedMultiplier, 100000n);
+  // Additive join of the two capped categories: nft 5x + vp 5x => +400% +400% = +800% => 9x
+  // (90000). Reaching the 10x combined cap also needs an SE bonus; the MAX_COMBINED clamp
+  // itself is covered directly by the composeCombinedMultiplierBps unit test.
+  assert.equal(updated?.combinedMultiplier, 90000n);
 });
 
 test('recalculateUserTotalVP skips missing tokens', async () => {
@@ -581,7 +585,7 @@ test('recalculateUserTotalVP skips missing tokens', async () => {
   assert.equal(updated?.votingPower, 0n);
 });
 
-test('updateUserVotingPower caps combined multiplier and snapshots', async () => {
+test('updateUserVotingPower joins capped nft and vp multipliers additively and snapshots', async () => {
   const user = '0xuser';
   const tokenId = 1n;
   const leaderboardState = createStore<UserLeaderboardState>();
@@ -610,7 +614,7 @@ test('updateUserVotingPower caps combined multiplier and snapshots', async () =>
     id: '0',
     tierIndex: 0n,
     minVotingPower: 0n,
-    multiplierBps: 50000n,
+    multiplierBps: 50000n, // clamped to MAX_VP_MULTIPLIER (5x)
     createdAt: 0,
     lastUpdate: 0,
     isActive: true,
@@ -626,7 +630,8 @@ test('updateUserVotingPower caps combined multiplier and snapshots', async () =>
   await updateUserVotingPower(context, user, tokenId, 1000n, 2000, '0xtx', 'test', 0);
 
   const updated = await leaderboardState.get(user);
-  assert.equal(updated?.combinedMultiplier, 100000n);
+  // Additive join of the two capped categories: nft 5x + vp 5x => 9x (90000); snapshot records it.
+  assert.equal(updated?.combinedMultiplier, 90000n);
   assert.ok(await snapshots.get(`${user}:2000:0xtx:0`));
 });
 
@@ -1289,7 +1294,7 @@ test('average token voting power covers edge cases', async () => {
   assert.ok(avgPartial >= 0n);
 });
 
-test('average combined multiplier caps at maximum', async () => {
+test('average combined multiplier joins capped nft and vp multipliers additively', async () => {
   const userState = createStore<UserLeaderboardState>();
   const userTokenList = createStore<UserTokenList>();
   const dustLockToken = createStore<DustLockToken>();
@@ -1352,14 +1357,33 @@ test('average combined multiplier caps at maximum', async () => {
     id: '0',
     tierIndex: 0n,
     minVotingPower: 0n,
-    multiplierBps: 50000n,
+    multiplierBps: 50000n, // clamped to MAX_VP_MULTIPLIER (5x)
     createdAt: 0,
     lastUpdate: 0,
     isActive: true,
   });
 
   const combined = await calculateAverageCombinedMultiplierBps(context, '0xuser', 0, 500);
-  assert.equal(combined, 100000n); // MAX_COMBINED_MULTIPLIER is 10x
+  // Additive join of the two capped categories: nft 5x + vp 5x => 9x (90000). The 10x combined
+  // cap needs an SE bonus too (clamp covered by the composeCombinedMultiplierBps unit test).
+  assert.equal(combined, 90000n);
+});
+
+test('composeCombinedMultiplierBps joins category multipliers additively, not multiplicatively', () => {
+  // The category multipliers (NFT, special edition, VP) JOIN on their bonus over 1x; they
+  // do not compound. This mirrors how NFT collections already stack internally.
+  // User-stated rule: NFT 14500 (+45%) joined with SE 12000 (+20%) => 16500 (+65%).
+  assert.equal(composeCombinedMultiplierBps(14500n, 12000n, 10000n), 16500n);
+  // ...explicitly NOT the old multiplicative result (14500*12000/10000 = 17400).
+  assert.notEqual(composeCombinedMultiplierBps(14500n, 12000n, 10000n), 17400n);
+  // VP joins additively too: +45% +20% +30% => +95% => 19500.
+  assert.equal(composeCombinedMultiplierBps(14500n, 12000n, 13000n), 19500n);
+  // All-neutral stays exactly 1x.
+  assert.equal(composeCombinedMultiplierBps(10000n, 10000n, 10000n), 10000n);
+  // A single non-neutral category passes straight through (additive == multiplicative here).
+  assert.equal(composeCombinedMultiplierBps(20000n, 10000n, 10000n), 20000n);
+  // The additive join still clamps at MAX_COMBINED_MULTIPLIER (10x = 100000).
+  assert.equal(composeCombinedMultiplierBps(50000n, 50000n, 50000n), 100000n);
 });
 
 test('average combined multiplier segments special-edition changes before composing with vp tier', async () => {
