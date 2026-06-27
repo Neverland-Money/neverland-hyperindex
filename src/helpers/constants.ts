@@ -192,6 +192,8 @@ export const USDT0_ADDRESS = '0xe7cd86e13ac4309349f30b3435a9d337750fc82d';
 export const AUSD_ADDRESS = '0x00000000efe302beaa2b3e6e1b18d08d69a9012a';
 export const EARNAUSD_ADDRESS = '0x103222f020e98bba0ad9809a011fdf8e6f067496';
 export const SAUSD_ADDRESS = '0xd793c04b87386a6bb84ee61d98e0065fde7fda5e';
+// PT-AUSD-8OCT2026: Pendle PT reserve listed in the isolated neverland-pendle-ausd pool.
+export const PT_AUSD_8OCT2026_ADDRESS = '0x9fc74f8ed616b5baf52a170caa97d6d3898602d1';
 export const GMON_ADDRESS = '0x8498312a6b3cbd158bf0c93abdcf29e6e4f55081';
 export const SMON_ADDRESS = '0xa3227c5969757783154c60bf0bc1944180ed81b9';
 export const SHMON_ADDRESS = '0x1b68626dca36c7fe922fd2d55e4f631d962de19c';
@@ -217,6 +219,7 @@ const KNOWN_TOKENS: Record<string, TokenMetadata> = {
   [USDT0_ADDRESS]: { name: 'USDT0', symbol: 'USDT0', decimals: 6 },
   [EARNAUSD_ADDRESS]: { name: 'earnAUSD', symbol: 'earnAUSD', decimals: 6 },
   [WBTC_ADDRESS]: { name: 'Wrapped BTC', symbol: 'WBTC', decimals: 8 },
+  [PT_AUSD_8OCT2026_ADDRESS]: { name: 'PT AUSD 8OCT2026', symbol: 'PT-AUSD-8OCT2026', decimals: 6 },
 };
 
 export function getTokenMetadata(address: string): TokenMetadata | null {

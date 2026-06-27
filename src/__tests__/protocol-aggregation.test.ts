@@ -214,6 +214,21 @@ test('protocol stats aggregate supplies across reserves', async () => {
   assertApprox(stats?.suppliesUsd ?? 0, expectedSuppliesUsd);
   assertApprox(stats?.tvlUsd ?? 0, expectedSuppliesUsd);
   assertApprox(stats?.availableUsd ?? 0, expectedSuppliesUsd);
+
+  const combinedStats = stats as typeof stats & {
+    combinedSuppliesE8?: bigint;
+    combinedTvlE8?: bigint;
+    combinedAvailableE8?: bigint;
+    combinedSuppliesUsd?: number;
+    combinedTvlUsd?: number;
+    combinedAvailableUsd?: number;
+  };
+  assert.equal(combinedStats?.combinedSuppliesE8, expectedSuppliesE8);
+  assert.equal(combinedStats?.combinedTvlE8, expectedSuppliesE8);
+  assert.equal(combinedStats?.combinedAvailableE8, expectedSuppliesE8);
+  assertApprox(combinedStats?.combinedSuppliesUsd ?? 0, expectedSuppliesUsd);
+  assertApprox(combinedStats?.combinedTvlUsd ?? 0, expectedSuppliesUsd);
+  assertApprox(combinedStats?.combinedAvailableUsd ?? 0, expectedSuppliesUsd);
 });
 
 test('aggregation helpers return early when data is missing', async () => {
@@ -448,4 +463,78 @@ test('withdrawals reduce supplies and available', async () => {
   assert.equal(stats?.suppliesE8, suppliesE8);
   assertApprox(stats?.suppliesUsd ?? 0, toUsd(suppliesE8));
   assertApprox(stats?.availableUsd ?? 0, toUsd(suppliesE8));
+});
+
+test('per-pool stats split by pool while protocol total sums all pools', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb: MockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  const poolB = '0x0000000000000000000000000000000000002001';
+
+  mockDb = seedPool(mockDb, ADDRESSES.pool, 6000);
+  mockDb = seedPool(mockDb, poolB, 6000);
+
+  ({ mockDb } = seedReserve(mockDb, {
+    asset: ADDRESSES.assetA,
+    pool: ADDRESSES.pool,
+    aToken: ADDRESSES.aTokenA,
+    vToken: ADDRESSES.vTokenA,
+    priceE8: 200000000n,
+    timestamp: 6000,
+  }));
+  ({ mockDb } = seedReserve(mockDb, {
+    asset: ADDRESSES.assetB,
+    pool: poolB,
+    aToken: ADDRESSES.aTokenB,
+    vToken: ADDRESSES.vTokenB,
+    priceE8: 150000000n,
+    timestamp: 6000,
+  }));
+
+  const supplyA = TestHelpers.AToken.Mint.createMockEvent({
+    caller: ADDRESSES.user,
+    onBehalfOf: ADDRESSES.user,
+    value: 1000n * UNIT,
+    balanceIncrease: 0n,
+    index: RAY,
+    ...eventData(1, 6001, ADDRESSES.aTokenA),
+  });
+  mockDb = await TestHelpers.AToken.Mint.processEvent({ event: supplyA, mockDb });
+
+  const supplyB = TestHelpers.AToken.Mint.createMockEvent({
+    caller: ADDRESSES.user,
+    onBehalfOf: ADDRESSES.user,
+    value: 500n * UNIT,
+    balanceIncrease: 0n,
+    index: RAY,
+    ...eventData(2, 6002, ADDRESSES.aTokenB),
+  });
+  mockDb = await TestHelpers.AToken.Mint.processEvent({ event: supplyB, mockDb });
+
+  const suppliesAE8 = toE8(1000n * UNIT, 200000000n);
+  const suppliesBE8 = toE8(500n * UNIT, 150000000n);
+
+  // Each pool's stats carry ONLY that market's supplies.
+  const poolStatsA = mockDb.entities.PoolStats.get(ADDRESSES.pool);
+  const poolStatsB = mockDb.entities.PoolStats.get(poolB);
+  assert.ok(poolStatsA, 'PoolStats for pool A should exist');
+  assert.ok(poolStatsB, 'PoolStats for pool B should exist');
+
+  assert.equal(poolStatsA?.suppliesE8, suppliesAE8);
+  assert.equal(poolStatsA?.tvlE8, suppliesAE8);
+  assertApprox(poolStatsA?.suppliesUsd ?? 0, toUsd(suppliesAE8));
+  assertApprox(poolStatsA?.tvlUsd ?? 0, toUsd(suppliesAE8));
+
+  assert.equal(poolStatsB?.suppliesE8, suppliesBE8);
+  assert.equal(poolStatsB?.tvlE8, suppliesBE8);
+  assertApprox(poolStatsB?.suppliesUsd ?? 0, toUsd(suppliesBE8));
+  assertApprox(poolStatsB?.tvlUsd ?? 0, toUsd(suppliesBE8));
+
+  // Protocol total = sum across all pools (== PoolStats A + B).
+  const stats = mockDb.entities.ProtocolStats.get('1');
+  assert.ok(stats);
+  assert.equal(stats?.tvlE8, suppliesAE8 + suppliesBE8);
+  assertApprox(stats?.tvlUsd ?? 0, toUsd(suppliesAE8 + suppliesBE8));
+  assert.equal(stats?.tvlE8, (poolStatsA?.tvlE8 ?? 0n) + (poolStatsB?.tvlE8 ?? 0n));
 });

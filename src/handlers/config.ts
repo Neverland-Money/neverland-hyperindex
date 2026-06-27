@@ -88,6 +88,42 @@ async function getOrCreateAddressesProviderState(
   return state;
 }
 
+async function getOrCreateProtocol(context: handlerContext): Promise<void> {
+  const protocol = await context.Protocol.get('1');
+  if (!protocol) {
+    context.Protocol.set({ id: '1' });
+  }
+}
+
+async function getOrCreatePool(context: handlerContext, providerId: string, timestamp: number) {
+  await getOrCreateProtocol(context);
+
+  let pool = await context.Pool.get(providerId);
+  if (!pool) {
+    pool = {
+      id: providerId,
+      addressProviderId: 0n,
+      protocol_id: '1',
+      pool: undefined,
+      poolCollateralManager: undefined,
+      poolConfiguratorImpl: undefined,
+      poolConfigurator: undefined,
+      poolDataProviderImpl: undefined,
+      poolImpl: undefined,
+      proxyPriceProvider: undefined,
+      bridgeProtocolFee: undefined,
+      flashloanPremiumToProtocol: undefined,
+      flashloanPremiumTotal: undefined,
+      active: true,
+      paused: false,
+      lastUpdateTimestamp: timestamp,
+    };
+    context.Pool.set(pool);
+  }
+
+  return pool;
+}
+
 async function tryReadATokenMetadata(
   aTokenAddress: string,
   blockNumber?: bigint
@@ -120,29 +156,11 @@ PoolAddressesProviderRegistry.AddressesProviderRegistered.handler(async ({ event
   const id = normalizeAddress(event.params.addressesProvider);
   const timestamp = Number(event.block.timestamp);
 
-  let protocol = await context.Protocol.get('1');
-  if (!protocol) {
-    context.Protocol.set({
-      id: '1',
-    });
-  }
-
+  const pool = await getOrCreatePool(context, id, timestamp);
   context.Pool.set({
-    id: id,
+    ...pool,
     addressProviderId: event.params.id,
-    protocol_id: '1',
-    pool: undefined,
-    poolCollateralManager: undefined,
-    poolConfiguratorImpl: undefined,
-    poolConfigurator: undefined,
-    poolDataProviderImpl: undefined,
-    poolImpl: undefined,
-    proxyPriceProvider: undefined,
-    bridgeProtocolFee: undefined,
-    flashloanPremiumToProtocol: undefined,
-    flashloanPremiumTotal: undefined,
     active: true,
-    paused: false,
     lastUpdateTimestamp: timestamp,
   });
 
@@ -178,73 +196,73 @@ PoolAddressesProvider.ProxyCreated.contractRegister(async ({ event, context }) =
 });
 
 PoolAddressesProvider.ProxyCreated.handler(async ({ event, context }) => {
+  const timestamp = Number(event.block.timestamp);
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
-    Number(event.block.timestamp),
+    timestamp,
     BigInt(event.block.number)
   );
 
+  const providerId = normalizeAddress(event.srcAddress);
   const proxyAddress = normalizeAddress(event.params.proxyAddress);
+  await getOrCreatePool(context, providerId, timestamp);
 
   context.ContractToPoolMapping.set({
     id: proxyAddress,
-    pool_id: normalizeAddress(event.srcAddress),
+    pool_id: providerId,
   });
 });
 
 PoolAddressesProvider.PoolUpdated.handler(async ({ event, context }) => {
+  const timestamp = Number(event.block.timestamp);
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
-    Number(event.block.timestamp),
+    timestamp,
     BigInt(event.block.number)
   );
   const providerId = normalizeAddress(event.srcAddress);
-  const pool = await context.Pool.get(providerId);
-  if (pool) {
-    context.Pool.set({
-      ...pool,
-      pool: normalizeAddress(event.params.newAddress),
-      lastUpdateTimestamp: Number(event.block.timestamp),
-    });
-  }
+  const pool = await getOrCreatePool(context, providerId, timestamp);
+  context.Pool.set({
+    ...pool,
+    pool: normalizeAddress(event.params.newAddress),
+    lastUpdateTimestamp: timestamp,
+  });
 });
 
 PoolAddressesProvider.PoolConfiguratorUpdated.handler(async ({ event, context }) => {
+  const timestamp = Number(event.block.timestamp);
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
-    Number(event.block.timestamp),
+    timestamp,
     BigInt(event.block.number)
   );
   const providerId = normalizeAddress(event.srcAddress);
-  const pool = await context.Pool.get(providerId);
-  if (pool) {
-    context.Pool.set({
-      ...pool,
-      poolConfigurator: normalizeAddress(event.params.newAddress),
-      lastUpdateTimestamp: Number(event.block.timestamp),
-    });
-  }
+  const pool = await getOrCreatePool(context, providerId, timestamp);
+  context.Pool.set({
+    ...pool,
+    poolConfigurator: normalizeAddress(event.params.newAddress),
+    lastUpdateTimestamp: timestamp,
+  });
 });
 
 PoolAddressesProvider.PriceOracleUpdated.handler(async ({ event, context }) => {
+  const timestamp = Number(event.block.timestamp);
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
-    Number(event.block.timestamp),
+    timestamp,
     BigInt(event.block.number)
   );
   const providerId = normalizeAddress(event.srcAddress);
-  const pool = await context.Pool.get(providerId);
-  if (pool) {
-    context.Pool.set({
-      ...pool,
-      proxyPriceProvider: normalizeAddress(event.params.newAddress),
-      lastUpdateTimestamp: Number(event.block.timestamp),
-    });
-  }
+  const pool = await getOrCreatePool(context, providerId, timestamp);
+  context.Pool.set({
+    ...pool,
+    proxyPriceProvider: normalizeAddress(event.params.newAddress),
+    lastUpdateTimestamp: timestamp,
+  });
 
   context.PriceOracle.set({
     id: providerId,
@@ -263,21 +281,20 @@ PoolAddressesProvider.PriceOracleUpdated.handler(async ({ event, context }) => {
 });
 
 PoolAddressesProvider.PoolDataProviderUpdated.handler(async ({ event, context }) => {
+  const timestamp = Number(event.block.timestamp);
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
-    Number(event.block.timestamp),
+    timestamp,
     BigInt(event.block.number)
   );
   const providerId = normalizeAddress(event.srcAddress);
-  const pool = await context.Pool.get(providerId);
-  if (pool) {
-    context.Pool.set({
-      ...pool,
-      poolDataProviderImpl: normalizeAddress(event.params.newAddress),
-      lastUpdateTimestamp: Number(event.block.timestamp),
-    });
-  }
+  const pool = await getOrCreatePool(context, providerId, timestamp);
+  context.Pool.set({
+    ...pool,
+    poolDataProviderImpl: normalizeAddress(event.params.newAddress),
+    lastUpdateTimestamp: timestamp,
+  });
 });
 
 PoolAddressesProvider.ACLAdminUpdated.handler(async ({ event, context }) => {

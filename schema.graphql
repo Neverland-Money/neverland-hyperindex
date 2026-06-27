@@ -778,10 +778,18 @@ type ProtocolStats {
   suppliesUsd: Float!
   borrowsUsd: Float!
   availableUsd: Float!
+  combinedTvlUsd: Float!
+  combinedSuppliesUsd: Float!
+  combinedBorrowsUsd: Float!
+  combinedAvailableUsd: Float!
   tvlE8: BigInt!
   suppliesE8: BigInt!
   borrowsE8: BigInt!
   availableE8: BigInt!
+  combinedTvlE8: BigInt!
+  combinedSuppliesE8: BigInt!
+  combinedBorrowsE8: BigInt!
+  combinedAvailableE8: BigInt!
   totalRevenueUsd: Float!
   supplyRevenueUsd: Float!
   protocolRevenueUsd: Float!
@@ -793,6 +801,26 @@ type ProtocolStats {
   uniqueUsers: Int!
   lastTxTimestamp: Int!
   lastTxHash: String!
+}
+
+# Per-pool (per-market) USD aggregates, keyed by pool_id = PoolAddressesProvider
+# address (lowercased). Mirrors the Reserve -> ReserveAggregate split: Pool holds
+# state, PoolStats holds the rolled-up USD/E8 totals for that single market.
+# ProtocolStats remains the all-pool grand total; PoolStats is the breakdown
+# (Global Markets, Isolated Pendle AUSD, future isolated pools...). tvl == supplies,
+# matching ProtocolStats. Join PoolStats.id -> PoolAddressesProviderState.marketId
+# for the on-chain market label.
+type PoolStats {
+  id: ID!
+  suppliesUsd: Float!
+  borrowsUsd: Float!
+  availableUsd: Float!
+  tvlUsd: Float!
+  suppliesE8: BigInt!
+  borrowsE8: BigInt!
+  availableE8: BigInt!
+  tvlE8: BigInt!
+  updatedAt: Int!
 }
 
 type ProtocolStatsSnapshot {
