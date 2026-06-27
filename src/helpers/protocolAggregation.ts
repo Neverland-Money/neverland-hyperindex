@@ -120,6 +120,25 @@ export async function updateReserveUsdValues(
     decimals,
     timestamp
   );
+
+  // Per-pool (per-market) breakdown: bucket the same deltas by pool_id.
+  await updatePoolStatsIncremental(
+    context,
+    reserve.pool_id,
+    oldSuppliesUsd,
+    oldBorrowsUsd,
+    oldAvailableUsd,
+    suppliesUsd,
+    borrowsUsd,
+    availableUsd,
+    oldSuppliesE8,
+    oldBorrowsE8,
+    oldAvailableE8,
+    suppliesE8,
+    borrowsE8,
+    availableE8,
+    timestamp
+  );
 }
 
 /**
@@ -164,6 +183,12 @@ export async function updateProtocolStatsIncremental(
   const updatedSuppliesE8 = ps.suppliesE8 + suppliesE8Delta;
   const updatedBorrowsE8 = ps.borrowsE8 + borrowsE8Delta;
   const updatedAvailableE8 = ps.availableE8 + availableE8Delta;
+  const updatedCombinedSuppliesUsd = ps.combinedSuppliesUsd + suppliesDelta;
+  const updatedCombinedBorrowsUsd = ps.combinedBorrowsUsd + borrowsDelta;
+  const updatedCombinedAvailableUsd = ps.combinedAvailableUsd + availableDelta;
+  const updatedCombinedSuppliesE8 = ps.combinedSuppliesE8 + suppliesE8Delta;
+  const updatedCombinedBorrowsE8 = ps.combinedBorrowsE8 + borrowsE8Delta;
+  const updatedCombinedAvailableE8 = ps.combinedAvailableE8 + availableE8Delta;
 
   // Calculate revenue deltas from lifetime values
   const deltaProtocolToken = newProtocolAccrued - oldProtocolAccrued;
@@ -193,13 +218,81 @@ export async function updateProtocolStatsIncremental(
     borrowsUsd: updatedBorrowsUsd,
     availableUsd: updatedAvailableUsd,
     tvlUsd: updatedSuppliesUsd,
+    combinedSuppliesUsd: updatedCombinedSuppliesUsd,
+    combinedBorrowsUsd: updatedCombinedBorrowsUsd,
+    combinedAvailableUsd: updatedCombinedAvailableUsd,
+    combinedTvlUsd: updatedCombinedSuppliesUsd,
     suppliesE8: updatedSuppliesE8,
     borrowsE8: updatedBorrowsE8,
     availableE8: updatedAvailableE8,
     tvlE8: updatedSuppliesE8,
+    combinedSuppliesE8: updatedCombinedSuppliesE8,
+    combinedBorrowsE8: updatedCombinedBorrowsE8,
+    combinedAvailableE8: updatedCombinedAvailableE8,
+    combinedTvlE8: updatedCombinedSuppliesE8,
     protocolRevenueUsd: updatedProtocolRevenueUsd,
     supplyRevenueUsd: updatedSupplyRevenueUsd,
     totalRevenueUsd: updatedTotalRevenueUsd,
+    updatedAt: timestamp,
+  });
+}
+
+/**
+ * Incremental update to per-pool PoolStats (one row per market, keyed by
+ * pool_id). Applies the same per-reserve deltas as the protocol-wide stats, but
+ * bucketed to the reserve's own pool — so ProtocolStats stays the all-pool total
+ * while PoolStats gives the per-market breakdown (Global Markets, Isolated
+ * Pendle AUSD, ...). tvl == supplies, matching ProtocolStats.
+ */
+export async function updatePoolStatsIncremental(
+  context: handlerContext,
+  poolId: string,
+  oldSuppliesUsd: number,
+  oldBorrowsUsd: number,
+  oldAvailableUsd: number,
+  newSuppliesUsd: number,
+  newBorrowsUsd: number,
+  newAvailableUsd: number,
+  oldSuppliesE8: bigint,
+  oldBorrowsE8: bigint,
+  oldAvailableE8: bigint,
+  newSuppliesE8: bigint,
+  newBorrowsE8: bigint,
+  newAvailableE8: bigint,
+  timestamp: number
+): Promise<void> {
+  const id = poolId.toLowerCase();
+  const existing = await context.PoolStats.get(id);
+  const base = existing ?? {
+    id,
+    suppliesUsd: 0,
+    borrowsUsd: 0,
+    availableUsd: 0,
+    tvlUsd: 0,
+    suppliesE8: 0n,
+    borrowsE8: 0n,
+    availableE8: 0n,
+    tvlE8: 0n,
+    updatedAt: timestamp,
+  };
+
+  const suppliesUsd = base.suppliesUsd + (newSuppliesUsd - oldSuppliesUsd);
+  const borrowsUsd = base.borrowsUsd + (newBorrowsUsd - oldBorrowsUsd);
+  const availableUsd = base.availableUsd + (newAvailableUsd - oldAvailableUsd);
+  const suppliesE8 = base.suppliesE8 + (newSuppliesE8 - oldSuppliesE8);
+  const borrowsE8 = base.borrowsE8 + (newBorrowsE8 - oldBorrowsE8);
+  const availableE8 = base.availableE8 + (newAvailableE8 - oldAvailableE8);
+
+  context.PoolStats.set({
+    ...base,
+    suppliesUsd,
+    borrowsUsd,
+    availableUsd,
+    tvlUsd: suppliesUsd,
+    suppliesE8,
+    borrowsE8,
+    availableE8,
+    tvlE8: suppliesE8,
     updatedAt: timestamp,
   });
 }

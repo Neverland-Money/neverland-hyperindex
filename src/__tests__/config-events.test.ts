@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
 import { TestHelpers } from './v3-test-helpers';
@@ -6,7 +7,13 @@ import { TestHelpers } from './v3-test-helpers';
 // Disable bootstrap in tests
 process.env.ENVIO_DISABLE_BOOTSTRAP = 'true';
 
-import { POOL_CONFIGURATOR_ID, POOL_ID, ZERO_ADDRESS } from '../helpers/constants';
+import {
+  AUSD_ADDRESS,
+  POOL_CONFIGURATOR_ID,
+  POOL_ID,
+  PT_AUSD_8OCT2026_ADDRESS,
+  ZERO_ADDRESS,
+} from '../helpers/constants';
 import {
   VIEM_ATOKEN_ADDRESS,
   VIEM_EMPTY_ATOKEN_ADDRESS,
@@ -43,6 +50,42 @@ const ADDRESSES = {
   newStrategy: '0x0000000000000000000000000000000000009017',
   vaultMissing: '0x0000000000000000000000000000000000009018',
 };
+
+const PENDLE_AUSD_PROVIDER = '0xb80397a931fcfda3ac999a3a5639c328dc72a58f';
+const CANONICAL_PROVIDER = '0x49d75170f55c964dfdd6726c74fdedee75553a0f';
+const PROVIDER_REGISTRY = '0xd0ccde10cacd12f1c839db6400b82a82ab90fa9b';
+
+function extractYamlContractBlock(configText: string, contractName: string): string {
+  const lines = configText.split('\n');
+  const start = lines.findIndex(line =>
+    new RegExp(`^\\s*- name:\\s*${contractName}\\s*$`).test(line)
+  );
+  assert.notEqual(start, -1, `${contractName} is missing from config.yaml`);
+
+  const blockLines = [lines[start]];
+  for (let i = start + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^\s{6}- name:\s+/.test(line)) break;
+    blockLines.push(line);
+  }
+
+  return blockLines.join('\n');
+}
+
+function readYamlAddressList(block: string): string[] {
+  const lines = block.split('\n');
+  const addressKeyIndex = lines.findIndex(line => /^\s*address:\s*$/.test(line));
+  assert.notEqual(addressKeyIndex, -1, 'PoolAddressesProvider address list is missing');
+
+  const addresses: string[] = [];
+  for (const line of lines.slice(addressKeyIndex + 1)) {
+    if (/^\s{8}[a-zA-Z_][\w-]*:/.test(line)) break;
+    const match = line.match(/^\s*-\s*(0x[0-9a-fA-F]{40})\b/);
+    if (match) addresses.push(match[1].toLowerCase());
+  }
+
+  return addresses;
+}
 
 function loadTestHelpers() {
   return TestHelpers;
@@ -167,6 +210,245 @@ test('addresses provider registry updates pools and contracts', async () => {
     mockDb.entities.ContractToPoolMapping.get(ADDRESSES.configurator)?.pool_id,
     ADDRESSES.provider
   );
+});
+
+// Additive multi-pool invariant: the isolated neverland-pendle-ausd pool is a
+// second Aave market that must be tracked exactly like canonical. AUSD is listed
+// in BOTH pools with DIFFERENT aTokens, so the `${asset}-${poolId}` reserve key
+// and per-aToken SubToken rows must keep the two AUSD reserves fully separate
+// (no overwrite / no double-write of canonical data). PT-AUSD must resolve its
+// known metadata. Leaderboard aggregation stays pool-agnostic by construction.
+test('two pools list the same AUSD asset without colliding; PT-AUSD resolves known metadata', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  const poolIdA = '0x0000000000000000000000000000000000009020'; // canonical market
+  const configuratorA = '0x0000000000000000000000000000000000009021';
+  const aTokenAusdA = '0x0000000000000000000000000000000000009022';
+  const vTokenAusdA = '0x0000000000000000000000000000000000009023';
+  const poolIdB = '0x0000000000000000000000000000000000009024'; // isolated pendle market
+  const configuratorB = '0x0000000000000000000000000000000000009025';
+  const aTokenAusdB = '0x0000000000000000000000000000000000009026';
+  const vTokenAusdB = '0x0000000000000000000000000000000000009027';
+  const aTokenPt = '0x0000000000000000000000000000000000009028';
+  const vTokenPt = '0x0000000000000000000000000000000000009029';
+
+  const poolRow = (id: string, providerId: bigint, configurator: string) => ({
+    id,
+    addressProviderId: providerId,
+    protocol_id: '1',
+    pool: undefined,
+    poolCollateralManager: undefined,
+    poolConfiguratorImpl: undefined,
+    poolConfigurator: configurator,
+    poolDataProviderImpl: undefined,
+    poolImpl: undefined,
+    proxyPriceProvider: undefined,
+    bridgeProtocolFee: undefined,
+    flashloanPremiumToProtocol: undefined,
+    flashloanPremiumTotal: undefined,
+    active: true,
+    paused: false,
+    lastUpdateTimestamp: 1000,
+  });
+
+  mockDb = mockDb.entities.Protocol.set({ id: '1' });
+  mockDb = mockDb.entities.Pool.set(poolRow(poolIdA, 1n, configuratorA));
+  mockDb = mockDb.entities.Pool.set(poolRow(poolIdB, 2n, configuratorB));
+  mockDb = mockDb.entities.ContractToPoolMapping.set({ id: configuratorA, pool_id: poolIdA });
+  mockDb = mockDb.entities.ContractToPoolMapping.set({ id: configuratorB, pool_id: poolIdB });
+
+  const initReserve = async (
+    configurator: string,
+    asset: string,
+    aToken: string,
+    vToken: string,
+    block: number
+  ) => {
+    const init = TestHelpers.PoolConfigurator.ReserveInitialized.createMockEvent({
+      asset,
+      aToken,
+      stableDebtToken: ZERO_ADDRESS,
+      variableDebtToken: vToken,
+      interestRateStrategyAddress: ADDRESSES.interestStrategy,
+      ...eventData(block, block * 10, configurator),
+    });
+    mockDb = await TestHelpers.PoolConfigurator.ReserveInitialized.processEvent({
+      event: init,
+      mockDb,
+    });
+  };
+
+  // AUSD listed in BOTH markets (distinct aTokens), then PT-AUSD in the isolated one.
+  await initReserve(configuratorA, AUSD_ADDRESS, aTokenAusdA, vTokenAusdA, 10);
+  await initReserve(configuratorB, AUSD_ADDRESS, aTokenAusdB, vTokenAusdB, 11);
+  await initReserve(configuratorB, PT_AUSD_8OCT2026_ADDRESS, aTokenPt, vTokenPt, 12);
+
+  // The two AUSD reserves are distinct rows keyed by `${asset}-${pool}` and do not collide.
+  const reserveAusdA = mockDb.entities.Reserve.get(`${AUSD_ADDRESS}-${poolIdA}`);
+  const reserveAusdB = mockDb.entities.Reserve.get(`${AUSD_ADDRESS}-${poolIdB}`);
+  assert.ok(reserveAusdA, 'canonical AUSD reserve exists');
+  assert.ok(reserveAusdB, 'isolated AUSD reserve exists');
+  assert.notEqual(reserveAusdA?.id, reserveAusdB?.id);
+  assert.equal(reserveAusdA?.aToken_id, aTokenAusdA);
+  assert.equal(reserveAusdB?.aToken_id, aTokenAusdB);
+  assert.equal(reserveAusdA?.symbol, 'AUSD');
+  assert.equal(reserveAusdB?.symbol, 'AUSD');
+
+  // Per-pool SubToken rows route each aToken to its own market.
+  assert.equal(mockDb.entities.SubToken.get(aTokenAusdA)?.pool_id, poolIdA);
+  assert.equal(mockDb.entities.SubToken.get(aTokenAusdB)?.pool_id, poolIdB);
+
+  // PT-AUSD resolves its hardcoded known metadata (6 decimals — not the 18-decimal fallback).
+  const reservePt = mockDb.entities.Reserve.get(`${PT_AUSD_8OCT2026_ADDRESS}-${poolIdB}`);
+  assert.equal(reservePt?.symbol, 'PT-AUSD-8OCT2026');
+  assert.equal(reservePt?.name, 'PT AUSD 8OCT2026');
+  assert.equal(reservePt?.decimals, 6);
+});
+
+test('Pendle isolated provider static bootstrap is a single explicit address slot', () => {
+  const configText = readFileSync('config.yaml', 'utf8');
+  const providerBlock = extractYamlContractBlock(configText, 'PoolAddressesProvider');
+  const addresses = readYamlAddressList(providerBlock);
+
+  assert.equal(
+    new Set(addresses).size,
+    addresses.length,
+    'PoolAddressesProvider bootstrap addresses must not contain duplicates'
+  );
+  assert.equal(
+    addresses.length,
+    1,
+    'neverland-pendle-ausd must bootstrap exactly one isolated PoolAddressesProvider address'
+  );
+  assert.notEqual(
+    addresses[0],
+    CANONICAL_PROVIDER,
+    'canonical PoolAddressesProvider must remain registry-discovered, not statically bootstrapped'
+  );
+  assert.notEqual(
+    addresses[0],
+    PROVIDER_REGISTRY,
+    'provider registry address is not an isolated PoolAddressesProvider'
+  );
+  assert.notEqual(
+    addresses[0],
+    ZERO_ADDRESS,
+    'isolated PoolAddressesProvider bootstrap address must not be zero'
+  );
+  assert.equal(
+    addresses[0],
+    PENDLE_AUSD_PROVIDER,
+    'bootstrap address must be the deployed PoolAddressesProvider-neverland-pendle-ausd'
+  );
+});
+
+test('static provider bootstrap preserves isolated pool events before registry registration', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  const poolUpdate = TestHelpers.PoolAddressesProvider.PoolUpdated.createMockEvent({
+    oldAddress: ZERO_ADDRESS,
+    newAddress: ADDRESSES.pool,
+    ...eventData(20, 1200, ADDRESSES.provider),
+  });
+  mockDb = await TestHelpers.PoolAddressesProvider.PoolUpdated.processEvent({
+    event: poolUpdate,
+    mockDb,
+  });
+
+  const proxyConfigurator = TestHelpers.PoolAddressesProvider.ProxyCreated.createMockEvent({
+    id: POOL_CONFIGURATOR_ID,
+    proxyAddress: ADDRESSES.configurator,
+    implementationAddress: ADDRESSES.configImpl,
+    ...eventData(21, 1210, ADDRESSES.provider),
+  });
+  mockDb = await TestHelpers.PoolAddressesProvider.ProxyCreated.processEvent({
+    event: proxyConfigurator,
+    mockDb,
+  });
+
+  const configuratorUpdate =
+    TestHelpers.PoolAddressesProvider.PoolConfiguratorUpdated.createMockEvent({
+      oldAddress: ZERO_ADDRESS,
+      newAddress: ADDRESSES.configurator,
+      ...eventData(22, 1220, ADDRESSES.provider),
+    });
+  mockDb = await TestHelpers.PoolAddressesProvider.PoolConfiguratorUpdated.processEvent({
+    event: configuratorUpdate,
+    mockDb,
+  });
+
+  const priceOracleUpdate = TestHelpers.PoolAddressesProvider.PriceOracleUpdated.createMockEvent({
+    oldAddress: ZERO_ADDRESS,
+    newAddress: ADDRESSES.priceOracle,
+    ...eventData(23, 1230, ADDRESSES.provider),
+  });
+  mockDb = await TestHelpers.PoolAddressesProvider.PriceOracleUpdated.processEvent({
+    event: priceOracleUpdate,
+    mockDb,
+  });
+
+  const dataProviderUpdate =
+    TestHelpers.PoolAddressesProvider.PoolDataProviderUpdated.createMockEvent({
+      oldAddress: ZERO_ADDRESS,
+      newAddress: ADDRESSES.dataProvider,
+      ...eventData(24, 1240, ADDRESSES.provider),
+    });
+  mockDb = await TestHelpers.PoolAddressesProvider.PoolDataProviderUpdated.processEvent({
+    event: dataProviderUpdate,
+    mockDb,
+  });
+
+  let pool = mockDb.entities.Pool.get(ADDRESSES.provider);
+  assert.equal(pool?.addressProviderId, 0n);
+  assert.equal(pool?.pool, ADDRESSES.pool);
+  assert.equal(pool?.poolConfigurator, ADDRESSES.configurator);
+  assert.equal(pool?.proxyPriceProvider, ADDRESSES.priceOracle);
+  assert.equal(pool?.poolDataProviderImpl, ADDRESSES.dataProvider);
+  assert.equal(
+    mockDb.entities.ContractToPoolMapping.get(ADDRESSES.configurator)?.pool_id,
+    ADDRESSES.provider
+  );
+
+  const register =
+    TestHelpers.PoolAddressesProviderRegistry.AddressesProviderRegistered.createMockEvent({
+      addressesProvider: ADDRESSES.provider,
+      id: 2n,
+      ...eventData(25, 1250, ADDRESSES.registry),
+    });
+  mockDb = await TestHelpers.PoolAddressesProviderRegistry.AddressesProviderRegistered.processEvent(
+    {
+      event: register,
+      mockDb,
+    }
+  );
+
+  pool = mockDb.entities.Pool.get(ADDRESSES.provider);
+  assert.equal(pool?.addressProviderId, 2n);
+  assert.equal(pool?.pool, ADDRESSES.pool);
+  assert.equal(pool?.poolConfigurator, ADDRESSES.configurator);
+  assert.equal(pool?.proxyPriceProvider, ADDRESSES.priceOracle);
+  assert.equal(pool?.poolDataProviderImpl, ADDRESSES.dataProvider);
+
+  const init = TestHelpers.PoolConfigurator.ReserveInitialized.createMockEvent({
+    asset: AUSD_ADDRESS,
+    aToken: ADDRESSES.aToken,
+    stableDebtToken: ZERO_ADDRESS,
+    variableDebtToken: ADDRESSES.vToken,
+    interestRateStrategyAddress: ADDRESSES.interestStrategy,
+    ...eventData(26, 1260, ADDRESSES.configurator),
+  });
+  mockDb = await TestHelpers.PoolConfigurator.ReserveInitialized.processEvent({
+    event: init,
+    mockDb,
+  });
+
+  const reserve = mockDb.entities.Reserve.get(`${AUSD_ADDRESS}-${ADDRESSES.provider}`);
+  assert.equal(reserve?.pool_id, ADDRESSES.provider);
+  assert.equal(reserve?.symbol, 'AUSD');
 });
 
 test('pool configurator events update reserves and configuration history', async () => {

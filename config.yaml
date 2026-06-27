@@ -229,8 +229,29 @@ networks:
       # remove either side.
 
       # PoolAddressesProvider - registered from PoolAddressesProviderRegistry
+      #
+      # ISOLATED neverland-pendle-ausd POOL (ProviderId 2): that pool is deployed
+      # BEFORE its provider is registered in the on-chain registry (registration is
+      # a later timelock txn). Dynamic registration is FORWARD-ONLY, so to capture
+      # the isolated pool's full history from its deploy block, statically bootstrap
+      # its provider by giving this entry the deployed address below (same contract
+      # name -> same handler; Envio dedupes (name,address) so the later
+      # AddressesProviderRegistered event is a harmless no-op, exactly like the LP
+      # pools above). The whole Pool/Configurator/reserve/aToken chain then flows
+      # through the SAME config.ts/pool.ts/tokenization handlers with no other change.
+      # Full runbook + rationale: docs/isolated-pool-indexing.md
       - name: PoolAddressesProvider
         abi_file_path: abis/lending/PoolAddressesProvider.json
+        # The isolated neverland-pendle-ausd pool has EXACTLY ONE
+        # PoolAddressesProvider (on-chain ProviderId 2), so this list must hold
+        # EXACTLY ONE address: the deployed
+        # PoolAddressesProvider-neverland-pendle-ausd address from the live deploy.
+        # Inherits the network start_block (full historical backfill). The canonical
+        # pool's provider stays purely dynamic (registered via
+        # PoolAddressesProviderRegistry.AddressesProviderRegistered) and is NOT listed
+        # here. Runbook: docs/isolated-pool-indexing.md.
+        address:
+          - 0xb80397A931FcFdA3aC999a3a5639C328Dc72A58F # PoolAddressesProvider-neverland-pendle-ausd
         handler: src/handlers/config.ts
         events:
           - event: ProxyCreated(bytes32 indexed id, address indexed proxyAddress, address indexed implementationAddress)
