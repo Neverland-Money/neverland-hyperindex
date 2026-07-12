@@ -252,10 +252,15 @@ async function main(): Promise<void> {
       combMiss.push(`${user} combined ${p.combinedMultiplier} -> ${l.combinedMultiplier}`);
   }
   console.log(`1) Multiplier components over ${shared} shared users:`);
-  const report = (label: string, arr: string[], isRegression: boolean) => {
+  const report = (
+    label: string,
+    arr: string[],
+    isRegression: boolean,
+    denominator: number = shared
+  ) => {
     const tag =
       arr.length === 0 ? 'OK' : !caughtUp ? 'info' : isRegression ? 'REGRESSION' : 'review';
-    console.log(`   ${label}: ${arr.length} mismatches (${pct(arr.length, shared)}) [${tag}]`);
+    console.log(`   ${label}: ${arr.length} mismatches (${pct(arr.length, denominator)}) [${tag}]`);
     arr.slice(0, SAMPLE).forEach(s => console.log(`      ${s}`));
     if (isRegression && caughtUp) regressions += arr.length;
   };
@@ -314,7 +319,12 @@ async function main(): Promise<void> {
   console.log(
     `2) Pre-Balancer epochs (endBlock < ${LP_BALANCER_AUTORANGE_CUTOVER_BLOCK}): ${preChecked} compared`
   );
-  report('   EpochLeaderboardStats (must match at endpoint precision)', epochMiss, true);
+  report(
+    '   EpochLeaderboardStats (must match at endpoint precision)',
+    epochMiss,
+    true,
+    preChecked
+  );
   console.log('');
 
   // ---- 3. Aggregate LP drift review ----
