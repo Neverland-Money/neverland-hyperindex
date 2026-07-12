@@ -5,9 +5,9 @@
  * "spread across blocks" view), lifetime points, veDUST (locks + synced voting power),
  * lending positions (UserReserve), and LP positions (UserLPPosition).
  *
- * Goal: confirm local AGREES with prod where it should (wallets with no current LP),
- * and legitimately DIFFERS where it should (a wallet with Balancer AutoRange LP earns
- * extra LP points in the post-cutover epoch that prod's deployed code does not track).
+ * Goal: diagnose local-vs-prod differences without assuming either endpoint's deployed
+ * LP implementation. LP points moved V2 -> Balancer -> V2; per-epoch LP fields are
+ * aggregate across pools, while position counters are cumulative rather than era-scoped.
  *
  *   LOCAL_GRAPHQL_URL (default http://localhost:8080/v1/graphql)
  *   PROD_GRAPHQL_URL  (default https://index.neverland.money/v1/graphql)
@@ -15,15 +15,26 @@
  * Read-only.
  */
 
+import {
+  BALANCER_AUTORANGE_V3_POOL_ADDRESS,
+  LP_BALANCER_AUTORANGE_CUTOVER_BLOCK,
+  LP_V2_CUTOVER_BLOCK,
+  LP_V2_RESUME_CUTOVER_BLOCK,
+} from '../src/helpers/constants';
+
 const LOCAL = process.env.LOCAL_GRAPHQL_URL || 'http://localhost:8080/v1/graphql';
 const PROD = process.env.PROD_GRAPHQL_URL || 'https://index.neverland.money/v1/graphql';
+const V2_LP_POOL_ADDRESS = '0x86dbf00485871c901c5129bd525348db96c2eb2d';
 
 const WALLETS = [
   {
     addr: '0xcb69535ABBc95a042914507F963bDD74ad0025FF',
-    expect: 'MORE LP points in the last epoch — holds Balancer LP (local tracks it, prod does not)',
+    note: 'historical LP activity — inspect aggregate epoch drift and cumulative pool counters',
   },
-  { addr: '0x038201e05D140124952E34E31665420489288338', expect: 'agree — no LP at all' },
+  {
+    addr: '0x038201e05D140124952E34E31665420489288338',
+    note: 'no known LP activity — useful as a non-LP comparison wallet',
+  },
 ];
 
 // Relative delta above which we call a field a real DIFFERENCE (below this is
@@ -31,8 +42,9 @@ const WALLETS = [
 const NOISE_REL = 0.01; // 1%
 
 interface EpochStat {
-  epochNumber: string;
+  epochNumber: string | number;
   totalPointsWithMultiplier: string | number;
+  lpPoints: string | number;
   lpPointsWithMultiplier: string | number;
 }
 interface Points {
@@ -57,6 +69,11 @@ interface LpPos {
   pool: string;
   settledLpPoints: string | number;
   valueUsd: string | number;
+}
+interface AggregatedLpPos {
+  positions: number;
+  settledLpPoints: number;
+  valueUsd: number;
 }
 interface WalletData {
   epochs: EpochStat[];
@@ -84,7 +101,7 @@ async function fetchWallet(url: string, addr: string): Promise<WalletData> {
   const a = addr.toLowerCase();
   const q = `query {
     UserEpochStats(where: { user_id: { _eq: "${a}" } }, order_by: { epochNumber: asc }) {
-      epochNumber totalPointsWithMultiplier lpPointsWithMultiplier
+      epochNumber totalPointsWithMultiplier lpPoints lpPointsWithMultiplier
     }
     UserPoints(where: { id: { _eq: "${a}" } }) { lifetimeTotalPoints }
     UserLeaderboardState(where: { id: { _eq: "${a}" } }) { votingPower combinedMultiplier lifetimePoints }
@@ -118,19 +135,33 @@ function rel(local: number, prod: number): number {
 }
 function tag(local: number, prod: number): string {
   const r = rel(local, prod);
-  if (r === 0) return 'EXACT';
+  if (r === 0) return '~same (serialized precision)';
   if (r < NOISE_REL) return `~match (${(r * 100).toFixed(4)}%)`;
   return `DIFF ${local > prod ? '+' : '-'}${(r * 100).toFixed(2)}% (local ${local > prod ? '>' : '<'} prod)`;
 }
 const sum = (rows: { lockedAmount?: string | number }[], k: 'lockedAmount'): number =>
   rows.reduce((s, r) => s + n(r[k]), 0);
 
-function reportWallet(addr: string, expect: string, L: WalletData, P: WalletData): void {
+function aggregateLpByPool(rows: LpPos[]): Map<string, AggregatedLpPos> {
+  const byPool = new Map<string, AggregatedLpPos>();
+  for (const row of rows) {
+    const pool = row.pool.toLowerCase();
+    const current = byPool.get(pool) ?? { positions: 0, settledLpPoints: 0, valueUsd: 0 };
+    byPool.set(pool, {
+      positions: current.positions + 1,
+      settledLpPoints: current.settledLpPoints + n(row.settledLpPoints),
+      valueUsd: current.valueUsd + n(row.valueUsd),
+    });
+  }
+  return byPool;
+}
+
+function reportWallet(addr: string, note: string, L: WalletData, P: WalletData): void {
   console.log(`\n${'='.repeat(78)}`);
   console.log(`WALLET ${addr}`);
-  console.log(`  expected: ${expect}`);
+  console.log(`  note: ${note}`);
 
-  console.log(`\n  Per-epoch points (totalPointsWithMultiplier | lpPoints):`);
+  console.log(`\n  Per-epoch points (total multiplied | raw LP | multiplied LP):`);
   const epochs = Array.from(
     new Set([...L.epochs, ...P.epochs].map(e => String(e.epochNumber)))
   ).sort((x, y) => Number(x) - Number(y));
@@ -139,11 +170,13 @@ function reportWallet(addr: string, expect: string, L: WalletData, P: WalletData
     const pe = P.epochs.find(e => String(e.epochNumber) === ep);
     const lt = n(le?.totalPointsWithMultiplier);
     const pt = n(pe?.totalPointsWithMultiplier);
-    const llp = n(le?.lpPointsWithMultiplier);
-    const plp = n(pe?.lpPointsWithMultiplier);
+    const llpRaw = n(le?.lpPoints);
+    const plpRaw = n(pe?.lpPoints);
+    const llpMultiplied = n(le?.lpPointsWithMultiplier);
+    const plpMultiplied = n(pe?.lpPointsWithMultiplier);
     const lpNote =
-      llp || plp
-        ? `  lp local=${llp.toExponential(3)} prod=${plp.toExponential(3)} ${tag(llp, plp)}`
+      llpRaw || plpRaw || llpMultiplied || plpMultiplied
+        ? `  rawLP=${tag(llpRaw, plpRaw)} multipliedLP=${tag(llpMultiplied, plpMultiplied)}`
         : '';
     console.log(`    epoch ${ep}: ${tag(lt, pt)}${lpNote}`);
   }
@@ -173,13 +206,15 @@ function reportWallet(addr: string, expect: string, L: WalletData, P: WalletData
   }
 
   console.log(`\n  LP positions (${L.lp.length} local / ${P.lp.length} prod):`);
-  const pools = Array.from(new Set([...L.lp, ...P.lp].map(p => p.pool)));
+  const localLpByPool = aggregateLpByPool(L.lp);
+  const prodLpByPool = aggregateLpByPool(P.lp);
+  const pools = Array.from(new Set([...localLpByPool.keys(), ...prodLpByPool.keys()]));
   if (pools.length === 0) console.log(`    (none)`);
   for (const pool of pools) {
-    const lp = L.lp.find(p => p.pool === pool);
-    const pp = P.lp.find(p => p.pool === pool);
+    const lp = localLpByPool.get(pool);
+    const pp = prodLpByPool.get(pool);
     console.log(
-      `    ${pool.slice(0, 12)}..: settledLpPoints ${tag(n(lp?.settledLpPoints), n(pp?.settledLpPoints))} | valueUsd ${tag(n(lp?.valueUsd), n(pp?.valueUsd))}`
+      `    ${pool.slice(0, 12)}..: positions ${lp?.positions ?? 0}/${pp?.positions ?? 0} | cumulative settledLpPoints ${tag(lp?.settledLpPoints ?? 0, pp?.settledLpPoints ?? 0)} | current valueUsd ${tag(lp?.valueUsd ?? 0, pp?.valueUsd ?? 0)}`
     );
   }
 }
@@ -189,14 +224,25 @@ async function main(): Promise<void> {
   console.log(`  local: ${LOCAL}`);
   console.log(`  prod:  ${PROD}`);
   console.log(`  noise threshold (rounding/live-drift): <${NOISE_REL * 100}% = "~match"`);
+  console.log(`  LP eras:`);
+  console.log(
+    `    V2 ${V2_LP_POOL_ADDRESS}: [${LP_V2_CUTOVER_BLOCK}, ${LP_BALANCER_AUTORANGE_CUTOVER_BLOCK})`
+  );
+  console.log(
+    `    Balancer ${BALANCER_AUTORANGE_V3_POOL_ADDRESS}: [${LP_BALANCER_AUTORANGE_CUTOVER_BLOCK}, ${LP_V2_RESUME_CUTOVER_BLOCK})`
+  );
+  console.log(`    V2 resumed: [${LP_V2_RESUME_CUTOVER_BLOCK}, head)`);
   for (const w of WALLETS) {
     const [L, P] = await Promise.all([fetchWallet(LOCAL, w.addr), fetchWallet(PROD, w.addr)]);
-    reportWallet(w.addr, w.expect, L, P);
+    reportWallet(w.addr, w.note, L, P);
   }
   console.log(`\n${'='.repeat(78)}`);
-  console.log(`Read: per-epoch lpPoints is the tell — the Balancer-LP wallet (#0, 0xcb69)`);
-  console.log(`should show a DIFF in the post-cutover epoch (local > prod); the no-LP wallet`);
-  console.log(`(#1, 0x0382) should ~match everywhere (sub-1% = past-epoch rounding + live drift).`);
+  console.log(
+    'Completed diagnostic report. Differences are review-only and do not change the exit status.'
+  );
+  console.log(
+    'Raw per-epoch LP points aggregate all pools; current position counters are approximate, cumulative diagnostics and cannot split the original/resumed V2 eras.'
+  );
 }
 
 main().catch((e: unknown) => {

@@ -32,6 +32,8 @@ import {
   LP_BALANCER_STALE_SETTLEMENT_SECONDS,
   LP_V2_CUTOVER_BLOCK,
   LP_V2_CUTOVER_TIMESTAMP,
+  LP_V2_RESUME_CUTOVER_BLOCK,
+  LP_V2_RESUME_CUTOVER_TIMESTAMP,
   normalizeAddress,
   POINTS_SCALE,
   SECONDS_PER_DAY,
@@ -223,24 +225,67 @@ function isPastBalancerAutoRangeCutover(timestamp: number, blockNumber?: bigint)
   return blockNumber >= BigInt(LP_BALANCER_AUTORANGE_CUTOVER_BLOCK);
 }
 
-function getPoolAccrualEndTimestamp(pool: string): number | undefined {
-  const poolId = normalizeAddress(pool);
-  if (poolId === LEGACY_V3_LP_POOL) {
-    return LP_V2_CUTOVER_TIMESTAMP;
+// LP points bounce back from Balancer AutoRange to UniswapV2 at this cutover:
+// Balancer stops accruing, V2 resumes as the active pool.
+function isPastLpV2ResumeCutover(timestamp: number, blockNumber?: bigint): boolean {
+  if (blockNumber !== undefined) {
+    return blockNumber >= BigInt(LP_V2_RESUME_CUTOVER_BLOCK);
   }
-  if (poolId === V2_LP_POOL) {
-    return LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP;
-  }
-  return undefined;
+  return timestamp >= LP_V2_RESUME_CUTOVER_TIMESTAMP;
+}
+
+// The accrual window for a pool is derived from its OWN persisted LPPoolConfig
+// (isActive / disabledAtTimestamp) -- the exact same single source of truth
+// applyStaticLPPoolCutover just wrote using both timestamp AND blockNumber --
+// rather than re-derived independently from timestamp alone. Two independent
+// boundary checks that can each see a different signal (block height vs.
+// wall-clock time -- live under fast/sub-second block production) would
+// otherwise be able to disagree at the exact instant a pool's era flips,
+// permanently zeroing or double-counting points for that window. This also
+// generalizes correctly to any pool with an LPPoolConfig row, not just the
+// three statically-cutover ones.
+function getPoolAccrualEndTimestamp(poolConfig: LPPoolConfig | null): number | undefined {
+  if (!poolConfig || poolConfig.isActive) return undefined;
+  return poolConfig.disabledAtTimestamp;
 }
 
 function isLegacyV3PoolHardStopped(pool: string, timestamp: number, blockNumber?: bigint): boolean {
   return normalizeAddress(pool) === LEGACY_V3_LP_POOL && isPastLpV2Cutover(timestamp, blockNumber);
 }
 
-function isV2PoolHardStopped(pool: string, timestamp: number, blockNumber?: bigint): boolean {
+// During the Balancer window Transfer and Sync keep replay bookkeeping current,
+// but V2 remains inactive for points, fees, and protocol transaction accounting.
+// Swap has no required replay state and stays fully paused in this interval.
+function isV2PoolTrackingOnly(pool: string, timestamp: number, blockNumber?: bigint): boolean {
   return (
-    normalizeAddress(pool) === V2_LP_POOL && isPastBalancerAutoRangeCutover(timestamp, blockNumber)
+    normalizeAddress(pool) === V2_LP_POOL &&
+    isPastBalancerAutoRangeCutover(timestamp, blockNumber) &&
+    !isPastLpV2ResumeCutover(timestamp, blockNumber)
+  );
+}
+
+// Balancer AutoRange is hard-stopped for good once the resume cutover passes and
+// LP points bounce back to V2.
+function isBalancerPoolHardStopped(timestamp: number, blockNumber?: bigint): boolean {
+  return isPastLpV2ResumeCutover(timestamp, blockNumber);
+}
+
+async function isBalancerResumeTransitionComplete(
+  context: handlerContext,
+  timestamp: number,
+  blockNumber?: bigint
+): Promise<boolean> {
+  if (!isBalancerPoolHardStopped(timestamp, blockNumber)) return false;
+  const config = await context.LPPoolConfig.get(BALANCER_AUTORANGE_V3_POOL);
+  return config?.isActive === false;
+}
+
+// Balancer AutoRange is the active LP points pool only between the Balancer
+// cutover and the resume cutover.
+function isBalancerAutoRangeActiveEra(timestamp: number, blockNumber?: bigint): boolean {
+  return (
+    isPastBalancerAutoRangeCutover(timestamp, blockNumber) &&
+    !isPastLpV2ResumeCutover(timestamp, blockNumber)
   );
 }
 
@@ -478,6 +523,7 @@ export async function applyStaticLPPoolCutover(
   const ensuredLegacyConfig = await ensureLegacyV3PoolConfigEntity(context, timestamp);
   const hasPassedV2Cutover = isPastLpV2Cutover(timestamp, blockNumber);
   const hasPassedBalancerCutover = isPastBalancerAutoRangeCutover(timestamp, blockNumber);
+  const hasPassedV2ResumeCutover = isPastLpV2ResumeCutover(timestamp, blockNumber);
   if (!hasPassedV2Cutover) {
     if (!ensuredLegacyConfig.isActive) {
       context.LPPoolConfig.set({
@@ -491,11 +537,29 @@ export async function applyStaticLPPoolCutover(
     return;
   }
 
-  const ensuredV2Config = await ensureV2PoolConfigEntity(
-    context,
-    timestamp,
-    !hasPassedBalancerCutover || v2Config?.isActive !== false
-  );
+  // V2 is active in its original era (pre-Balancer) and again once resumed;
+  // it's only inactive while Balancer AutoRange is the active pool.
+  const v2ShouldBeActive =
+    !hasPassedBalancerCutover || hasPassedV2ResumeCutover || v2Config?.isActive !== false;
+  const ensuredV2Config = await ensureV2PoolConfigEntity(context, timestamp, v2ShouldBeActive);
+
+  // On reactivation, bump enabledAtTimestamp to the resume boundary. Positions
+  // left over from the pre-Balancer era keep whatever stale lastInRangeTimestamp
+  // they were frozen at when V2 was disabled; settleLPPosition floors accrual at
+  // Math.max(..., poolConfig.enabledAtTimestamp), so without this bump those
+  // positions would silently accrue phantom points for the entire paused window.
+  if (hasPassedV2ResumeCutover && v2Config?.isActive === false && ensuredV2Config.isActive) {
+    const leaderboardState = await context.LeaderboardState.get('current');
+    const currentEpoch = leaderboardState?.currentEpochNumber ?? 1n;
+    context.LPPoolConfig.set({
+      ...ensuredV2Config,
+      enabledAtEpoch: currentEpoch,
+      enabledAtTimestamp: LP_V2_RESUME_CUTOVER_TIMESTAMP,
+      disabledAtEpoch: undefined,
+      disabledAtTimestamp: undefined,
+      lastUpdate: timestamp,
+    });
+  }
 
   if (ensuredLegacyConfig.isActive) {
     await settleLPPoolPositions(context, LEGACY_V3_LP_POOL, LP_V2_CUTOVER_TIMESTAMP);
@@ -514,9 +578,11 @@ export async function applyStaticLPPoolCutover(
     return;
   }
 
-  await ensureBalancerAutoRangePoolConfigEntity(context, timestamp, true);
-
-  if (ensuredV2Config.isActive) {
+  // V2 -> Balancer transition: settle and disable V2 exactly once. `v2ShouldBeActive`
+  // stays true on the first post-cutover call (bridged from the pre-transition state
+  // via the OR above), so this fires precisely then; it must NOT fire again once V2
+  // has resumed (era D), where `ensuredV2Config.isActive` is also true but for good.
+  if (ensuredV2Config.isActive && !hasPassedV2ResumeCutover) {
     await settleLPPoolPositions(context, V2_LP_POOL, LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP);
     const leaderboardState = await context.LeaderboardState.get('current');
     const currentEpoch = leaderboardState?.currentEpochNumber ?? 1n;
@@ -525,6 +591,40 @@ export async function applyStaticLPPoolCutover(
       isActive: false,
       disabledAtEpoch: currentEpoch,
       disabledAtTimestamp: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP,
+      lastUpdate: timestamp,
+    });
+  }
+
+  // Balancer is active only between the Balancer cutover and the resume cutover.
+  // On the transition call this stays bridged to true (old persisted state) so
+  // the settle-on-disable below still sees an active pool; subsequent era-D
+  // calls see the persisted false and stay stable, same pattern as V2 above.
+  const balancerShouldBeActive = !hasPassedV2ResumeCutover || balancerConfig?.isActive !== false;
+  const ensuredBalancerConfig = await ensureBalancerAutoRangePoolConfigEntity(
+    context,
+    timestamp,
+    balancerShouldBeActive
+  );
+
+  if (!hasPassedV2ResumeCutover) {
+    return;
+  }
+
+  // Balancer -> V2 (resume) transition: settle and disable Balancer exactly once,
+  // the moment it flips from active to inactive.
+  if (ensuredBalancerConfig.isActive) {
+    await settleLPPoolPositions(
+      context,
+      BALANCER_AUTORANGE_V3_POOL,
+      LP_V2_RESUME_CUTOVER_TIMESTAMP
+    );
+    const leaderboardState = await context.LeaderboardState.get('current');
+    const currentEpoch = leaderboardState?.currentEpochNumber ?? 1n;
+    context.LPPoolConfig.set({
+      ...ensuredBalancerConfig,
+      isActive: false,
+      disabledAtEpoch: currentEpoch,
+      disabledAtTimestamp: LP_V2_RESUME_CUTOVER_TIMESTAMP,
       lastUpdate: timestamp,
     });
   }
@@ -1143,25 +1243,6 @@ async function listPoolLPPositions(context: handlerContext, pool: string) {
   );
 }
 
-async function getConfiguredLPPoolCount(context: handlerContext): Promise<number> {
-  const configs = await listActiveLPPoolConfigs(context);
-  return configs.length;
-}
-
-async function getEffectiveLpRateBps(
-  context: handlerContext,
-  poolConfig: { lpRateBps: bigint }
-): Promise<bigint> {
-  const configuredPools = await getConfiguredLPPoolCount(context);
-  if (configuredPools <= 1) {
-    const config = await context.LeaderboardConfig.get('global');
-    if (config?.lpRateBps !== undefined) {
-      return config.lpRateBps;
-    }
-  }
-  return poolConfig.lpRateBps;
-}
-
 /**
  * Calculate paired token USD price from pool sqrtPriceX96 and AUSD price.
  *
@@ -1540,16 +1621,25 @@ async function settleLPPosition(
     epochStart = currentTimestamp;
   }
 
-  const accrualEndTimestamp = getPoolAccrualEndTimestamp(position.pool);
+  const poolConfig = await getEffectiveLPPoolConfig(context, position.pool);
+
+  const accrualEndTimestamp = getPoolAccrualEndTimestamp(poolConfig);
   if (accrualEndTimestamp !== undefined) {
     effectiveTimestamp = Math.min(effectiveTimestamp, accrualEndTimestamp);
   }
 
   let additionalInRangeSeconds = 0n;
 
-  // If position was in range, accumulate the time since last update
+  // If position was in range, accumulate the time since last update. Floored
+  // by poolConfig.enabledAtTimestamp so a position that sat idle through a
+  // paused era (e.g. V2 during the Balancer window) doesn't have that paused
+  // span counted as in-range time once its pool reactivates -- mirrors the
+  // same floor accrualStart applies to the points calculation below.
   if (position.isInRange && position.lastInRangeTimestamp > 0) {
-    const secondsElapsed = effectiveTimestamp - position.lastInRangeTimestamp;
+    const inRangeStart = poolConfig
+      ? Math.max(position.lastInRangeTimestamp, poolConfig.enabledAtTimestamp)
+      : position.lastInRangeTimestamp;
+    const secondsElapsed = effectiveTimestamp - inRangeStart;
     if (secondsElapsed > 0) {
       additionalInRangeSeconds = BigInt(secondsElapsed);
     }
@@ -1557,7 +1647,6 @@ async function settleLPPosition(
 
   const newAccumulatedSeconds = position.accumulatedInRangeSeconds + additionalInRangeSeconds;
 
-  const poolConfig = await getEffectiveLPPoolConfig(context, position.pool);
   if (!poolConfig || epochNumber === 0n) {
     const reasons = [];
     if (!poolConfig) reasons.push('missing_pool_config');
@@ -1596,8 +1685,7 @@ async function settleLPPosition(
     pointsSeconds = BigInt(effectiveTimestamp - accrualStart);
   }
 
-  const effectiveLpRateBps =
-    precomputedLpRateBps ?? (await getEffectiveLpRateBps(context, poolConfig));
+  const effectiveLpRateBps = precomputedLpRateBps ?? poolConfig.lpRateBps;
   let pointsEarned = 0n;
   if (pointsSeconds > 0n && position.valueUsd > 0n && effectiveLpRateBps > 0n) {
     const numerator = position.valueUsd * effectiveLpRateBps * pointsSeconds * POINTS_SCALE;
@@ -1704,11 +1792,9 @@ async function settleBalancerAutoRangePoolPositionsClockwise(
     poolConfig,
     timestamp
   );
-  // Precompute the LP rate once for the whole sweep — it depends only on the pool's
-  // lpRateBps + global config/pool-count, so it is loop-invariant (every swept position
-  // has pool === poolId). Threading it in avoids the per-position getEffectiveLpRateBps
-  // fan-out (LP registry + N config reads), matching settleV2PoolPositions.
-  const effectiveLpRateBps = await getEffectiveLpRateBps(context, poolConfig);
+  // Precompute the pool-local LP rate once for the whole sweep. Every swept
+  // position belongs to poolId, so the same canonical rate applies to each.
+  const effectiveLpRateBps = poolConfig.lpRateBps;
   const startIndex = cursor.cursorIndex % positions.length;
   const maxScans = Math.min(positions.length, LP_BALANCER_MAX_SETTLEMENTS_PER_SWAP);
   let nextCursorIndex = startIndex;
@@ -2681,6 +2767,20 @@ UniswapV3Pool.Burn.handler(async ({ event, context }) => {
 //     UniswapV2Pair Handlers
 // ============================================
 
+function getV2TrackingSettlement(
+  position: { accumulatedInRangeSeconds: bigint; settledLpPoints: bigint } | undefined,
+  timestamp: number
+) {
+  return {
+    newAccumulatedSeconds: position?.accumulatedInRangeSeconds ?? 0n,
+    newSettledPoints: position?.settledLpPoints ?? 0n,
+    pointsEarned: 0n,
+    settledAt: timestamp,
+    pointsStartTimestamp: 0,
+    pointsEndTimestamp: timestamp,
+  };
+}
+
 async function applyV2LiquidityDelta(
   context: handlerContext,
   poolConfig: LPPoolConfig,
@@ -2698,20 +2798,17 @@ async function applyV2LiquidityDelta(
   const pool = normalizeAddress(poolConfig.pool);
   const positionId = getV2PositionId(pool, normalizedUserId);
   const existing = await context.UserLPPosition.get(positionId);
-  await getOrCreateUser(context, normalizedUserId);
+  const isInactiveV2Tracking = pool === V2_LP_POOL && !poolConfig.isActive;
+  if (!isInactiveV2Tracking) {
+    await getOrCreateUser(context, normalizedUserId);
+  }
 
-  const settlement = existing
-    ? await settleLPPosition(context, existing, timestamp)
-    : {
-        newAccumulatedSeconds: 0n,
-        newSettledPoints: 0n,
-        pointsEarned: 0n,
-        settledAt: timestamp,
-        pointsStartTimestamp: 0,
-        pointsEndTimestamp: timestamp,
-      };
+  const settlement =
+    existing && poolConfig.isActive
+      ? await settleLPPosition(context, existing, timestamp)
+      : getV2TrackingSettlement(existing, timestamp);
 
-  if (existing && settlement.pointsEarned > 0n) {
+  if (poolConfig.isActive && existing && settlement.pointsEarned > 0n) {
     await updateUserEpochLPPoints(
       context,
       normalizedUserId,
@@ -2783,7 +2880,7 @@ async function settleV2PoolPositions(
   timestamp: number
 ): Promise<void> {
   const poolId = normalizeAddress(pool);
-  const poolConfig = await getActiveLPPoolConfig(context, poolId);
+  const poolConfig = await context.LPPoolConfig.get(poolId);
   if (!poolConfig || !isV2PoolConfig(poolConfig)) return;
 
   const poolState = await getOrCreateLPPoolState(context, poolId, timestamp);
@@ -2803,21 +2900,23 @@ async function settleV2PoolPositions(
     return;
   }
 
-  // The effective LP rate is loop-invariant for one pool's sweep (it depends only on the
-  // pool's lpRateBps + global config/pool-count), but getEffectiveLpRateBps fans out to
-  // listActiveLPPoolConfigs (LPPoolRegistry + N config reads) on every call. Compute it
-  // once and thread it in so that fan-out is O(1) per sweep, not O(positions). Identical
-  // value: every V2 position here has pool === poolId, so the per-position rate equals
-  // this one.
-  const effectiveLpRateBps = await getEffectiveLpRateBps(context, poolConfig);
+  // Every V2 position in this sweep belongs to poolId, so the pool-local rate is
+  // loop-invariant. Tracking-only eras explicitly use zero to suppress points.
+  const effectiveLpRateBps = poolConfig.isActive ? poolConfig.lpRateBps : 0n;
 
   const touchedUsers = new Set<string>();
   for (const position of positions) {
     if (!position.id.startsWith('v2:')) continue;
     if (position.liquidity <= 0n) continue;
 
-    const settlement = await settleLPPosition(context, position, timestamp, effectiveLpRateBps);
-    if (settlement.pointsEarned > 0n) {
+    if (poolConfig.isActive) {
+      await getOrCreateUser(context, position.user_id);
+    }
+
+    const settlement = poolConfig.isActive
+      ? await settleLPPosition(context, position, timestamp, effectiveLpRateBps)
+      : getV2TrackingSettlement(position, timestamp);
+    if (poolConfig.isActive && settlement.pointsEarned > 0n) {
       await updateUserEpochLPPoints(
         context,
         position.user_id,
@@ -2869,11 +2968,15 @@ UniswapV2Pair.Transfer.handler(async ({ event, context }) => {
   const timestamp = Number(event.block.timestamp);
   const blockNumber = BigInt(event.block.number);
   await applyStaticLPPoolCutover(context, timestamp, blockNumber);
-  if (isV2PoolHardStopped(pool, timestamp, blockNumber)) return;
+  const isTrackingOnly = isV2PoolTrackingOnly(pool, timestamp, blockNumber);
 
-  await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
+  if (!isTrackingOnly) {
+    await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
+  }
 
-  const poolConfig = await getActiveLPPoolConfig(context, pool);
+  const poolConfig = isTrackingOnly
+    ? await context.LPPoolConfig.get(pool)
+    : await getActiveLPPoolConfig(context, pool);
   if (!poolConfig || !isV2PoolConfig(poolConfig)) return;
 
   const amount = event.params.value;
@@ -2951,7 +3054,7 @@ UniswapV2Pair.Swap.handler(async ({ event, context }) => {
   const blockNumber = BigInt(event.block.number);
   const pool = normalizeAddress(event.srcAddress);
   await applyStaticLPPoolCutover(context, timestamp, blockNumber);
-  if (isV2PoolHardStopped(pool, timestamp, blockNumber)) return;
+  if (isV2PoolTrackingOnly(pool, timestamp, blockNumber)) return;
 
   await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
 
@@ -2992,11 +3095,15 @@ UniswapV2Pair.Sync.handler(async ({ event, context }) => {
   const timestamp = Number(event.block.timestamp);
   const blockNumber = BigInt(event.block.number);
   await applyStaticLPPoolCutover(context, timestamp, blockNumber);
-  if (isV2PoolHardStopped(pool, timestamp, blockNumber)) return;
+  const isTrackingOnly = isV2PoolTrackingOnly(pool, timestamp, blockNumber);
 
-  await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
+  if (!isTrackingOnly) {
+    await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
+  }
 
-  const poolConfig = await getActiveLPPoolConfig(context, pool);
+  const poolConfig = isTrackingOnly
+    ? await context.LPPoolConfig.get(pool)
+    : await getActiveLPPoolConfig(context, pool);
   if (!poolConfig || !isV2PoolConfig(poolConfig)) return;
 
   const reserve0 = BigInt(event.params.reserve0);
@@ -3048,13 +3155,15 @@ BalancerAutoRangePool.Transfer.handler(async ({ event, context }) => {
 
   const timestamp = Number(event.block.timestamp);
   const blockNumber = BigInt(event.block.number);
+  if (await isBalancerResumeTransitionComplete(context, timestamp, blockNumber)) return;
   await applyStaticLPPoolCutover(context, timestamp, blockNumber);
+  if (isBalancerPoolHardStopped(timestamp, blockNumber)) return;
   await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
 
   const poolConfig = await ensureBalancerAutoRangePoolConfigEntity(
     context,
     timestamp,
-    isPastBalancerAutoRangeCutover(timestamp, blockNumber)
+    isBalancerAutoRangeActiveEra(timestamp, blockNumber)
   );
   const amount = event.params.value;
   if (amount <= 0n) return;
@@ -3138,10 +3247,12 @@ BalancerVault.LiquidityAdded.handler(
 
     const timestamp = Number(event.block.timestamp);
     const blockNumber = BigInt(event.block.number);
+    if (await isBalancerResumeTransitionComplete(context, timestamp, blockNumber)) return;
     await applyStaticLPPoolCutover(context, timestamp, blockNumber);
+    if (isBalancerPoolHardStopped(timestamp, blockNumber)) return;
     await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
 
-    const isActive = isPastBalancerAutoRangeCutover(timestamp, blockNumber);
+    const isActive = isBalancerAutoRangeActiveEra(timestamp, blockNumber);
     const poolConfig = await ensureBalancerAutoRangePoolConfigEntity(context, timestamp, isActive);
     await applyBalancerAutoRangeLiquidityDelta(
       context,
@@ -3165,10 +3276,12 @@ BalancerVault.LiquidityRemoved.handler(
 
     const timestamp = Number(event.block.timestamp);
     const blockNumber = BigInt(event.block.number);
+    if (await isBalancerResumeTransitionComplete(context, timestamp, blockNumber)) return;
     await applyStaticLPPoolCutover(context, timestamp, blockNumber);
+    if (isBalancerPoolHardStopped(timestamp, blockNumber)) return;
     await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
 
-    const isActive = isPastBalancerAutoRangeCutover(timestamp, blockNumber);
+    const isActive = isBalancerAutoRangeActiveEra(timestamp, blockNumber);
     const poolConfig = await ensureBalancerAutoRangePoolConfigEntity(context, timestamp, isActive);
     await applyBalancerAutoRangeLiquidityDelta(
       context,
@@ -3192,10 +3305,12 @@ BalancerVault.Swap.handler(
 
     const timestamp = Number(event.block.timestamp);
     const blockNumber = BigInt(event.block.number);
+    if (await isBalancerResumeTransitionComplete(context, timestamp, blockNumber)) return;
     await applyStaticLPPoolCutover(context, timestamp, blockNumber);
+    if (isBalancerPoolHardStopped(timestamp, blockNumber)) return;
     await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
 
-    const isActive = isPastBalancerAutoRangeCutover(timestamp, blockNumber);
+    const isActive = isBalancerAutoRangeActiveEra(timestamp, blockNumber);
     const poolConfig = await ensureBalancerAutoRangePoolConfigEntity(context, timestamp, isActive);
     const updatedState = await applyBalancerAutoRangeSwapDelta(
       context,
@@ -3703,6 +3818,7 @@ export {
   getOrCreateLPPoolState,
   getOrCreateLPPoolStats,
   getOrCreateUserLPStats,
+  isPastLpV2ResumeCutover,
   isPositionInRange,
   calculatePositionValueUsd,
   settleLPPosition,

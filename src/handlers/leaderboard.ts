@@ -727,11 +727,22 @@ LeaderboardConfig.LPRateUpdated.handler(async ({ event, context }) => {
     BigInt(event.block.number)
   );
 
+  const pool = normalizeAddress(event.params.pool);
   const timestamp = Number(event.params.timestamp);
-  const config = await getOrInitLeaderboardConfig(context, timestamp);
+  const poolConfig = await context.LPPoolConfig.get(pool);
+  if (!poolConfig) return;
 
-  writeLeaderboardConfig(context, {
-    ...config,
+  // Preserve the old rate for the entire interval preceding this event. The
+  // contract only emits LPRateUpdated for a configured active pool, while the
+  // indexer's local isActive flag can also represent an off-chain points era.
+  // Inactive local pools keep their next rate without accruing paused points.
+  if (poolConfig.isActive) {
+    const { settleLPPoolPositions } = await import('./lp');
+    await settleLPPoolPositions(context, pool, timestamp);
+  }
+
+  context.LPPoolConfig.set({
+    ...poolConfig,
     lpRateBps: event.params.newRate,
     lastUpdate: timestamp,
   });

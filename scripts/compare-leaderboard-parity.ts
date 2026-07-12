@@ -2,9 +2,11 @@
 /**
  * Leaderboard parity check: localhost (this branch) vs production index.
  *
- * Confirms the new code reproduces prod's leaderboard data, EXCEPT for the
- * drift we know about:
- *   - Balancer AutoRange LP points: new LP source, live from block 78,741,015.
+ * Confirms the new code reproduces prod's leaderboard data while reporting the
+ * observed LP implementation drift across the V2 -> Balancer -> V2 eras:
+ *   - Uniswap V2: block 56,436,798 until block 78,741,015.
+ *   - Balancer AutoRange: block 78,741,015 until block 87,190,222.
+ *   - Uniswap V2 resumed: block 87,190,222 onward.
  *   - PartnerNFT double-count fix: 4 static collections; latent in prod.
  *   - Special editions: NONE expected (no special-edition NFTs fed on-chain yet,
  *     so specialEditionMultiplier is neutral 10000 and contributes 0 points).
@@ -16,13 +18,11 @@
  *      mismatches are likely the PartnerNFT fix (verify the user holds a static
  *      collection). combinedMultiplier must match because, with neutral special
  *      editions, (nft*10000*vp)/(10000*10000) === (nft*vp)/10000 exactly.
- *   2. PRE-CUTOVER EPOCHS: EpochLeaderboardStats for epochs whose endBlock is
- *      below the Balancer cutover must MATCH exactly -- zero expected drift, so
- *      any difference is a pure regression.
- *   3. POINTS RECONCILIATION: per user, (local.lifetimePoints - prod.lifetimePoints)
- *      should equal that user's Balancer LP contribution (sum of settledLpPoints
- *      over their Balancer-pool positions). A non-zero residual is unexplained
- *      drift -> a regression. (Only trustworthy once BOTH sides are settled at head.)
+ *   2. PRE-BALANCER EPOCHS: EpochLeaderboardStats for epochs whose endBlock is
+ *      below the Balancer start must match at the precision exposed by each endpoint.
+ *   3. LP DRIFT REVIEW: compare lifetime drift with the aggregate raw lpPoints drift
+ *      from UserEpochStats. Current pool-position counters are diagnostic only: they
+ *      are cumulative and cannot attribute V2 points to its original vs resumed era.
  *
  * Read-only. Run AFTER localhost has synced to head. Exits non-zero if any
  * regression-class mismatch is found.
@@ -34,11 +34,13 @@
 
 import {
   LP_BALANCER_AUTORANGE_CUTOVER_BLOCK,
-  BALANCER_AUTORANGE_V3_POOL_ADDRESS,
+  LP_V2_CUTOVER_BLOCK,
+  LP_V2_RESUME_CUTOVER_BLOCK,
   STATIC_NFT_COLLECTION_ADDRESSES,
 } from '../src/helpers/constants';
 
 type Endpoint = { name: string; url: string; secret: string };
+type BigIntScalar = string | number;
 
 const LOCAL: Endpoint = {
   name: 'local',
@@ -56,33 +58,32 @@ const SAMPLE = 10; // how many example mismatches to print per bucket
 interface ULS {
   id: string;
   user_id: string;
-  votingPower: string;
-  vpTierIndex: string | null;
-  vpMultiplier: string;
-  nftCount: string;
-  nftMultiplier: string;
-  combinedMultiplier: string;
-  lifetimePoints: string;
+  votingPower: BigIntScalar;
+  vpTierIndex: BigIntScalar | null;
+  vpMultiplier: BigIntScalar;
+  nftCount: BigIntScalar;
+  nftMultiplier: BigIntScalar;
+  combinedMultiplier: BigIntScalar;
+  lifetimePoints: BigIntScalar;
   lastUpdate: number;
 }
-interface LPPos {
+interface UserEpochLP {
   id: string;
   user_id: string;
-  pool: string;
-  settledLpPoints: string;
+  lpPoints: BigIntScalar;
 }
 interface Epoch {
   id: string;
-  epochNumber: string;
-  endBlock: string | null;
+  epochNumber: BigIntScalar;
+  endBlock: BigIntScalar | null;
 }
 interface EpochStats {
   id: string;
   epoch_id: string;
-  totalUsers: string;
-  totalPoints: string;
+  totalUsers: BigIntScalar;
+  totalPoints: BigIntScalar;
   topUserAddress: string | null;
-  topUserPoints: string | null;
+  topUserPoints: BigIntScalar | null;
 }
 
 async function gql<T>(ep: Endpoint, query: string): Promise<T> {
@@ -133,34 +134,72 @@ function pct(n: number, total: number): string {
 // them as strings (exact). Compare numerically so both collapse to the same value —
 // exact for the small fields (multipliers, counts) and matching prod's own float
 // precision for the large ones (votingPower). Treat null/undefined as equal only to each other.
-function eqNum(a: string | number | null | undefined, b: string | number | null | undefined): boolean {
+function eqNum(
+  a: string | number | null | undefined,
+  b: string | number | null | undefined
+): boolean {
   if (a == null || b == null) return (a == null) === (b == null);
   return Number(a) === Number(b);
 }
 
+function toBigInt(value: BigIntScalar): bigint {
+  if (typeof value === 'string') return BigInt(value);
+  if (!Number.isFinite(value) || !Number.isInteger(value)) {
+    throw new Error(`Invalid BigInt scalar: ${String(value)}`);
+  }
+  // Public Hasura may serialize BigInt as a lossy JSON number. This conversion is
+  // suitable for diagnostics, but its residual must not become a hard regression.
+  return BigInt(value);
+}
+
+function sumEpochLpByUser(rows: UserEpochLP[]): Map<string, bigint> {
+  const sums = new Map<string, bigint>();
+  for (const row of rows) {
+    const user = row.user_id.toLowerCase();
+    sums.set(user, (sums.get(user) ?? 0n) + toBigInt(row.lpPoints));
+  }
+  return sums;
+}
+
+function absBigInt(value: bigint): bigint {
+  return value < 0n ? -value : value;
+}
+
 async function main(): Promise<void> {
-  const balancerPool = BALANCER_AUTORANGE_V3_POOL_ADDRESS.toLowerCase();
-  const nftFix = new Set(STATIC_NFT_COLLECTION_ADDRESSES.map((a) => a.toLowerCase()));
+  const nftFix = new Set(STATIC_NFT_COLLECTION_ADDRESSES.map(a => a.toLowerCase()));
   void nftFix; // referenced in guidance below; per-user NFT-ownership join is left to manual drill-down
   let regressions = 0;
 
   console.log('Leaderboard parity: local vs prod');
   console.log(`  local: ${LOCAL.url}`);
   console.log(`  prod:  ${PROD.url}`);
-  console.log(`  Balancer pool: ${balancerPool}  cutover block: ${LP_BALANCER_AUTORANGE_CUTOVER_BLOCK}\n`);
+  console.log('  LP points eras:');
+  console.log(`    V2: [${LP_V2_CUTOVER_BLOCK}, ${LP_BALANCER_AUTORANGE_CUTOVER_BLOCK})`);
+  console.log(
+    `    Balancer: [${LP_BALANCER_AUTORANGE_CUTOVER_BLOCK}, ${LP_V2_RESUME_CUTOVER_BLOCK})`
+  );
+  console.log(`    V2 resumed: [${LP_V2_RESUME_CUTOVER_BLOCK}, head)\n`);
+  console.log(
+    '  NOTE: entity pagination uses live id-cursor reads, not a block-pinned snapshot.\n'
+  );
 
   // ---- 0. Sync guard: comparison is only meaningful when local has caught up ----
   const [localTip, prodTip] = await Promise.all([maxLastUpdate(LOCAL), maxLastUpdate(PROD)]);
-  const lagSec = prodTip - localTip;
+  const tipDeltaSec = localTip - prodTip;
+  const lagSec = Math.abs(tipDeltaSec);
   const caughtUp = lagSec <= 600;
-  console.log(`Sync guard: local tip ${localTip} vs prod tip ${prodTip} (lag ${lagSec}s)`);
+  console.log(
+    `Activity-watermark guard: local ${localTip} vs prod ${prodTip} (delta ${tipDeltaSec}s)`
+  );
   if (!caughtUp) {
     console.log(
-      `  WARNING: local is ${(lagSec / 60).toFixed(0)} min behind prod. Results below are INFORMATIONAL ONLY;\n` +
+      `  WARNING: endpoint activity watermarks differ by ${(lagSec / 60).toFixed(0)} min. Results below are INFORMATIONAL ONLY;\n` +
         `  mismatches are not asserted as regressions until localhost reaches head.\n`
     );
   } else {
-    console.log('  OK: tips within 10 min; mismatches are asserted as regressions.\n');
+    console.log(
+      '  OK: activity watermarks are within 10 min. This does not prove every LP position is equally settled.\n'
+    );
   }
 
   // ---- Load both leaderboards ----
@@ -170,14 +209,19 @@ async function main(): Promise<void> {
     fetchAll<ULS>(LOCAL, 'UserLeaderboardState', fields),
     fetchAll<ULS>(PROD, 'UserLeaderboardState', fields),
   ]);
-  const localBy = new Map(localRows.map((r) => [r.user_id.toLowerCase(), r]));
-  const prodBy = new Map(prodRows.map((r) => [r.user_id.toLowerCase(), r]));
+  const localBy = new Map(localRows.map(r => [r.user_id.toLowerCase(), r]));
+  const prodBy = new Map(prodRows.map(r => [r.user_id.toLowerCase(), r]));
   console.log(`Users: local ${localRows.length}, prod ${prodRows.length}`);
-  const onlyLocal = [...localBy.keys()].filter((u) => !prodBy.has(u));
-  const onlyProd = [...prodBy.keys()].filter((u) => !localBy.has(u));
-  if (onlyLocal.length) console.log(`  local-only users: ${onlyLocal.length} (new; e.g. ${onlyLocal.slice(0, 3).join(', ')})`);
+  const onlyLocal = [...localBy.keys()].filter(u => !prodBy.has(u));
+  const onlyProd = [...prodBy.keys()].filter(u => !localBy.has(u));
+  if (onlyLocal.length)
+    console.log(
+      `  local-only users: ${onlyLocal.length} (new; e.g. ${onlyLocal.slice(0, 3).join(', ')})`
+    );
   if (onlyProd.length) {
-    console.log(`  prod-only users: ${onlyProd.length}  <-- ${caughtUp ? 'REGRESSION: local dropped users present in prod' : '(expected while behind head)'}`);
+    console.log(
+      `  prod-only users: ${onlyProd.length}  <-- ${caughtUp ? 'REGRESSION: local dropped users present in prod' : '(expected while behind head)'}`
+    );
     console.log(`    e.g. ${onlyProd.slice(0, SAMPLE).join(', ')}`);
     if (caughtUp) regressions += onlyProd.length;
   }
@@ -192,37 +236,70 @@ async function main(): Promise<void> {
     const p = prodBy.get(user);
     if (!p) continue;
     shared++;
-    if (!eqNum(l.votingPower, p.votingPower) || !eqNum(l.vpMultiplier, p.vpMultiplier) || !eqNum(l.vpTierIndex, p.vpTierIndex))
-      vpMiss.push(`${user} vp ${p.votingPower}->${l.votingPower} mult ${p.vpMultiplier}->${l.vpMultiplier}`);
+    if (
+      !eqNum(l.votingPower, p.votingPower) ||
+      !eqNum(l.vpMultiplier, p.vpMultiplier) ||
+      !eqNum(l.vpTierIndex, p.vpTierIndex)
+    )
+      vpMiss.push(
+        `${user} vp ${p.votingPower}->${l.votingPower} mult ${p.vpMultiplier}->${l.vpMultiplier}`
+      );
     if (!eqNum(l.nftCount, p.nftCount) || !eqNum(l.nftMultiplier, p.nftMultiplier))
-      nftMiss.push(`${user} nft ${p.nftCount}/${p.nftMultiplier} -> ${l.nftCount}/${l.nftMultiplier}`);
+      nftMiss.push(
+        `${user} nft ${p.nftCount}/${p.nftMultiplier} -> ${l.nftCount}/${l.nftMultiplier}`
+      );
     if (!eqNum(l.combinedMultiplier, p.combinedMultiplier))
       combMiss.push(`${user} combined ${p.combinedMultiplier} -> ${l.combinedMultiplier}`);
   }
   console.log(`1) Multiplier components over ${shared} shared users:`);
-  const report = (label: string, arr: string[], isRegression: boolean) => {
-    const tag = arr.length === 0 ? 'OK' : !caughtUp ? 'info' : isRegression ? 'REGRESSION' : 'review';
-    console.log(`   ${label}: ${arr.length} mismatches (${pct(arr.length, shared)}) [${tag}]`);
-    arr.slice(0, SAMPLE).forEach((s) => console.log(`      ${s}`));
+  const report = (
+    label: string,
+    arr: string[],
+    isRegression: boolean,
+    denominator: number = shared
+  ) => {
+    const tag =
+      arr.length === 0 ? 'OK' : !caughtUp ? 'info' : isRegression ? 'REGRESSION' : 'review';
+    console.log(`   ${label}: ${arr.length} mismatches (${pct(arr.length, denominator)}) [${tag}]`);
+    arr.slice(0, SAMPLE).forEach(s => console.log(`      ${s}`));
     if (isRegression && caughtUp) regressions += arr.length;
   };
   report('votingPower / vpMultiplier (must match)', vpMiss, true);
-  report('nftCount / nftMultiplier (PartnerNFT-fix expected on 4 static collections; rest = regression)', nftMiss, false);
+  report(
+    'nftCount / nftMultiplier (PartnerNFT-fix expected on 4 static collections; rest = regression)',
+    nftMiss,
+    false
+  );
   report('combinedMultiplier (must match while special editions unfed)', combMiss, true);
   console.log('');
 
-  // ---- 2. Pre-cutover epoch exact match (zero expected drift) ----
+  // ---- 2. Pre-Balancer epoch match (zero LP-source drift expected) ----
   const [lEpochs, pEpochs, lStats, pStats] = await Promise.all([
     fetchAll<Epoch>(LOCAL, 'LeaderboardEpoch', 'id epochNumber endBlock'),
     fetchAll<Epoch>(PROD, 'LeaderboardEpoch', 'id epochNumber endBlock'),
-    fetchAll<EpochStats>(LOCAL, 'EpochLeaderboardStats', 'id epoch_id totalUsers totalPoints topUserAddress topUserPoints'),
-    fetchAll<EpochStats>(PROD, 'EpochLeaderboardStats', 'id epoch_id totalUsers totalPoints topUserAddress topUserPoints'),
+    fetchAll<EpochStats>(
+      LOCAL,
+      'EpochLeaderboardStats',
+      'id epoch_id totalUsers totalPoints topUserAddress topUserPoints'
+    ),
+    fetchAll<EpochStats>(
+      PROD,
+      'EpochLeaderboardStats',
+      'id epoch_id totalUsers totalPoints topUserAddress topUserPoints'
+    ),
   ]);
-  const preCutover = (epochs: Epoch[]) =>
-    new Set(epochs.filter((e) => e.endBlock != null && BigInt(e.endBlock) < BigInt(LP_BALANCER_AUTORANGE_CUTOVER_BLOCK)).map((e) => e.id));
-  const preL = preCutover(lEpochs);
-  const preP = preCutover(pEpochs);
-  const pStatsBy = new Map(pStats.map((s) => [s.epoch_id, s]));
+  const preBalancer = (epochs: Epoch[]) =>
+    new Set(
+      epochs
+        .filter(
+          e =>
+            e.endBlock != null && toBigInt(e.endBlock) < BigInt(LP_BALANCER_AUTORANGE_CUTOVER_BLOCK)
+        )
+        .map(e => e.id)
+    );
+  const preL = preBalancer(lEpochs);
+  const preP = preBalancer(pEpochs);
+  const pStatsBy = new Map(pStats.map(s => [s.epoch_id, s]));
   const epochMiss: string[] = [];
   let preChecked = 0;
   for (const s of lStats) {
@@ -230,49 +307,99 @@ async function main(): Promise<void> {
     const p = pStatsBy.get(s.epoch_id);
     if (!p) continue;
     preChecked++;
-    if (s.totalUsers !== p.totalUsers || s.totalPoints !== p.totalPoints || (s.topUserPoints ?? '') !== (p.topUserPoints ?? ''))
-      epochMiss.push(`${s.epoch_id} users ${p.totalUsers}->${s.totalUsers} pts ${p.totalPoints}->${s.totalPoints}`);
+    if (
+      !eqNum(s.totalUsers, p.totalUsers) ||
+      !eqNum(s.totalPoints, p.totalPoints) ||
+      !eqNum(s.topUserPoints, p.topUserPoints)
+    )
+      epochMiss.push(
+        `${s.epoch_id} users ${p.totalUsers}->${s.totalUsers} pts ${p.totalPoints}->${s.totalPoints}`
+      );
   }
-  console.log(`2) Pre-cutover epochs (endBlock < ${LP_BALANCER_AUTORANGE_CUTOVER_BLOCK}): ${preChecked} compared`);
-  report('   EpochLeaderboardStats (must match exactly)', epochMiss, true);
+  console.log(
+    `2) Pre-Balancer epochs (endBlock < ${LP_BALANCER_AUTORANGE_CUTOVER_BLOCK}): ${preChecked} compared`
+  );
+  report(
+    '   EpochLeaderboardStats (must match at endpoint precision)',
+    epochMiss,
+    true,
+    preChecked
+  );
   console.log('');
 
-  // ---- 3. Points reconciliation: drift must equal the Balancer LP contribution ----
-  const balPos = await fetchAll<LPPos>(LOCAL, 'UserLPPosition', 'id user_id pool settledLpPoints', `pool: { _eq: ${JSON.stringify(balancerPool)} }`);
-  const balByUser = new Map<string, bigint>();
-  for (const pos of balPos) {
-    const u = pos.user_id.toLowerCase();
-    balByUser.set(u, (balByUser.get(u) ?? 0n) + BigInt(pos.settledLpPoints));
-  }
-  const residuals: { user: string; drift: bigint; balancer: bigint; residual: bigint }[] = [];
+  // ---- 3. Aggregate LP drift review ----
+  // UserEpochStats.lpPoints is the authoritative aggregate LP counter exposed by the
+  // schema. Current UserLPPosition counters are not used for attribution: they are
+  // cumulative, and V2's position spans both of its active eras.
+  const [localEpochLp, prodEpochLp] = await Promise.all([
+    fetchAll<UserEpochLP>(LOCAL, 'UserEpochStats', 'id user_id lpPoints'),
+    fetchAll<UserEpochLP>(PROD, 'UserEpochStats', 'id user_id lpPoints'),
+  ]);
+  const localLpByUser = sumEpochLpByUser(localEpochLp);
+  const prodLpByUser = sumEpochLpByUser(prodEpochLp);
+  const hasLossyScalars =
+    localRows.some(row => typeof row.lifetimePoints === 'number') ||
+    prodRows.some(row => typeof row.lifetimePoints === 'number') ||
+    localEpochLp.some(row => typeof row.lpPoints === 'number') ||
+    prodEpochLp.some(row => typeof row.lpPoints === 'number');
+  const residuals: {
+    user: string;
+    lifetimeDrift: bigint;
+    aggregateLpDrift: bigint;
+    residual: bigint;
+  }[] = [];
   for (const [user, l] of localBy) {
     const p = prodBy.get(user);
     if (!p) continue;
-    const drift = BigInt(l.lifetimePoints) - BigInt(p.lifetimePoints);
-    const bal = balByUser.get(user) ?? 0n;
-    const residual = drift - bal;
-    if (residual !== 0n) residuals.push({ user, drift, balancer: bal, residual });
+    const lifetimeDrift = toBigInt(l.lifetimePoints) - toBigInt(p.lifetimePoints);
+    const aggregateLpDrift = (localLpByUser.get(user) ?? 0n) - (prodLpByUser.get(user) ?? 0n);
+    const residual = lifetimeDrift - aggregateLpDrift;
+    if (residual !== 0n) {
+      residuals.push({ user, lifetimeDrift, aggregateLpDrift, residual });
+    }
   }
-  residuals.sort((a, b) => (b.residual < 0n ? -b.residual : b.residual) > (a.residual < 0n ? -a.residual : a.residual) ? 1 : -1);
-  console.log(`3) Points reconciliation (drift == Balancer LP contribution):`);
-  console.log(`   Balancer LP positions: ${balPos.length} across ${balByUser.size} users`);
-  console.log(`   users with non-zero residual: ${residuals.length} [${residuals.length ? 'review — unexplained drift' : 'OK'}]`);
-  residuals.slice(0, SAMPLE).forEach((r) =>
-    console.log(`      ${r.user} drift=${r.drift} balancer=${r.balancer} residual=${r.residual}`)
+  residuals.sort((a, b) => {
+    const aAbs = absBigInt(a.residual);
+    const bAbs = absBigInt(b.residual);
+    return aAbs === bAbs ? 0 : aAbs > bAbs ? -1 : 1;
+  });
+  console.log('3) Aggregate LP drift review (source-agnostic UserEpochStats.lpPoints):');
+  console.log(
+    `   scalar precision: ${hasLossyScalars ? 'approximate — at least one endpoint returned JSON numbers' : 'exact strings'}`
   );
-  if (caughtUp) regressions += residuals.length; // only trust residuals when caught up + settled
-  else console.log('   (residuals not counted as regressions while local is behind head)');
+  console.log(
+    '   current pool-position counters are diagnostic only and are not used for era attribution.'
+  );
+  console.log(
+    `   users with non-zero lifetimeDrift - aggregateLpDrift: ${residuals.length} [${residuals.length ? 'REVIEW' : 'OK'}]`
+  );
+  residuals
+    .slice(0, SAMPLE)
+    .forEach(row =>
+      console.log(
+        `      ${row.user} lifetimeDrift=${row.lifetimeDrift} aggregateLpDrift=${row.aggregateLpDrift} residual=${row.residual}`
+      )
+    );
+  console.log(
+    '   LP residuals are review-only: endpoint serialization and live, unpinned reads prevent a reliable hard gate.'
+  );
   console.log('');
 
   if (!caughtUp) {
-    console.log('INFORMATIONAL ONLY: localhost is behind head, so nothing is asserted. Re-run once synced.');
+    console.log(
+      'INFORMATIONAL ONLY: localhost is behind head, so nothing is asserted. Re-run once synced.'
+    );
     process.exit(0);
   }
-  console.log(regressions === 0 ? 'PARITY OK: no regression-class mismatch.' : `FOUND ${regressions} regression-class mismatch(es). Investigate above.`);
+  console.log(
+    regressions === 0
+      ? `NO HARD REGRESSIONS. LP review items: ${residuals.length}.`
+      : `FOUND ${regressions} hard regression-class mismatch(es). Investigate above. LP review items: ${residuals.length}.`
+  );
   process.exit(regressions === 0 ? 0 : 1);
 }
 
-main().catch((e) => {
+main().catch(e => {
   console.error('parity check failed:', e instanceof Error ? e.message : e);
   process.exit(2);
 });

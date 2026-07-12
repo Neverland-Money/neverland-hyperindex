@@ -286,8 +286,21 @@ test('lp pool config handlers register pools and rates', async () => {
       currentEpochNumber: 1n,
       isActive: true,
     });
+    mockDb = mockDb.entities.LeaderboardEpoch.set({
+      id: '1',
+      epochNumber: 1n,
+      startBlock: 1n,
+      startTime: 100,
+      endBlock: undefined,
+      endTime: undefined,
+      isActive: true,
+      duration: undefined,
+      scheduledStartTime: 100,
+      scheduledEndTime: 0,
+    });
 
     const pool = '0x000000000000000000000000000000000000c010';
+    const unrelatedPool = '0x000000000000000000000000000000000000c014';
     const manager = '0x000000000000000000000000000000000000c011';
     const token0 = '0x000000000000000000000000000000000000c012';
     const token1 = '0x000000000000000000000000000000000000c013';
@@ -317,10 +330,110 @@ test('lp pool config handlers register pools and rates', async () => {
     const state = mockDb.entities.LPPoolState.get(pool.toLowerCase());
     assert.ok(state);
 
+    mockDb = mockDb.entities.LPPoolConfig.set({
+      ...poolConfig!,
+      id: unrelatedPool,
+      pool: unrelatedPool,
+      lpRateBps: 900n,
+    });
+    mockDb = mockDb.entities.LPPoolRegistry.set({
+      id: 'global',
+      poolIds: [pool.toLowerCase(), unrelatedPool],
+      lastUpdate: 100,
+    });
+    mockDb = mockDb.entities.UserLPPosition.set({
+      id: '1',
+      tokenId: 1n,
+      user_id: ADDRESSES.user,
+      pool: pool.toLowerCase(),
+      positionManager: manager,
+      tickLower: -100,
+      tickUpper: 100,
+      liquidity: 100n,
+      amount0: 1n,
+      amount1: 1n,
+      isInRange: true,
+      valueUsd: 100_000_000n,
+      lastInRangeTimestamp: 100,
+      accumulatedInRangeSeconds: 0n,
+      lastSettledAt: 100,
+      settledLpPoints: 0n,
+      createdAt: 100,
+      lastUpdate: 100,
+    });
+    mockDb = mockDb.entities.UserLPPosition.set({
+      id: '2',
+      tokenId: 2n,
+      user_id: ADDRESSES.userTwo,
+      pool: unrelatedPool,
+      positionManager: manager,
+      tickLower: -100,
+      tickUpper: 100,
+      liquidity: 100n,
+      amount0: 1n,
+      amount1: 1n,
+      isInRange: true,
+      valueUsd: 100_000_000n,
+      lastInRangeTimestamp: 100,
+      accumulatedInRangeSeconds: 7n,
+      lastSettledAt: 101,
+      settledLpPoints: 11n,
+      createdAt: 100,
+      lastUpdate: 101,
+    });
+    mockDb = mockDb.entities.UserLPPositionIndex.set({
+      id: ADDRESSES.user,
+      user_id: ADDRESSES.user,
+      positionIds: ['1'],
+      lastUpdate: 100,
+    });
+    mockDb = mockDb.entities.UserLPPositionIndex.set({
+      id: ADDRESSES.userTwo,
+      user_id: ADDRESSES.userTwo,
+      positionIds: ['2'],
+      lastUpdate: 101,
+    });
+    mockDb = mockDb.entities.LPPoolPositionIndex.set({
+      id: pool.toLowerCase(),
+      pool: pool.toLowerCase(),
+      positionIds: ['1'],
+      lastUpdate: 100,
+    });
+    mockDb = mockDb.entities.LPPoolPositionIndex.set({
+      id: unrelatedPool,
+      pool: unrelatedPool,
+      positionIds: ['2'],
+      lastUpdate: 101,
+    });
+
+    const rateUpdated = TestHelpers.LeaderboardConfig.LPRateUpdated.createMockEvent({
+      pool,
+      oldRate: 2000n,
+      newRate: 1500n,
+      timestamp: 210n,
+      ...eventData(31, 210, ADDRESSES.config),
+    });
+    mockDb = await TestHelpers.LeaderboardConfig.LPRateUpdated.processEvent({
+      event: rateUpdated,
+      mockDb,
+    });
+
+    const settledPosition = mockDb.entities.UserLPPosition.get('1');
+    assert.equal(settledPosition?.lastSettledAt, 210);
+    assert.equal(settledPosition?.settledLpPoints, 254_629_629_629_629n);
+    assert.equal(mockDb.entities.LPPoolConfig.get(pool.toLowerCase())?.lpRateBps, 1500n);
+    assert.equal(mockDb.entities.LPPoolConfig.get(unrelatedPool)?.lpRateBps, 900n);
+    assert.equal(mockDb.entities.LeaderboardConfig.get('global')?.lpRateBps, 2000n);
+    const unrelatedPosition = mockDb.entities.UserLPPosition.get('2');
+    assert.equal(unrelatedPosition?.lastSettledAt, 101);
+    assert.equal(unrelatedPosition?.accumulatedInRangeSeconds, 7n);
+    assert.equal(unrelatedPosition?.settledLpPoints, 11n);
+    assert.equal(mockDb.entities.UserEpochStats.get(`${ADDRESSES.userTwo}:1`), undefined);
+
     const disabled = TestHelpers.LeaderboardConfig.LPPoolDisabled.createMockEvent({
       pool,
-      timestamp: 200n,
-      ...eventData(31, 200, ADDRESSES.config),
+      timestamp: 220n,
+      ...eventData(32, 220, ADDRESSES.config),
     });
     mockDb = await TestHelpers.LeaderboardConfig.LPPoolDisabled.processEvent({
       event: disabled,
@@ -329,20 +442,6 @@ test('lp pool config handlers register pools and rates', async () => {
 
     const disabledConfig = mockDb.entities.LPPoolConfig.get(pool.toLowerCase());
     assert.equal(disabledConfig?.isActive, false);
-
-    const rateUpdated = TestHelpers.LeaderboardConfig.LPRateUpdated.createMockEvent({
-      oldRate: 2000n,
-      newRate: 1500n,
-      timestamp: 210n,
-      ...eventData(32, 210, ADDRESSES.config),
-    });
-    mockDb = await TestHelpers.LeaderboardConfig.LPRateUpdated.processEvent({
-      event: rateUpdated,
-      mockDb,
-    });
-
-    const config = mockDb.entities.LeaderboardConfig.get('global');
-    assert.equal(config?.lpRateBps, 1500n);
   } finally {
     process.env.ENVIO_ENABLE_EXTERNAL_CALLS = previousExternal;
     process.env.ENVIO_ENABLE_ETH_CALLS = prevEnableEth;

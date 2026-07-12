@@ -24,6 +24,12 @@ export const LP_BALANCER_MAX_SETTLEMENTS_PER_SWAP = 50;
 export const BALANCER_AUTORANGE_V3_POOL_ADDRESS = '0x27da8a34579fbc99319af1c1a0f0d51065084576';
 export const BALANCER_VAULT_ADDRESS = '0xba1333333333a1ba1108e8412f11850a5c319ba9';
 
+// LP points bounce back from Balancer AutoRange to the UniswapV2 USDC/DUST pair
+// at this block/timestamp: Balancer AutoRange stops accruing points and the V2
+// pair resumes as the active LP points source.
+export const LP_V2_RESUME_CUTOVER_BLOCK = 87190222;
+export const LP_V2_RESUME_CUTOVER_TIMESTAMP = 1783827555;
+
 // Override epoch 1 start time - set to a timestamp to ignore the EpochStart event for epoch 1
 // and use this timestamp instead. Set to 0 to use the on-chain event.
 export const EPOCH_1_START_TIME_OVERRIDE = 1767434400;

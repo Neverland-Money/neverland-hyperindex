@@ -9,9 +9,12 @@ import {
   BALANCER_VAULT_ADDRESS,
   LP_BALANCER_AUTORANGE_CUTOVER_BLOCK,
   LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP,
+  LP_V2_RESUME_CUTOVER_BLOCK,
+  LP_V2_RESUME_CUTOVER_TIMESTAMP,
   USDC_ADDRESS,
   ZERO_ADDRESS,
 } from '../helpers/constants';
+import * as lpHandlers from '../handlers/lp';
 import { installViemMock, setLPPositionOverride } from './viem-mock';
 
 process.env.ENVIO_ENABLE_EXTERNAL_CALLS = 'false';
@@ -49,6 +52,16 @@ type TestHelpersApi = typeof TestHelpers;
 
 function loadTestHelpers(): TestHelpersApi {
   return TestHelpers;
+}
+
+function getLpV2ResumeCutoverPredicate() {
+  const predicate = (
+    lpHandlers as unknown as {
+      isPastLpV2ResumeCutover?: (timestamp: number, blockNumber?: bigint) => boolean;
+    }
+  ).isPastLpV2ResumeCutover;
+  assert.ok(predicate, 'resume cutover predicate must be exported for the boundary matrix');
+  return predicate;
 }
 
 function createEventDataFactory() {
@@ -3079,7 +3092,7 @@ test('balancer autorange transfer before cutover tracks holder and accrues only 
   assert.equal(v2State?.reserve1, 500_000n * 10n ** 18n + 10n * 10n ** 18n);
 });
 
-test('uniswap v2 hard-stops at balancer autorange cutover and balancer becomes active', async () => {
+test('uniswap v2 cutover keeps transfer bookkeeping while v2 points are paused', async () => {
   const TestHelpers = loadTestHelpers();
   let mockDb = TestHelpers.MockDb.createMockDb();
   mockDb = seedLeaderboardConfig(TestHelpers, mockDb);
@@ -3204,6 +3217,709 @@ test('uniswap v2 hard-stops at balancer autorange cutover and balancer becomes a
   assert.ok((epochStats?.lpPoints ?? 0n) > 0n);
 
   const updatedV2Position = mockDb.entities.UserLPPosition.get(positionId);
-  assert.equal(updatedV2Position?.liquidity, 1_000n);
-  assert.equal(updatedV2Position?.lastSettledAt, LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP);
+  assert.equal(updatedV2Position?.liquidity, 1_100n);
+  assert.equal(updatedV2Position?.lastSettledAt, LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP + 60);
+});
+
+test('all balancer event families hard-stop without mutation after the v2 resume transition', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  mockDb = seedLeaderboardConfig(TestHelpers, mockDb);
+  const eventData = createEventDataFactory();
+  const user = ADDRESSES.user;
+  const balancerPositionId = `v2:${BALANCER_POOL}:${user}`;
+
+  mockDb = mockDb.entities.LeaderboardState.set({
+    id: 'current',
+    currentEpochNumber: 1n,
+    isActive: true,
+  });
+  mockDb = mockDb.entities.LeaderboardEpoch.set({
+    id: '1',
+    epochNumber: 1n,
+    startBlock: 0n,
+    startTime: 0,
+    endBlock: undefined,
+    endTime: undefined,
+    isActive: true,
+    duration: undefined,
+    scheduledStartTime: 0,
+    scheduledEndTime: 0,
+  });
+  mockDb = mockDb.entities.LPPoolRegistry.set({
+    id: 'global',
+    poolIds: [V2_POOL, BALANCER_POOL],
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolConfig.set({
+    id: V2_POOL,
+    pool: V2_POOL,
+    positionManager: V2_POOL,
+    token0: USDC_ADDRESS,
+    token1: DUST_ADDRESS,
+    fee: 3000,
+    lpRateBps: 2500n,
+    isActive: false,
+    enabledAtEpoch: 1n,
+    enabledAtTimestamp: LP_V2_CUTOVER_TIMESTAMP,
+    disabledAtEpoch: 1n,
+    disabledAtTimestamp: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolConfig.set({
+    id: BALANCER_POOL,
+    pool: BALANCER_POOL,
+    positionManager: BALANCER_POOL,
+    token0: USDC_ADDRESS,
+    token1: DUST_ADDRESS,
+    fee: 10000,
+    lpRateBps: 2500n,
+    isActive: true,
+    enabledAtEpoch: 1n,
+    enabledAtTimestamp: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP,
+    disabledAtEpoch: undefined,
+    disabledAtTimestamp: undefined,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolState.set({
+    id: BALANCER_POOL,
+    pool: BALANCER_POOL,
+    currentTick: 0,
+    sqrtPriceX96: 0n,
+    token0Price: PRICE_E8,
+    token1Price: PRICE_E8,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolV2State.set({
+    id: BALANCER_POOL,
+    pool: BALANCER_POOL,
+    reserve0: 1_000_000n * 10n ** 6n,
+    reserve1: 500_000n * 10n ** 18n,
+    lpTotalSupply: 1_000n,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.TokenInfo.set({
+    id: USDC_ADDRESS,
+    address: USDC_ADDRESS,
+    decimals: DECIMALS,
+    symbol: 'USDC',
+    name: 'USD Coin',
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.TokenInfo.set({
+    id: DUST_ADDRESS,
+    address: DUST_ADDRESS,
+    decimals: DUST_DECIMALS,
+    symbol: 'DUST',
+    name: 'Dust',
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.UserLPPosition.set({
+    id: balancerPositionId,
+    tokenId: BigInt(user),
+    user_id: user,
+    pool: BALANCER_POOL,
+    positionManager: BALANCER_POOL,
+    tickLower: -887272,
+    tickUpper: 887272,
+    liquidity: 1_000n,
+    amount0: 0n,
+    amount1: 0n,
+    isInRange: true,
+    valueUsd: 100n * 10n ** 8n,
+    lastInRangeTimestamp: LP_V2_RESUME_CUTOVER_TIMESTAMP - 3600,
+    accumulatedInRangeSeconds: 0n,
+    lastSettledAt: LP_V2_RESUME_CUTOVER_TIMESTAMP - 3600,
+    settledLpPoints: 0n,
+    createdAt: LP_V2_RESUME_CUTOVER_TIMESTAMP - 3600,
+    lastUpdate: LP_V2_RESUME_CUTOVER_TIMESTAMP - 3600,
+  });
+  mockDb = mockDb.entities.UserLPPositionIndex.set({
+    id: user,
+    user_id: user,
+    positionIds: [balancerPositionId],
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolPositionIndex.set({
+    id: BALANCER_POOL,
+    pool: BALANCER_POOL,
+    positionIds: [balancerPositionId],
+    lastUpdate: 0,
+  });
+
+  const postResumeTransfer = TestHelpers.BalancerAutoRangePool.Transfer.createMockEvent({
+    from: ZERO_ADDRESS,
+    to: user,
+    value: 100n,
+    ...eventData(
+      LP_V2_RESUME_CUTOVER_BLOCK + 1,
+      LP_V2_RESUME_CUTOVER_TIMESTAMP + 60,
+      BALANCER_POOL
+    ),
+  });
+  mockDb = await TestHelpers.BalancerAutoRangePool.Transfer.processEvent({
+    event: postResumeTransfer,
+    mockDb,
+  });
+
+  const balancerConfig = mockDb.entities.LPPoolConfig.get(BALANCER_POOL);
+  assert.equal(balancerConfig?.isActive, false);
+  assert.equal(balancerConfig?.disabledAtTimestamp, LP_V2_RESUME_CUTOVER_TIMESTAMP);
+
+  const v2Config = mockDb.entities.LPPoolConfig.get(V2_POOL);
+  assert.equal(v2Config?.isActive, true);
+  assert.equal(v2Config?.enabledAtTimestamp, LP_V2_RESUME_CUTOVER_TIMESTAMP);
+
+  const epochStats = mockDb.entities.UserEpochStats.get(`${user}:1`);
+  assert.ok(epochStats);
+  assert.ok((epochStats?.lpPoints ?? 0n) > 0n);
+
+  // The resume transfer itself is hard-stopped on the Balancer pool: it only
+  // gets force-settled at the cutover boundary, no new liquidity is minted.
+  const settledBalancerPosition = mockDb.entities.UserLPPosition.get(balancerPositionId);
+  assert.equal(settledBalancerPosition?.liquidity, 1_000n);
+  assert.equal(settledBalancerPosition?.lastSettledAt, LP_V2_RESUME_CUTOVER_TIMESTAMP);
+
+  const boundaryBalancerConfig = mockDb.entities.LPPoolConfig.get(BALANCER_POOL);
+  const boundaryV2Config = mockDb.entities.LPPoolConfig.get(V2_POOL);
+  const boundaryPoolState = mockDb.entities.LPPoolState.get(BALANCER_POOL);
+  const boundaryV2State = mockDb.entities.LPPoolV2State.get(BALANCER_POOL);
+  const boundaryPosition = mockDb.entities.UserLPPosition.get(balancerPositionId);
+  const boundaryEpochStats = mockDb.entities.UserEpochStats.get(`${user}:1`);
+  const boundaryFeeStats = mockDb.entities.LPPoolFeeStats.get(BALANCER_POOL);
+  assert.equal(mockDb.entities.ProtocolStats.get('1'), undefined);
+
+  const ignoredTransfer = TestHelpers.BalancerAutoRangePool.Transfer.createMockEvent({
+    from: ZERO_ADDRESS,
+    to: user,
+    value: 50n,
+    ...eventData(
+      LP_V2_RESUME_CUTOVER_BLOCK + 2,
+      LP_V2_RESUME_CUTOVER_TIMESTAMP + 120,
+      BALANCER_POOL
+    ),
+  });
+  mockDb = await TestHelpers.BalancerAutoRangePool.Transfer.processEvent({
+    event: ignoredTransfer,
+    mockDb,
+  });
+
+  const ignoredLiquidityAdded = TestHelpers.BalancerVault.LiquidityAdded.createMockEvent({
+    pool: BALANCER_POOL,
+    liquidityProvider: user,
+    kind: 0n,
+    totalSupply: 2_000n,
+    amountsAddedRaw: [100n * 10n ** 6n, 50n * 10n ** 18n],
+    swapFeeAmountsRaw: [0n, 0n],
+    ...eventData(
+      LP_V2_RESUME_CUTOVER_BLOCK + 3,
+      LP_V2_RESUME_CUTOVER_TIMESTAMP + 180,
+      BALANCER_VAULT_ADDRESS
+    ),
+  });
+  mockDb = await TestHelpers.BalancerVault.LiquidityAdded.processEvent({
+    event: ignoredLiquidityAdded,
+    mockDb,
+  });
+
+  const ignoredLiquidityRemoved = TestHelpers.BalancerVault.LiquidityRemoved.createMockEvent({
+    pool: BALANCER_POOL,
+    liquidityProvider: user,
+    kind: 0n,
+    totalSupply: 500n,
+    amountsRemovedRaw: [25n * 10n ** 6n, 10n * 10n ** 18n],
+    swapFeeAmountsRaw: [0n, 0n],
+    ...eventData(
+      LP_V2_RESUME_CUTOVER_BLOCK + 4,
+      LP_V2_RESUME_CUTOVER_TIMESTAMP + 240,
+      BALANCER_VAULT_ADDRESS
+    ),
+  });
+  mockDb = await TestHelpers.BalancerVault.LiquidityRemoved.processEvent({
+    event: ignoredLiquidityRemoved,
+    mockDb,
+  });
+
+  const ignoredSwap = TestHelpers.BalancerVault.Swap.createMockEvent({
+    pool: BALANCER_POOL,
+    tokenIn: DUST_ADDRESS,
+    tokenOut: USDC_ADDRESS,
+    amountIn: 10n * 10n ** 18n,
+    amountOut: 5n * 10n ** 6n,
+    swapFeePercentage: 10n ** 16n,
+    swapFeeAmount: 10n ** 16n,
+    ...eventData(
+      LP_V2_RESUME_CUTOVER_BLOCK + 5,
+      LP_V2_RESUME_CUTOVER_TIMESTAMP + 300,
+      BALANCER_VAULT_ADDRESS
+    ),
+  });
+  mockDb = await TestHelpers.BalancerVault.Swap.processEvent({ event: ignoredSwap, mockDb });
+
+  assert.deepEqual(mockDb.entities.LPPoolConfig.get(BALANCER_POOL), boundaryBalancerConfig);
+  assert.deepEqual(mockDb.entities.LPPoolConfig.get(V2_POOL), boundaryV2Config);
+  assert.deepEqual(mockDb.entities.LPPoolState.get(BALANCER_POOL), boundaryPoolState);
+  assert.deepEqual(mockDb.entities.LPPoolV2State.get(BALANCER_POOL), boundaryV2State);
+  assert.deepEqual(mockDb.entities.UserLPPosition.get(balancerPositionId), boundaryPosition);
+  assert.deepEqual(mockDb.entities.UserEpochStats.get(`${user}:1`), boundaryEpochStats);
+  assert.deepEqual(mockDb.entities.LPPoolFeeStats.get(BALANCER_POOL), boundaryFeeStats);
+  assert.equal(mockDb.entities.ProtocolStats.get('1'), undefined);
+});
+
+test('uniswap v2 keeps accruing points after the resume cutover (does not freeze at the stale balancer cap)', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  mockDb = seedLeaderboardConfig(TestHelpers, mockDb);
+  const eventData = createEventDataFactory();
+  const user = ADDRESSES.user;
+  const positionId = `v2:${V2_POOL}:${user}`;
+
+  mockDb = mockDb.entities.LeaderboardState.set({
+    id: 'current',
+    currentEpochNumber: 1n,
+    isActive: true,
+  });
+  mockDb = mockDb.entities.LeaderboardEpoch.set({
+    id: '1',
+    epochNumber: 1n,
+    startBlock: 0n,
+    startTime: 0,
+    endBlock: undefined,
+    endTime: undefined,
+    isActive: true,
+    duration: undefined,
+    scheduledStartTime: 0,
+    scheduledEndTime: 0,
+  });
+  mockDb = mockDb.entities.LPPoolRegistry.set({
+    id: 'global',
+    poolIds: [V2_POOL, BALANCER_POOL],
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolConfig.set({
+    id: V2_POOL,
+    pool: V2_POOL,
+    positionManager: V2_POOL,
+    token0: USDC_ADDRESS,
+    token1: DUST_ADDRESS,
+    fee: 3000,
+    lpRateBps: 2500n,
+    isActive: false,
+    enabledAtEpoch: 1n,
+    enabledAtTimestamp: LP_V2_CUTOVER_TIMESTAMP,
+    disabledAtEpoch: 1n,
+    disabledAtTimestamp: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolConfig.set({
+    id: BALANCER_POOL,
+    pool: BALANCER_POOL,
+    positionManager: BALANCER_POOL,
+    token0: USDC_ADDRESS,
+    token1: DUST_ADDRESS,
+    fee: 10000,
+    lpRateBps: 2500n,
+    isActive: true,
+    enabledAtEpoch: 1n,
+    enabledAtTimestamp: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP,
+    disabledAtEpoch: undefined,
+    disabledAtTimestamp: undefined,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolState.set({
+    id: V2_POOL,
+    pool: V2_POOL,
+    currentTick: 0,
+    sqrtPriceX96: 0n,
+    token0Price: PRICE_E8,
+    token1Price: PRICE_E8,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolV2State.set({
+    id: V2_POOL,
+    pool: V2_POOL,
+    reserve0: 1_000_000n * 10n ** 6n,
+    reserve1: 500_000n * 10n ** 18n,
+    lpTotalSupply: 1_000n,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.UserLPPosition.set({
+    id: positionId,
+    tokenId: BigInt(user),
+    user_id: user,
+    pool: V2_POOL,
+    positionManager: V2_POOL,
+    tickLower: -887272,
+    tickUpper: 887272,
+    liquidity: 1_000n,
+    amount0: 0n,
+    amount1: 0n,
+    isInRange: true,
+    valueUsd: 100n * 10n ** 8n,
+    lastInRangeTimestamp: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP - 3600,
+    accumulatedInRangeSeconds: 0n,
+    lastSettledAt: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP - 3600,
+    settledLpPoints: 0n,
+    createdAt: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP - 3600,
+    lastUpdate: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP - 3600,
+  });
+  mockDb = mockDb.entities.UserLPPositionIndex.set({
+    id: user,
+    user_id: user,
+    positionIds: [positionId],
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolPositionIndex.set({
+    id: V2_POOL,
+    pool: V2_POOL,
+    positionIds: [positionId],
+    lastUpdate: 0,
+  });
+
+  // First V2 event after resume: triggers the Balancer -> V2 transition and
+  // settles the position up to the resume cutover.
+  const firstPostResumeSync = TestHelpers.UniswapV2Pair.Sync.createMockEvent({
+    reserve0: 1_000_000n * 10n ** 6n,
+    reserve1: 500_000n * 10n ** 18n,
+    ...eventData(LP_V2_RESUME_CUTOVER_BLOCK + 1, LP_V2_RESUME_CUTOVER_TIMESTAMP + 60, V2_POOL),
+  });
+  mockDb = await TestHelpers.UniswapV2Pair.Sync.processEvent({
+    event: firstPostResumeSync,
+    mockDb,
+  });
+
+  const pointsAfterFirstEvent = mockDb.entities.UserEpochStats.get(`${user}:1`)?.lpPoints ?? 0n;
+  assert.ok(pointsAfterFirstEvent > 0n);
+  const positionAfterFirstEvent = mockDb.entities.UserLPPosition.get(positionId);
+  assert.equal(positionAfterFirstEvent?.lastSettledAt, LP_V2_RESUME_CUTOVER_TIMESTAMP + 60);
+
+  // Second V2 event, an hour later: if the accrual cap were still stuck at the
+  // stale Balancer cutover timestamp, no further points would accrue here.
+  const secondPostResumeSync = TestHelpers.UniswapV2Pair.Sync.createMockEvent({
+    reserve0: 1_000_000n * 10n ** 6n,
+    reserve1: 500_000n * 10n ** 18n,
+    ...eventData(LP_V2_RESUME_CUTOVER_BLOCK + 2, LP_V2_RESUME_CUTOVER_TIMESTAMP + 3660, V2_POOL),
+  });
+  mockDb = await TestHelpers.UniswapV2Pair.Sync.processEvent({
+    event: secondPostResumeSync,
+    mockDb,
+  });
+
+  const pointsAfterSecondEvent = mockDb.entities.UserEpochStats.get(`${user}:1`)?.lpPoints ?? 0n;
+  assert.ok(pointsAfterSecondEvent > pointsAfterFirstEvent);
+  const positionAfterSecondEvent = mockDb.entities.UserLPPosition.get(positionId);
+  assert.equal(positionAfterSecondEvent?.lastSettledAt, LP_V2_RESUME_CUTOVER_TIMESTAMP + 3660);
+});
+
+test('uniswap v2 replays paused transfer and sync bookkeeping without accrual', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  mockDb = seedLeaderboardConfig(TestHelpers, mockDb);
+  const eventData = createEventDataFactory();
+  const holderA = ADDRESSES.user;
+  const burnedHolder = ADDRESSES.token0;
+  const holderC = ADDRESSES.token1;
+  const holderAPositionId = `v2:${V2_POOL}:${holderA}`;
+  const burnedPositionId = `v2:${V2_POOL}:${burnedHolder}`;
+  const holderCPositionId = `v2:${V2_POOL}:${holderC}`;
+  const baselineUniqueUsers = 41;
+  const baselineTransactions = 17n;
+  const baselineTxHash = `0x${'ab'.repeat(32)}`;
+
+  mockDb = mockDb.entities.LeaderboardState.set({
+    id: 'current',
+    currentEpochNumber: 7n,
+    isActive: true,
+  });
+  mockDb = mockDb.entities.LeaderboardEpoch.set({
+    id: '7',
+    epochNumber: 7n,
+    startBlock: 0n,
+    startTime: 0,
+    endBlock: undefined,
+    endTime: undefined,
+    isActive: true,
+    duration: undefined,
+    scheduledStartTime: 0,
+    scheduledEndTime: 0,
+  });
+  mockDb = mockDb.entities.LPPoolRegistry.set({
+    id: 'global',
+    poolIds: [V2_POOL, BALANCER_POOL],
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolConfig.set({
+    id: V2_POOL,
+    pool: V2_POOL,
+    positionManager: V2_POOL,
+    token0: USDC_ADDRESS,
+    token1: DUST_ADDRESS,
+    fee: 3000,
+    lpRateBps: 2500n,
+    isActive: false,
+    enabledAtEpoch: 1n,
+    enabledAtTimestamp: LP_V2_CUTOVER_TIMESTAMP,
+    disabledAtEpoch: 1n,
+    disabledAtTimestamp: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP,
+    lastUpdate: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP,
+  });
+  mockDb = mockDb.entities.LPPoolConfig.set({
+    id: BALANCER_POOL,
+    pool: BALANCER_POOL,
+    positionManager: BALANCER_POOL,
+    token0: USDC_ADDRESS,
+    token1: DUST_ADDRESS,
+    fee: 10000,
+    lpRateBps: 2500n,
+    isActive: true,
+    enabledAtEpoch: 1n,
+    enabledAtTimestamp: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP,
+    disabledAtEpoch: undefined,
+    disabledAtTimestamp: undefined,
+    lastUpdate: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP,
+  });
+  mockDb = mockDb.entities.LPPoolState.set({
+    id: V2_POOL,
+    pool: V2_POOL,
+    currentTick: 0,
+    sqrtPriceX96: 0n,
+    token0Price: 0n,
+    token1Price: 0n,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.LPPoolV2State.set({
+    id: V2_POOL,
+    pool: V2_POOL,
+    reserve0: 0n,
+    reserve1: 0n,
+    lpTotalSupply: 0n,
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.TokenInfo.set({
+    id: USDC_ADDRESS,
+    address: USDC_ADDRESS,
+    decimals: DECIMALS,
+    symbol: 'USDC',
+    name: 'USD Coin',
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.TokenInfo.set({
+    id: DUST_ADDRESS,
+    address: DUST_ADDRESS,
+    decimals: DUST_DECIMALS,
+    symbol: 'DUST',
+    name: 'Dust',
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.ProtocolStats.set({
+    id: '1',
+    tvlUsd: 1,
+    suppliesUsd: 2,
+    borrowsUsd: 3,
+    availableUsd: 4,
+    combinedTvlUsd: 5,
+    combinedSuppliesUsd: 6,
+    combinedBorrowsUsd: 7,
+    combinedAvailableUsd: 8,
+    tvlE8: 1n,
+    suppliesE8: 2n,
+    borrowsE8: 3n,
+    availableE8: 4n,
+    combinedTvlE8: 5n,
+    combinedSuppliesE8: 6n,
+    combinedBorrowsE8: 7n,
+    combinedAvailableE8: 8n,
+    totalRevenueUsd: 9,
+    supplyRevenueUsd: 10,
+    protocolRevenueUsd: 11,
+    updatedAt: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP + 60,
+    totalTransactions: baselineTransactions,
+    totalSelfRepayVolume: 12n,
+    totalSelfRepayCount: 13n,
+    totalDustTransfers: 14n,
+    uniqueUsers: baselineUniqueUsers,
+    lastTxTimestamp: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP + 60,
+    lastTxHash: baselineTxHash,
+  });
+
+  const pausedBlock = LP_BALANCER_AUTORANGE_CUTOVER_BLOCK + 1;
+  const pausedTimestamp = LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP + 60;
+  const pausedMint = TestHelpers.UniswapV2Pair.Transfer.createMockEvent({
+    from: ZERO_ADDRESS,
+    to: holderA,
+    value: 1_000n,
+    ...eventData(pausedBlock, pausedTimestamp, V2_POOL),
+  });
+  mockDb = await TestHelpers.UniswapV2Pair.Transfer.processEvent({ event: pausedMint, mockDb });
+
+  const pausedHolderTransfer = TestHelpers.UniswapV2Pair.Transfer.createMockEvent({
+    from: holderA,
+    to: burnedHolder,
+    value: 400n,
+    ...eventData(pausedBlock + 1, pausedTimestamp + 60, V2_POOL),
+  });
+  mockDb = await TestHelpers.UniswapV2Pair.Transfer.processEvent({
+    event: pausedHolderTransfer,
+    mockDb,
+  });
+
+  const pausedBurn = TestHelpers.UniswapV2Pair.Transfer.createMockEvent({
+    from: burnedHolder,
+    to: ZERO_ADDRESS,
+    value: 400n,
+    ...eventData(pausedBlock + 2, pausedTimestamp + 120, V2_POOL),
+  });
+  mockDb = await TestHelpers.UniswapV2Pair.Transfer.processEvent({ event: pausedBurn, mockDb });
+
+  const pausedCurrentHolderTransfer = TestHelpers.UniswapV2Pair.Transfer.createMockEvent({
+    from: holderA,
+    to: holderC,
+    value: 100n,
+    ...eventData(pausedBlock + 3, pausedTimestamp + 180, V2_POOL),
+  });
+  mockDb = await TestHelpers.UniswapV2Pair.Transfer.processEvent({
+    event: pausedCurrentHolderTransfer,
+    mockDb,
+  });
+
+  const pausedSync = TestHelpers.UniswapV2Pair.Sync.createMockEvent({
+    reserve0: 600n * 10n ** 6n,
+    reserve1: 300n * 10n ** 18n,
+    ...eventData(pausedBlock + 4, pausedTimestamp + 240, V2_POOL),
+  });
+  mockDb = await TestHelpers.UniswapV2Pair.Sync.processEvent({ event: pausedSync, mockDb });
+
+  const pausedV2State = mockDb.entities.LPPoolV2State.get(V2_POOL);
+  assert.equal(pausedV2State?.lpTotalSupply, 600n);
+  assert.equal(pausedV2State?.reserve0, 600n * 10n ** 6n);
+  assert.equal(pausedV2State?.reserve1, 300n * 10n ** 18n);
+
+  const pausedPoolState = mockDb.entities.LPPoolState.get(V2_POOL);
+  assert.equal(pausedPoolState?.token0Price, PRICE_E8);
+  assert.equal(pausedPoolState?.token1Price, 2n * PRICE_E8);
+
+  const pausedHolderA = mockDb.entities.UserLPPosition.get(holderAPositionId);
+  assert.equal(pausedHolderA?.liquidity, 500n);
+  assert.equal(pausedHolderA?.amount0, 500n * 10n ** 6n);
+  assert.equal(pausedHolderA?.amount1, 250n * 10n ** 18n);
+  assert.equal(pausedHolderA?.valueUsd, 1_000n * PRICE_E8);
+  assert.equal(pausedHolderA?.accumulatedInRangeSeconds, 0n);
+  assert.equal(pausedHolderA?.settledLpPoints, 0n);
+
+  const pausedBurnedHolder = mockDb.entities.UserLPPosition.get(burnedPositionId);
+  assert.equal(pausedBurnedHolder?.liquidity, 0n);
+  assert.equal(pausedBurnedHolder?.amount0, 0n);
+  assert.equal(pausedBurnedHolder?.amount1, 0n);
+  assert.equal(pausedBurnedHolder?.valueUsd, 0n);
+  assert.equal(pausedBurnedHolder?.accumulatedInRangeSeconds, 0n);
+  assert.equal(pausedBurnedHolder?.settledLpPoints, 0n);
+
+  const pausedHolderC = mockDb.entities.UserLPPosition.get(holderCPositionId);
+  assert.equal(pausedHolderC?.liquidity, 100n);
+  assert.equal(pausedHolderC?.amount0, 100n * 10n ** 6n);
+  assert.equal(pausedHolderC?.amount1, 50n * 10n ** 18n);
+  assert.equal(pausedHolderC?.valueUsd, 200n * PRICE_E8);
+  assert.equal(pausedHolderC?.accumulatedInRangeSeconds, 0n);
+  assert.equal(pausedHolderC?.settledLpPoints, 0n);
+
+  assert.deepEqual(mockDb.entities.UserLPPositionIndex.get(holderA)?.positionIds, [
+    holderAPositionId,
+  ]);
+  assert.deepEqual(mockDb.entities.UserLPPositionIndex.get(burnedHolder)?.positionIds, []);
+  assert.deepEqual(mockDb.entities.UserLPPositionIndex.get(holderC)?.positionIds, [
+    holderCPositionId,
+  ]);
+  assert.deepEqual(mockDb.entities.LPPoolPositionIndex.get(V2_POOL)?.positionIds, [
+    holderAPositionId,
+    holderCPositionId,
+  ]);
+  assert.equal(mockDb.entities.UserEpochStats.get(`${holderA}:7`), undefined);
+  assert.equal(mockDb.entities.UserEpochStats.get(`${burnedHolder}:7`), undefined);
+  assert.equal(mockDb.entities.UserEpochStats.get(`${holderC}:7`), undefined);
+  assert.equal(mockDb.entities.LPPoolFeeStats.get(V2_POOL), undefined);
+  const pausedProtocolStats = mockDb.entities.ProtocolStats.get('1');
+  assert.equal(pausedProtocolStats?.uniqueUsers, baselineUniqueUsers);
+  assert.equal(pausedProtocolStats?.totalTransactions, baselineTransactions);
+  assert.equal(pausedProtocolStats?.lastTxHash, baselineTxHash);
+  assert.equal(mockDb.entities.User.get(holderA), undefined);
+  assert.equal(mockDb.entities.User.get(burnedHolder), undefined);
+  assert.equal(mockDb.entities.User.get(holderC), undefined);
+
+  const resumeSync = TestHelpers.UniswapV2Pair.Sync.createMockEvent({
+    reserve0: 600n * 10n ** 6n,
+    reserve1: 300n * 10n ** 18n,
+    ...eventData(LP_V2_RESUME_CUTOVER_BLOCK + 1, LP_V2_RESUME_CUTOVER_TIMESTAMP + 60, V2_POOL),
+  });
+  mockDb = await TestHelpers.UniswapV2Pair.Sync.processEvent({ event: resumeSync, mockDb });
+
+  const resumedV2Config = mockDb.entities.LPPoolConfig.get(V2_POOL);
+  assert.equal(resumedV2Config?.isActive, true);
+  assert.equal(resumedV2Config?.enabledAtEpoch, 7n);
+  assert.equal(resumedV2Config?.enabledAtTimestamp, LP_V2_RESUME_CUTOVER_TIMESTAMP);
+  assert.equal(resumedV2Config?.disabledAtEpoch, undefined);
+  assert.equal(resumedV2Config?.disabledAtTimestamp, undefined);
+  const resumedProtocolStats = mockDb.entities.ProtocolStats.get('1');
+  assert.equal(resumedProtocolStats?.uniqueUsers, baselineUniqueUsers + 2);
+  assert.equal(resumedProtocolStats?.totalTransactions, baselineTransactions + 1n);
+  assert.ok(mockDb.entities.User.get(holderA));
+  assert.ok(mockDb.entities.User.get(holderC));
+  assert.equal(mockDb.entities.User.get(burnedHolder), undefined);
+
+  const expectedHolderAPoints =
+    (1_000n * PRICE_E8 * 2500n * 60n * 10n ** 18n) / (PRICE_E8 * 10_000n * 86_400n);
+  const expectedHolderCPoints =
+    (200n * PRICE_E8 * 2500n * 60n * 10n ** 18n) / (PRICE_E8 * 10_000n * 86_400n);
+  const resumedHolderA = mockDb.entities.UserLPPosition.get(holderAPositionId);
+  const resumedHolderC = mockDb.entities.UserLPPosition.get(holderCPositionId);
+  assert.equal(resumedHolderA?.accumulatedInRangeSeconds, 60n);
+  assert.equal(resumedHolderA?.settledLpPoints, expectedHolderAPoints);
+  assert.equal(resumedHolderC?.accumulatedInRangeSeconds, 60n);
+  assert.equal(resumedHolderC?.settledLpPoints, expectedHolderCPoints);
+  assert.equal(mockDb.entities.UserEpochStats.get(`${holderA}:7`)?.lpPoints, expectedHolderAPoints);
+  assert.equal(mockDb.entities.UserEpochStats.get(`${holderC}:7`)?.lpPoints, expectedHolderCPoints);
+  assert.equal(mockDb.entities.UserEpochStats.get(`${burnedHolder}:7`), undefined);
+  assert.deepEqual(mockDb.entities.LPPoolPositionIndex.get(V2_POOL)?.positionIds, [
+    holderAPositionId,
+    holderCPositionId,
+  ]);
+
+  const idempotentResumeSync = TestHelpers.UniswapV2Pair.Sync.createMockEvent({
+    reserve0: 600n * 10n ** 6n,
+    reserve1: 300n * 10n ** 18n,
+    ...eventData(LP_V2_RESUME_CUTOVER_BLOCK + 2, LP_V2_RESUME_CUTOVER_TIMESTAMP + 60, V2_POOL),
+  });
+  mockDb = await TestHelpers.UniswapV2Pair.Sync.processEvent({
+    event: idempotentResumeSync,
+    mockDb,
+  });
+
+  const idempotentHolderA = mockDb.entities.UserLPPosition.get(holderAPositionId);
+  const idempotentHolderC = mockDb.entities.UserLPPosition.get(holderCPositionId);
+  assert.equal(idempotentHolderA?.accumulatedInRangeSeconds, 60n);
+  assert.equal(idempotentHolderA?.settledLpPoints, expectedHolderAPoints);
+  assert.equal(idempotentHolderC?.accumulatedInRangeSeconds, 60n);
+  assert.equal(idempotentHolderC?.settledLpPoints, expectedHolderCPoints);
+  assert.equal(mockDb.entities.UserEpochStats.get(`${holderA}:7`)?.lpPoints, expectedHolderAPoints);
+  assert.equal(mockDb.entities.UserEpochStats.get(`${holderC}:7`)?.lpPoints, expectedHolderCPoints);
+  assert.equal(mockDb.entities.ProtocolStats.get('1')?.uniqueUsers, baselineUniqueUsers + 2);
+  assert.ok(mockDb.entities.User.get(holderA));
+  assert.ok(mockDb.entities.User.get(holderC));
+  assert.equal(mockDb.entities.User.get(burnedHolder), undefined);
+});
+
+test('lp v2 resume boundary is block-authoritative with timestamp fallback', () => {
+  const isPastResume = getLpV2ResumeCutoverPredicate();
+
+  assert.equal(isPastResume(1783827555, 87190221n), false);
+  assert.equal(isPastResume(1783827615, 87190221n), false);
+  assert.equal(isPastResume(1783827495, 87190222n), true);
+  assert.equal(isPastResume(1783827555, 87190222n), true);
+  assert.equal(isPastResume(1783827554), false);
+  assert.equal(isPastResume(1783827555), true);
 });
