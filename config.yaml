@@ -153,7 +153,7 @@ networks:
           - event: PointsRemoved(address indexed user, uint256 points, string reason, uint256 timestamp)
           - event: LPPoolConfigured(address indexed pool, address indexed positionManager, address token0, address token1, uint256 lpRateBps, uint256 timestamp)
           - event: LPPoolDisabled(address indexed pool, uint256 timestamp)
-          - event: LPRateUpdated(uint256 oldRate, uint256 newRate, uint256 timestamp)
+          - event: LPRateUpdated(address indexed pool, uint256 oldRate, uint256 newRate, uint256 timestamp)
 
       # --------------------------------------
       #     Leaderboard: LeaderboardKeeper
@@ -428,7 +428,10 @@ networks:
           - event: SetFeeProtocol(uint8 feeProtocol0Old, uint8 feeProtocol1Old, uint8 feeProtocol0New, uint8 feeProtocol1New)
 
       # UniswapV2 USDC/DUST pair (LP points cutover from V3 at block 56436798;
-      # deprecated in favor of Balancer AutoRange V3 at block 78741015
+      # deprecated in favor of Balancer AutoRange V3 at block 78741015; RESUMED as
+      # the active LP points pool at block 87190222, when Balancer AutoRange was
+      # cut over back to V2. Kept registered with no end_block since it's active
+      # again; src/handlers/lp.ts gates each era via applyStaticLPPoolCutover.
       - name: UniswapV2Pair
         abi_file_path: abis/uniswap/UniswapV2Pair.json
         address: 0x86dBF00485871C901C5129bD525348Db96c2eB2d
@@ -439,7 +442,8 @@ networks:
           - event: Swap(address indexed sender, uint256 amount0In, uint256 amount1In, uint256 amount0Out, uint256 amount1Out, address indexed to)
           - event: Sync(uint112 reserve0, uint112 reserve1)
 
-      # Balancer AutoRange V3 USDC/DUST pool (active LP points from block 78741015)
+      # Balancer AutoRange V3 USDC/DUST pool (active LP points from block 78741015
+      # to block 87190222, when LP points cut back over to UniswapV2Pair above)
       - name: BalancerAutoRangePool
         abi_file_path: abis/balancer/BalancerAutoRangePool.json
         address: 0x27dA8a34579FBC99319aF1C1a0f0D51065084576

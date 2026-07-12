@@ -1081,7 +1081,7 @@ test('updatePoolFeeStats reads exactly the in-window bucket set (structural, not
   assert.ok(!requested.some(id => id.includes(':-')));
 });
 
-test('settleLPPosition skips the LP-rate registry fan-out when the rate is precomputed', async () => {
+test('settleLPPosition uses the pool-local rate without a registry or global override', async () => {
   const { context, stores } = buildContext();
   stores.LeaderboardState.set({ id: 'current', currentEpochNumber: 1n, isActive: true });
   stores.LeaderboardEpoch.set({
@@ -1103,16 +1103,13 @@ test('settleLPPosition skips the LP-rate registry fan-out when the rate is preco
     ADDRESSES.token0,
     ADDRESSES.token1,
     3000,
-    0n
+    5000n
   );
 
-  // Sabotage the registry so the rate fan-out (getEffectiveLpRateBps ->
-  // getConfiguredLPPoolCount -> listActiveLPPoolConfigs -> LPPoolRegistry.get) throws. In
-  // the V2 settle sweep this is the ONLY per-position registry read, so it isolates the
-  // fan-out the hoist removes. The pool config itself is seeded, so getEffectiveLPPoolConfig
-  // resolves without the registry fallback.
+  // A directly resolved pool config must be sufficient for rate selection. The global
+  // rate is deliberately different (2000 bps), and registry access must not participate.
   stores.LPPoolRegistry.get = async () => {
-    throw new Error('lp-rate-registry-fanout-should-be-hoisted');
+    throw new Error('pool-local-rate-must-not-read-the-registry');
   };
 
   const position = {
@@ -1127,18 +1124,8 @@ test('settleLPPosition skips the LP-rate registry fan-out when the rate is preco
     settledLpPoints: 0n,
   };
 
-  // With the precomputed rate, the per-position rate computation is short-circuited, so
-  // the registry is never read and settlement completes.
-  const settled = await settleLPPosition(context, position, 3600, 5000n);
-  assert.ok(settled.pointsEarned >= 0n);
-
-  // Without it, settlement falls through to the per-position fan-out, which reads the
-  // (sabotaged) registry and throws -- exactly the O(positions) read the hoist removes.
-  // Asserting the specific error proves the registry fan-out is the cause, not setup.
-  await assert.rejects(
-    () => settleLPPosition(context, position, 3600),
-    /lp-rate-registry-fanout-should-be-hoisted/
-  );
+  const settled = await settleLPPosition(context, position, 3600);
+  assert.equal(settled.pointsEarned, 208_275_462_962_962n);
 });
 
 test('lp chain sync skips when pool fee mismatches', async () => {
