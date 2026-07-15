@@ -365,13 +365,22 @@ docker exec neverland-postgres psql -U postgres -d envio -c "SELECT 1"
 - Increase Docker memory limit (Settings → Resources)
 - Adjust `ENVIO_THROTTLE_*` environment variables to reduce concurrency
 
+### GoldSky charts-subgraph replacement entities
+
+`ReserveTx` (unified per-reserve transaction feed) and `ReserveRateSnapshot`
+(hourly rate buckets) are first-class indexer entities written by the
+Supply/RedeemUnderlying/Borrow/Repay/LiquidationCall and ReserveDataUpdated
+handlers — the migrated `neverland-app` Pro feed and APR charts query them
+directly. Historical rows only exist after a reindex from the release that
+introduced them (staging-first via `prod:upgrade` / `zero-downtime-update.sh`).
+
 ## Querying the Indexer
 
 Once deployed, query your indexed data using GraphQL:
 
 ```graphql
 query {
-  ProtocolStats(where: { id: { _eq: "current" } }) {
+  ProtocolStats(where: { id: { _eq: "1" } }) {
     tvlUsd
     suppliesUsd
     borrowsUsd
@@ -387,9 +396,8 @@ query {
   }
   UserEpochStats(
     where: { epochNumber: { _eq: "1" } }
-    orderBy: totalPoints
-    orderDirection: desc
-    first: 10
+    order_by: { totalPoints: desc }
+    limit: 10
   ) {
     user_id
     totalPoints

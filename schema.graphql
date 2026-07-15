@@ -275,6 +275,45 @@ type LiquidationCall {
   borrowAssetPriceUSD: Float!
 }
 
+# Unified per-reserve transaction feed (replaces the GoldSky charts subgraph's
+# ReserveTx). Deliberately denormalized: `reserve` is the composite
+# '<asset>-<provider>' id as a plain string so consumers filter and paginate
+# without joins. Written alongside Supply/RedeemUnderlying/Borrow/Repay/
+# LiquidationCall (liquidations attach to the principal/debt reserve with
+# principalAmount; counterparty is the liquidator).
+type ReserveTx
+  @index(fields: ["reserve", "timestamp"])
+  @index(fields: ["reserve", "blockNumber", "logIndex"]) {
+  id: ID!
+  txHash: String! @index
+  kind: Action!
+  reserve: String! @index
+  user: String! @index
+  counterparty: String
+  onBehalfOf: String
+  amount: BigInt!
+  timestamp: Int! @index
+  blockNumber: Int!
+  logIndex: Int!
+}
+
+# Hourly last-value buckets of reserve rates (replaces the GoldSky charts
+# subgraph's ReserveRateSnapshot). Upserted on every ReserveDataUpdated with
+# id '<reserve>-<hourStart>' — the last event in an hour wins; hours without
+# events produce no bucket, matching the old charts semantics. hourStart is a
+# unix-second Int on purpose (consumers filter it with GraphQL Int variables).
+type ReserveRateSnapshot @index(fields: ["reserve", "hourStart"]) {
+  id: ID!
+  reserve: String! @index
+  hourStart: Int! @index
+  liquidityAPRRay: BigInt!
+  variableBorrowAPRRay: BigInt!
+  stableBorrowAPRRay: BigInt!
+  liquidityIndexRay: BigInt!
+  variableBorrowIndexRay: BigInt!
+  lastUpdateTs: Int!
+}
+
 type MintUnbacked {
   id: ID!
   pool_id: String! @index

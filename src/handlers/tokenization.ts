@@ -386,6 +386,22 @@ AToken.Burn.handler(async ({ event, context }) => {
       assetPriceUSD,
     });
 
+    context.ReserveTx.set({
+      id: redeemId,
+      txHash: event.transaction.hash,
+      kind: 'RedeemUnderlying',
+      reserve: reserveId,
+      user: userAddress,
+      // counterparty carries the burn recipient (event.params.target) to match
+      // the retired charts feed, which showed the withdrawal receiver.
+      counterparty: normalizeAddress(event.params.target),
+      onBehalfOf: undefined,
+      amount: event.params.value + event.params.balanceIncrease,
+      timestamp: Number(event.block.timestamp),
+      blockNumber: Number(event.block.number),
+      logIndex: Number(event.logIndex),
+    });
+
     await updateDailyWithdrawHighwater(
       context,
       userAddress,

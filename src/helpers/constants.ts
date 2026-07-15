@@ -205,6 +205,7 @@ export const SMON_ADDRESS = '0xa3227c5969757783154c60bf0bc1944180ed81b9';
 export const SHMON_ADDRESS = '0x1b68626dca36c7fe922fd2d55e4f631d962de19c';
 export const SHMON_UPPER_ADDRESS = '0x1ce060d47a0fd08b0869748fd7eccf151f4ec5d1';
 export const LOAZND_ADDRESS = '0x9c82eb49b51f7dc61e22ff347931ca32adc6cd90';
+export const CBBTC_ADDRESS = '0xd18b7ec58cdf4876f6afebd3ed1730e4ce10414b';
 
 export interface TokenMetadata {
   name: string;
@@ -218,7 +219,9 @@ const KNOWN_TOKENS: Record<string, TokenMetadata> = {
   [SMON_ADDRESS]: { name: 'Kintsu Staked Monad', symbol: 'sMON', decimals: 18 },
   [GMON_ADDRESS]: { name: 'gMON', symbol: 'gMON', decimals: 18 },
   [SHMON_ADDRESS]: { name: 'ShMonad', symbol: 'shMON', decimals: 18 },
+  [SHMON_UPPER_ADDRESS]: { name: 'ShMonad', symbol: 'shMON', decimals: 18 },
   [LOAZND_ADDRESS]: { name: 'Locked AZND', symbol: 'loAZND', decimals: 18 },
+  [CBBTC_ADDRESS]: { name: 'Coinbase Wrapped BTC', symbol: 'cbBTC', decimals: 8 },
   [WETH_ADDRESS]: { name: 'Wrapped Ether', symbol: 'WETH', decimals: 18 },
   [AUSD_ADDRESS]: { name: 'AUSD', symbol: 'AUSD', decimals: 6 },
   [USDC_ADDRESS]: { name: 'USDC', symbol: 'USDC', decimals: 6 },

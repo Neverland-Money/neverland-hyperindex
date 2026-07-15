@@ -284,6 +284,13 @@ test('gateway withdrawals attribute redeem to actual user', async () => {
   assert.equal(redeem?.user_id, ADDRESSES.fromUser);
   assert.equal(redeem?.userReserve_id, userReserveId);
 
+  const feedRow = mockDb.entities.ReserveTx.get(redeemId);
+  assert.ok(feedRow);
+  assert.equal(feedRow?.kind, 'RedeemUnderlying');
+  assert.equal(feedRow?.user, ADDRESSES.fromUser);
+  assert.equal(feedRow?.counterparty, gateway);
+  assert.equal(feedRow?.amount, 100n * UNIT);
+
   const pendingAfter = mockDb.entities.PendingGatewayWithdrawal.get(pendingId);
   assert.equal(pendingAfter, undefined);
 });
