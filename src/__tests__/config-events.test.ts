@@ -372,6 +372,18 @@ test('static provider bootstrap preserves isolated pool events before registry r
     mockDb,
   });
 
+  const poolAfterUpdate = mockDb.entities.Pool.get(ADDRESSES.provider);
+  assert.equal(
+    poolAfterUpdate?.pool,
+    ADDRESSES.pool,
+    'PoolUpdated must preserve the proxy address set by ProxyCreated'
+  );
+  assert.notEqual(
+    poolAfterUpdate?.pool,
+    ADDRESSES.poolImpl,
+    'pool.pool must remain the proxy address, not the implementation address'
+  );
+
   const proxyConfigurator = TestHelpers.PoolAddressesProvider.ProxyCreated.createMockEvent({
     id: POOL_CONFIGURATOR_ID,
     proxyAddress: ADDRESSES.configurator,

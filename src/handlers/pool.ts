@@ -63,6 +63,68 @@ async function getOrCreateUserReserveForCollateralToggle(
   };
 }
 
+async function updateUsageAsCollateral(
+  context: handlerContext,
+  params: {
+    txHash: string;
+    logIndex: number;
+    timestamp: number;
+    poolId: string;
+    reserveId: string;
+    userId: string;
+    userReserveId: string;
+    toState: boolean;
+  }
+) {
+  const { txHash, logIndex, timestamp, poolId, reserveId, userId, userReserveId, toState } = params;
+
+  await getOrCreateUser(context, userId);
+  const userReserve = await getOrCreateUserReserveForCollateralToggle(
+    context,
+    userReserveId,
+    poolId,
+    userId,
+    reserveId,
+    timestamp
+  );
+
+  const historyId = getHistoryEntityId(txHash, logIndex);
+  context.UsageAsCollateral.set({
+    id: historyId,
+    txHash,
+    action: 'UsageAsCollateral',
+    pool_id: poolId,
+    user_id: userId,
+    reserve_id: reserveId,
+    userReserve_id: userReserveId,
+    fromState: userReserve.usageAsCollateralEnabledOnUser,
+    toState,
+    timestamp,
+  });
+
+  context.UserReserve.set({
+    ...userReserve,
+    usageAsCollateralEnabledOnUser: toState,
+    lastUpdateTimestamp: timestamp,
+  });
+
+  // Only adjust Reserve.totalLiquidityAsCollateral when the state actually flips.
+  if (userReserve.usageAsCollateralEnabledOnUser !== toState) {
+    const reserve = await context.Reserve.get(reserveId);
+    if (reserve) {
+      const userBalance = userReserve.currentATokenBalance;
+      context.Reserve.set({
+        ...reserve,
+        totalLiquidityAsCollateral: toState
+          ? reserve.totalLiquidityAsCollateral + userBalance
+          : reserve.totalLiquidityAsCollateral > userBalance
+            ? reserve.totalLiquidityAsCollateral - userBalance
+            : 0n,
+      });
+    }
+  }
+}
+
 async function maybeStoreEpochEndReserveSnapshot(
   context: handlerContext,
   reserve: {
@@ -539,46 +601,16 @@ Pool.ReserveUsedAsCollateralEnabled.handler(async ({ event, context }) => {
   const userId = normalizeAddress(event.params.user);
   const userReserveId = `${userId}-${reserveId}`;
 
-  await getOrCreateUser(context, userId);
-  const userReserve = await getOrCreateUserReserveForCollateralToggle(
-    context,
-    userReserveId,
-    poolId,
-    userId,
-    reserveId,
-    Number(event.block.timestamp)
-  );
-  const historyId = getHistoryEntityId(event.transaction.hash, Number(event.logIndex));
-  context.UsageAsCollateral.set({
-    id: historyId,
+  await updateUsageAsCollateral(context, {
     txHash: event.transaction.hash,
-    action: 'UsageAsCollateral',
-    pool_id: poolId,
-    user_id: userId,
-    reserve_id: reserveId,
-    userReserve_id: userReserveId,
-    fromState: userReserve.usageAsCollateralEnabledOnUser,
-    toState: true,
+    logIndex: Number(event.logIndex),
     timestamp: Number(event.block.timestamp),
+    poolId,
+    reserveId,
+    userId,
+    userReserveId,
+    toState: true,
   });
-
-  context.UserReserve.set({
-    ...userReserve,
-    usageAsCollateralEnabledOnUser: true,
-    lastUpdateTimestamp: Number(event.block.timestamp),
-  });
-
-  // Update Reserve.totalLiquidityAsCollateral when collateral is enabled
-  if (!userReserve.usageAsCollateralEnabledOnUser) {
-    const reserve = await context.Reserve.get(reserveId);
-    if (reserve) {
-      const userBalance = userReserve.currentATokenBalance;
-      context.Reserve.set({
-        ...reserve,
-        totalLiquidityAsCollateral: reserve.totalLiquidityAsCollateral + userBalance,
-      });
-    }
-  }
 });
 
 Pool.ReserveUsedAsCollateralDisabled.handler(async ({ event, context }) => {
@@ -595,49 +627,16 @@ Pool.ReserveUsedAsCollateralDisabled.handler(async ({ event, context }) => {
   const userId = normalizeAddress(event.params.user);
   const userReserveId = `${userId}-${reserveId}`;
 
-  await getOrCreateUser(context, userId);
-  const userReserve = await getOrCreateUserReserveForCollateralToggle(
-    context,
-    userReserveId,
-    poolId,
-    userId,
-    reserveId,
-    Number(event.block.timestamp)
-  );
-  const historyId = getHistoryEntityId(event.transaction.hash, Number(event.logIndex));
-  context.UsageAsCollateral.set({
-    id: historyId,
+  await updateUsageAsCollateral(context, {
     txHash: event.transaction.hash,
-    action: 'UsageAsCollateral',
-    pool_id: poolId,
-    user_id: userId,
-    reserve_id: reserveId,
-    userReserve_id: userReserveId,
-    fromState: userReserve.usageAsCollateralEnabledOnUser,
-    toState: false,
+    logIndex: Number(event.logIndex),
     timestamp: Number(event.block.timestamp),
+    poolId,
+    reserveId,
+    userId,
+    userReserveId,
+    toState: false,
   });
-
-  context.UserReserve.set({
-    ...userReserve,
-    usageAsCollateralEnabledOnUser: false,
-    lastUpdateTimestamp: Number(event.block.timestamp),
-  });
-
-  // Update Reserve.totalLiquidityAsCollateral when collateral is disabled
-  if (userReserve.usageAsCollateralEnabledOnUser) {
-    const reserve = await context.Reserve.get(reserveId);
-    if (reserve) {
-      const userBalance = userReserve.currentATokenBalance;
-      context.Reserve.set({
-        ...reserve,
-        totalLiquidityAsCollateral:
-          reserve.totalLiquidityAsCollateral > userBalance
-            ? reserve.totalLiquidityAsCollateral - userBalance
-            : 0n,
-      });
-    }
-  }
 });
 
 Pool.ReserveDataUpdated.handler(async ({ event, context }) => {
