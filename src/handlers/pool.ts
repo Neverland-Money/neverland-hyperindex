@@ -11,6 +11,7 @@ import {
   getAssetPriceUSD,
   getReserveNormalizedIncome,
   getReserveNormalizedVariableDebt,
+  addReserveToUserList,
 } from './shared';
 import { calculateGrowth } from '../helpers/math';
 import { getHistoryEntityId } from '../helpers/entityHelpers';
@@ -21,6 +22,45 @@ async function resolvePoolId(context: handlerContext, contractAddress: string): 
   const normalized = normalizeAddress(contractAddress);
   const mapping = await context.ContractToPoolMapping.get(normalized);
   return mapping?.pool_id || normalized;
+}
+
+// The Pool emits ReserveUsedAsCollateralEnabled BEFORE the aToken's
+// BalanceTransfer when a user's first aTokens arrive via transfer, so the
+// toggle handlers cannot assume the UserReserve row already exists — skipping
+// would silently lose the collateral flag forever (the later BalanceTransfer
+// creates the row with the flag defaulted to false).
+async function getOrCreateUserReserveForCollateralToggle(
+  context: handlerContext,
+  userReserveId: string,
+  poolId: string,
+  userId: string,
+  reserveId: string,
+  timestamp: number
+) {
+  const existing = await context.UserReserve.get(userReserveId);
+  if (existing) return existing;
+
+  await addReserveToUserList(context, userId, reserveId, timestamp);
+  return {
+    id: userReserveId,
+    pool_id: poolId,
+    user_id: userId,
+    reserve_id: reserveId,
+    scaledATokenBalance: 0n,
+    currentATokenBalance: 0n,
+    scaledVariableDebt: 0n,
+    currentVariableDebt: 0n,
+    principalStableDebt: 0n,
+    currentStableDebt: 0n,
+    currentTotalDebt: 0n,
+    stableBorrowRate: 0n,
+    oldStableBorrowRate: 0n,
+    liquidityRate: 0n,
+    variableBorrowIndex: 0n,
+    usageAsCollateralEnabledOnUser: false,
+    lastUpdateTimestamp: timestamp,
+    stableBorrowLastUpdateTimestamp: 0,
+  };
 }
 
 async function maybeStoreEpochEndReserveSnapshot(
@@ -173,6 +213,20 @@ Pool.Supply.handler(async ({ event, context }) => {
       timestamp: Number(event.block.timestamp),
       assetPriceUSD,
     });
+
+    context.ReserveTx.set({
+      id,
+      txHash: event.transaction.hash,
+      kind: 'Supply',
+      reserve: reserveId,
+      user: userId,
+      counterparty: normalizeAddress(event.params.user),
+      onBehalfOf: userId,
+      amount: event.params.amount,
+      timestamp: Number(event.block.timestamp),
+      blockNumber: Number(event.block.number),
+      logIndex: Number(event.logIndex),
+    });
     /* c8 ignore start */
   } catch (error) {
     context.log.error(`Failed to process Supply event: ${error}`);
@@ -251,6 +305,20 @@ Pool.Borrow.handler(async ({ event, context }) => {
       assetPriceUSD,
       timestamp: Number(event.block.timestamp),
     });
+
+    context.ReserveTx.set({
+      id,
+      txHash: event.transaction.hash,
+      kind: 'Borrow',
+      reserve: reserveId,
+      user: userId,
+      counterparty: normalizeAddress(event.params.user),
+      onBehalfOf: userId,
+      amount: event.params.amount,
+      timestamp: Number(event.block.timestamp),
+      blockNumber: Number(event.block.number),
+      logIndex: Number(event.logIndex),
+    });
     /* c8 ignore start */
   } catch (error) {
     context.log.error(`Failed to process Borrow event: ${error}`);
@@ -296,6 +364,20 @@ Pool.Repay.handler(async ({ event, context }) => {
     useATokens: event.params.useATokens,
     assetPriceUSD,
     timestamp: Number(event.block.timestamp),
+  });
+
+  context.ReserveTx.set({
+    id,
+    txHash: event.transaction.hash,
+    kind: 'Repay',
+    reserve: reserveId,
+    user: userId,
+    counterparty: normalizeAddress(event.params.repayer),
+    onBehalfOf: undefined,
+    amount: event.params.amount,
+    timestamp: Number(event.block.timestamp),
+    blockNumber: Number(event.block.number),
+    logIndex: Number(event.logIndex),
   });
 });
 
@@ -420,6 +502,21 @@ Pool.LiquidationCall.handler(async ({ event, context }) => {
       borrowAssetPriceUSD,
       timestamp: Number(event.block.timestamp),
     });
+
+    // Feed row attaches to the principal (debt) reserve with the repaid amount.
+    context.ReserveTx.set({
+      id,
+      txHash: event.transaction.hash,
+      kind: 'LiquidationCall',
+      reserve: debtReserveId,
+      user: userId,
+      counterparty: normalizeAddress(event.params.liquidator),
+      onBehalfOf: undefined,
+      amount: event.params.debtToCover,
+      timestamp: Number(event.block.timestamp),
+      blockNumber: Number(event.block.number),
+      logIndex: Number(event.logIndex),
+    });
     /* c8 ignore start */
   } catch (error) {
     context.log.error(`Failed to process LiquidationCall event: ${error}`);
@@ -443,38 +540,43 @@ Pool.ReserveUsedAsCollateralEnabled.handler(async ({ event, context }) => {
   const userReserveId = `${userId}-${reserveId}`;
 
   await getOrCreateUser(context, userId);
-  let userReserve = await context.UserReserve.get(userReserveId);
-  if (userReserve) {
-    const historyId = getHistoryEntityId(event.transaction.hash, Number(event.logIndex));
-    context.UsageAsCollateral.set({
-      id: historyId,
-      txHash: event.transaction.hash,
-      action: 'UsageAsCollateral',
-      pool_id: poolId,
-      user_id: userId,
-      reserve_id: reserveId,
-      userReserve_id: userReserveId,
-      fromState: userReserve.usageAsCollateralEnabledOnUser,
-      toState: true,
-      timestamp: Number(event.block.timestamp),
-    });
+  const userReserve = await getOrCreateUserReserveForCollateralToggle(
+    context,
+    userReserveId,
+    poolId,
+    userId,
+    reserveId,
+    Number(event.block.timestamp)
+  );
+  const historyId = getHistoryEntityId(event.transaction.hash, Number(event.logIndex));
+  context.UsageAsCollateral.set({
+    id: historyId,
+    txHash: event.transaction.hash,
+    action: 'UsageAsCollateral',
+    pool_id: poolId,
+    user_id: userId,
+    reserve_id: reserveId,
+    userReserve_id: userReserveId,
+    fromState: userReserve.usageAsCollateralEnabledOnUser,
+    toState: true,
+    timestamp: Number(event.block.timestamp),
+  });
 
-    context.UserReserve.set({
-      ...userReserve,
-      usageAsCollateralEnabledOnUser: true,
-      lastUpdateTimestamp: Number(event.block.timestamp),
-    });
+  context.UserReserve.set({
+    ...userReserve,
+    usageAsCollateralEnabledOnUser: true,
+    lastUpdateTimestamp: Number(event.block.timestamp),
+  });
 
-    // Update Reserve.totalLiquidityAsCollateral when collateral is enabled
-    if (!userReserve.usageAsCollateralEnabledOnUser) {
-      const reserve = await context.Reserve.get(reserveId);
-      if (reserve) {
-        const userBalance = userReserve.currentATokenBalance;
-        context.Reserve.set({
-          ...reserve,
-          totalLiquidityAsCollateral: reserve.totalLiquidityAsCollateral + userBalance,
-        });
-      }
+  // Update Reserve.totalLiquidityAsCollateral when collateral is enabled
+  if (!userReserve.usageAsCollateralEnabledOnUser) {
+    const reserve = await context.Reserve.get(reserveId);
+    if (reserve) {
+      const userBalance = userReserve.currentATokenBalance;
+      context.Reserve.set({
+        ...reserve,
+        totalLiquidityAsCollateral: reserve.totalLiquidityAsCollateral + userBalance,
+      });
     }
   }
 });
@@ -494,41 +596,46 @@ Pool.ReserveUsedAsCollateralDisabled.handler(async ({ event, context }) => {
   const userReserveId = `${userId}-${reserveId}`;
 
   await getOrCreateUser(context, userId);
-  let userReserve = await context.UserReserve.get(userReserveId);
-  if (userReserve) {
-    const historyId = getHistoryEntityId(event.transaction.hash, Number(event.logIndex));
-    context.UsageAsCollateral.set({
-      id: historyId,
-      txHash: event.transaction.hash,
-      action: 'UsageAsCollateral',
-      pool_id: poolId,
-      user_id: userId,
-      reserve_id: reserveId,
-      userReserve_id: userReserveId,
-      fromState: userReserve.usageAsCollateralEnabledOnUser,
-      toState: false,
-      timestamp: Number(event.block.timestamp),
-    });
+  const userReserve = await getOrCreateUserReserveForCollateralToggle(
+    context,
+    userReserveId,
+    poolId,
+    userId,
+    reserveId,
+    Number(event.block.timestamp)
+  );
+  const historyId = getHistoryEntityId(event.transaction.hash, Number(event.logIndex));
+  context.UsageAsCollateral.set({
+    id: historyId,
+    txHash: event.transaction.hash,
+    action: 'UsageAsCollateral',
+    pool_id: poolId,
+    user_id: userId,
+    reserve_id: reserveId,
+    userReserve_id: userReserveId,
+    fromState: userReserve.usageAsCollateralEnabledOnUser,
+    toState: false,
+    timestamp: Number(event.block.timestamp),
+  });
 
-    context.UserReserve.set({
-      ...userReserve,
-      usageAsCollateralEnabledOnUser: false,
-      lastUpdateTimestamp: Number(event.block.timestamp),
-    });
+  context.UserReserve.set({
+    ...userReserve,
+    usageAsCollateralEnabledOnUser: false,
+    lastUpdateTimestamp: Number(event.block.timestamp),
+  });
 
-    // Update Reserve.totalLiquidityAsCollateral when collateral is disabled
-    if (userReserve.usageAsCollateralEnabledOnUser) {
-      const reserve = await context.Reserve.get(reserveId);
-      if (reserve) {
-        const userBalance = userReserve.currentATokenBalance;
-        context.Reserve.set({
-          ...reserve,
-          totalLiquidityAsCollateral:
-            reserve.totalLiquidityAsCollateral > userBalance
-              ? reserve.totalLiquidityAsCollateral - userBalance
-              : 0n,
-        });
-      }
+  // Update Reserve.totalLiquidityAsCollateral when collateral is disabled
+  if (userReserve.usageAsCollateralEnabledOnUser) {
+    const reserve = await context.Reserve.get(reserveId);
+    if (reserve) {
+      const userBalance = userReserve.currentATokenBalance;
+      context.Reserve.set({
+        ...reserve,
+        totalLiquidityAsCollateral:
+          reserve.totalLiquidityAsCollateral > userBalance
+            ? reserve.totalLiquidityAsCollateral - userBalance
+            : 0n,
+      });
     }
   }
 });
@@ -581,6 +688,20 @@ Pool.ReserveDataUpdated.handler(async ({ event, context }) => {
       totalATokenSupply: newTotalATokenSupply,
       lifetimeSuppliersInterestEarned: newLifetimeSuppliersInterest,
       lastUpdateTimestamp: Number(event.block.timestamp),
+    });
+
+    // Hourly rate bucket: deterministic id makes the last update in an hour win.
+    const hourStart = Math.floor(Number(event.block.timestamp) / 3600) * 3600;
+    context.ReserveRateSnapshot.set({
+      id: `${reserveId}-${hourStart}`,
+      reserve: reserveId,
+      hourStart,
+      liquidityAPRRay: event.params.liquidityRate,
+      variableBorrowAPRRay: event.params.variableBorrowRate,
+      stableBorrowAPRRay: event.params.stableBorrowRate,
+      liquidityIndexRay: event.params.liquidityIndex,
+      variableBorrowIndexRay: event.params.variableBorrowIndex,
+      lastUpdateTs: Number(event.block.timestamp),
     });
 
     // Update USD aggregates with new accrued interest

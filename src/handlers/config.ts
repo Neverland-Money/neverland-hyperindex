@@ -206,12 +206,33 @@ PoolAddressesProvider.ProxyCreated.handler(async ({ event, context }) => {
 
   const providerId = normalizeAddress(event.srcAddress);
   const proxyAddress = normalizeAddress(event.params.proxyAddress);
-  await getOrCreatePool(context, providerId, timestamp);
+  const implementationAddress = normalizeAddress(event.params.implementationAddress);
+  const pool = await getOrCreatePool(context, providerId, timestamp);
 
   context.ContractToPoolMapping.set({
     id: proxyAddress,
     pool_id: providerId,
   });
+
+  // Pool.pool / Pool.poolConfigurator hold the PROXY addresses (aave-subgraph
+  // contract; ops preflights compare them against descriptor addresses). The
+  // *Updated events only carry implementation addresses — see those handlers.
+  const contractId = event.params.id.toString();
+  if (contractId === POOL_ID) {
+    context.Pool.set({
+      ...pool,
+      pool: proxyAddress,
+      poolImpl: implementationAddress,
+      lastUpdateTimestamp: timestamp,
+    });
+  } else if (contractId === POOL_CONFIGURATOR_ID) {
+    context.Pool.set({
+      ...pool,
+      poolConfigurator: proxyAddress,
+      poolConfiguratorImpl: implementationAddress,
+      lastUpdateTimestamp: timestamp,
+    });
+  }
 });
 
 PoolAddressesProvider.PoolUpdated.handler(async ({ event, context }) => {
@@ -224,9 +245,11 @@ PoolAddressesProvider.PoolUpdated.handler(async ({ event, context }) => {
   );
   const providerId = normalizeAddress(event.srcAddress);
   const pool = await getOrCreatePool(context, providerId, timestamp);
+  // PoolUpdated.newAddress is the new IMPLEMENTATION behind the unchanged
+  // proxy (Aave v3 setPoolImpl) — never overwrite Pool.pool with it.
   context.Pool.set({
     ...pool,
-    pool: normalizeAddress(event.params.newAddress),
+    poolImpl: normalizeAddress(event.params.newAddress),
     lastUpdateTimestamp: timestamp,
   });
 });
@@ -241,9 +264,10 @@ PoolAddressesProvider.PoolConfiguratorUpdated.handler(async ({ event, context })
   );
   const providerId = normalizeAddress(event.srcAddress);
   const pool = await getOrCreatePool(context, providerId, timestamp);
+  // Same proxy-vs-impl split as PoolUpdated: newAddress is the implementation.
   context.Pool.set({
     ...pool,
-    poolConfigurator: normalizeAddress(event.params.newAddress),
+    poolConfiguratorImpl: normalizeAddress(event.params.newAddress),
     lastUpdateTimestamp: timestamp,
   });
 });

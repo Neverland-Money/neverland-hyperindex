@@ -215,6 +215,14 @@ test('liquidations update reserve totals and create event record', async () => {
   assert.equal(record?.collateralAmount, 150n * UNIT);
   assert.equal(record?.principalAmount, 200n * UNIT);
 
+  const feedRow = mockDb.entities.ReserveTx.get(liquidationId);
+  assert.ok(feedRow);
+  assert.equal(feedRow?.kind, 'LiquidationCall');
+  assert.equal(feedRow?.reserve, `${ADDRESSES.debt}-${ADDRESSES.pool}`);
+  assert.equal(feedRow?.user, ADDRESSES.user);
+  assert.equal(feedRow?.counterparty, ADDRESSES.liquidator);
+  assert.equal(feedRow?.amount, 200n * UNIT);
+
   assert.ok(mockDb.entities.User.get(ADDRESSES.user));
   assert.ok(mockDb.entities.User.get(ADDRESSES.liquidator));
 });
@@ -341,6 +349,17 @@ test('supply, borrow, and repay record prices and referrers', async () => {
   assert.equal(supply?.referrer_id, '123');
   assert.equal(supply?.assetPriceUSD, 2.5);
 
+  const supplyFeedRow = mockDb.entities.ReserveTx.get(supplyId);
+  assert.ok(supplyFeedRow);
+  assert.equal(supplyFeedRow?.kind, 'Supply');
+  assert.equal(supplyFeedRow?.reserve, reserveId);
+  assert.equal(supplyFeedRow?.user, ADDRESSES.user);
+  assert.equal(supplyFeedRow?.counterparty, ADDRESSES.liquidator);
+  assert.equal(supplyFeedRow?.onBehalfOf, ADDRESSES.user);
+  assert.equal(supplyFeedRow?.amount, 100n * UNIT);
+  assert.equal(supplyFeedRow?.blockNumber, 14);
+  assert.equal(supplyFeedRow?.logIndex, supplyEvent.logIndex);
+
   const borrowEvent = TestHelpers.Pool.Borrow.createMockEvent({
     reserve: ADDRESSES.collateral,
     user: ADDRESSES.liquidator,
@@ -362,6 +381,12 @@ test('supply, borrow, and repay record prices and referrers', async () => {
   assert.equal(borrow?.borrowRateMode, 2);
   assert.equal(borrow?.assetPriceUSD, 2.5);
 
+  const borrowFeedRow = mockDb.entities.ReserveTx.get(borrowId);
+  assert.ok(borrowFeedRow);
+  assert.equal(borrowFeedRow?.kind, 'Borrow');
+  assert.equal(borrowFeedRow?.counterparty, ADDRESSES.liquidator);
+  assert.equal(borrowFeedRow?.amount, 80n * UNIT);
+
   const repayEvent = TestHelpers.Pool.Repay.createMockEvent({
     reserve: ADDRESSES.collateral,
     user: ADDRESSES.user,
@@ -379,7 +404,77 @@ test('supply, borrow, and repay record prices and referrers', async () => {
   assert.equal(repay?.useATokens, true);
   assert.equal(repay?.assetPriceUSD, 2.5);
 
+  const repayFeedRow = mockDb.entities.ReserveTx.get(repayId);
+  assert.ok(repayFeedRow);
+  assert.equal(repayFeedRow?.kind, 'Repay');
+  assert.equal(repayFeedRow?.user, ADDRESSES.user);
+  assert.equal(repayFeedRow?.counterparty, ADDRESSES.liquidator);
+  assert.equal(repayFeedRow?.onBehalfOf, undefined);
+  assert.equal(repayFeedRow?.amount, 20n * UNIT);
+
   assert.ok(mockDb.entities.Referrer.get('123'));
+});
+
+test('reserve data updates upsert hourly rate snapshots', async () => {
+  const TestHelpers = loadTestHelpers();
+  const eventData = createEventDataFactory();
+  const reserveId = `${ADDRESSES.collateral}-${ADDRESSES.pool}`;
+
+  let mockDb: MockDb = TestHelpers.MockDb.createMockDb();
+  mockDb = mockDb.entities.Protocol.set({ id: '1' });
+  mockDb = seedPool(mockDb, ADDRESSES.pool, 7200, undefined);
+  mockDb = seedReserve(mockDb, ADDRESSES.collateral, ADDRESSES.pool, 7200, {
+    totalATokenSupply: 100n,
+    totalLiquidity: 100n,
+    availableLiquidity: 100n,
+  });
+
+  const makeEvent = (
+    blockNumber: number,
+    timestamp: number,
+    liquidityRate: bigint,
+    variableBorrowRate: bigint
+  ) =>
+    TestHelpers.Pool.ReserveDataUpdated.createMockEvent({
+      reserve: ADDRESSES.collateral,
+      liquidityRate,
+      stableBorrowRate: 1n,
+      variableBorrowRate,
+      liquidityIndex: RAY,
+      variableBorrowIndex: RAY,
+      ...eventData(blockNumber, timestamp, ADDRESSES.pool),
+    });
+
+  // Two updates inside the same hour bucket: the later one wins.
+  mockDb = await TestHelpers.Pool.ReserveDataUpdated.processEvent({
+    event: makeEvent(31, 7300, 5n, 7n),
+    mockDb,
+  });
+  mockDb = await TestHelpers.Pool.ReserveDataUpdated.processEvent({
+    event: makeEvent(32, 7400, 6n, 8n),
+    mockDb,
+  });
+
+  const bucket = mockDb.entities.ReserveRateSnapshot.get(`${reserveId}-7200`);
+  assert.ok(bucket);
+  assert.equal(bucket?.reserve, reserveId);
+  assert.equal(bucket?.hourStart, 7200);
+  assert.equal(bucket?.liquidityAPRRay, 6n);
+  assert.equal(bucket?.variableBorrowAPRRay, 8n);
+  assert.equal(bucket?.stableBorrowAPRRay, 1n);
+  assert.equal(bucket?.lastUpdateTs, 7400);
+
+  // An update in the next hour opens a new bucket and leaves the old one alone.
+  mockDb = await TestHelpers.Pool.ReserveDataUpdated.processEvent({
+    event: makeEvent(33, 10900, 9n, 10n),
+    mockDb,
+  });
+
+  const nextBucket = mockDb.entities.ReserveRateSnapshot.get(`${reserveId}-10800`);
+  assert.ok(nextBucket);
+  assert.equal(nextBucket?.hourStart, 10800);
+  assert.equal(nextBucket?.liquidityAPRRay, 9n);
+  assert.equal(mockDb.entities.ReserveRateSnapshot.get(`${reserveId}-7200`)?.liquidityAPRRay, 6n);
 });
 
 test('supply without referral code leaves referrer empty', async () => {
@@ -660,6 +755,69 @@ test('usage as collateral toggles and records history', async () => {
   assert.ok(disableRecord);
   assert.equal(disableRecord?.fromState, true);
   assert.equal(disableRecord?.toState, false);
+});
+
+test('collateral toggle before the user reserve exists creates it with the flag', async () => {
+  // First-touch-via-transfer regression: the Pool emits
+  // ReserveUsedAsCollateralEnabled BEFORE the aToken BalanceTransfer creates
+  // the UserReserve row. Dropping the event loses the flag forever (live bug
+  // found 2026-07-14: on-chain collateral=true, indexer said false).
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  mockDb = mockDb.entities.Protocol.set({ id: '1' });
+  mockDb = seedPool(mockDb, ADDRESSES.pool, 3000, undefined);
+  mockDb = seedReserve(mockDb, ADDRESSES.collateral, ADDRESSES.pool, 3000);
+
+  const reserveId = `${ADDRESSES.collateral}-${ADDRESSES.pool}`;
+  const userReserveId = `${ADDRESSES.user}-${reserveId}`;
+  assert.equal(mockDb.entities.UserReserve.get(userReserveId), undefined);
+
+  const enable = TestHelpers.Pool.ReserveUsedAsCollateralEnabled.createMockEvent({
+    reserve: ADDRESSES.collateral,
+    user: ADDRESSES.user,
+    ...eventData(6, 3010, ADDRESSES.pool),
+  });
+  mockDb = await TestHelpers.Pool.ReserveUsedAsCollateralEnabled.processEvent({
+    event: enable,
+    mockDb,
+  });
+
+  const created = mockDb.entities.UserReserve.get(userReserveId);
+  assert.ok(created);
+  assert.equal(created?.usageAsCollateralEnabledOnUser, true);
+  assert.equal(created?.currentATokenBalance, 0n);
+  assert.equal(created?.pool_id, ADDRESSES.pool);
+
+  const enableRecord = mockDb.entities.UsageAsCollateral.get(
+    `${enable.transaction.hash}-${enable.logIndex}`
+  );
+  assert.ok(enableRecord);
+  assert.equal(enableRecord?.fromState, false);
+  assert.equal(enableRecord?.toState, true);
+
+  const userList = mockDb.entities.UserReserveList.get(ADDRESSES.user);
+  assert.ok(userList);
+  assert.ok(userList?.reserveIds.includes(reserveId));
+
+  // Disabled on a missing row must also create-and-record instead of dropping.
+  const otherUserReserveId = `${ADDRESSES.liquidator}-${reserveId}`;
+  const disable = TestHelpers.Pool.ReserveUsedAsCollateralDisabled.createMockEvent({
+    reserve: ADDRESSES.collateral,
+    user: ADDRESSES.liquidator,
+    ...eventData(7, 3020, ADDRESSES.pool),
+  });
+  mockDb = await TestHelpers.Pool.ReserveUsedAsCollateralDisabled.processEvent({
+    event: disable,
+    mockDb,
+  });
+  const createdDisabled = mockDb.entities.UserReserve.get(otherUserReserveId);
+  assert.ok(createdDisabled);
+  assert.equal(createdDisabled?.usageAsCollateralEnabledOnUser, false);
+  assert.ok(
+    mockDb.entities.UsageAsCollateral.get(`${disable.transaction.hash}-${disable.logIndex}`)
+  );
 });
 
 test('minted to treasury records history and updates reserve', async () => {

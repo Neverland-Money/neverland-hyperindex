@@ -159,7 +159,7 @@ test('addresses provider registry updates pools and contracts', async () => {
 
   const poolUpdate = TestHelpers.PoolAddressesProvider.PoolUpdated.createMockEvent({
     oldAddress: ZERO_ADDRESS,
-    newAddress: ADDRESSES.pool,
+    newAddress: ADDRESSES.poolImpl,
     ...eventData(5, 1040, ADDRESSES.provider),
   });
   mockDb = await TestHelpers.PoolAddressesProvider.PoolUpdated.processEvent({
@@ -170,7 +170,7 @@ test('addresses provider registry updates pools and contracts', async () => {
   const configuratorUpdate =
     TestHelpers.PoolAddressesProvider.PoolConfiguratorUpdated.createMockEvent({
       oldAddress: ZERO_ADDRESS,
-      newAddress: ADDRESSES.configurator,
+      newAddress: ADDRESSES.configImpl,
       ...eventData(6, 1050, ADDRESSES.provider),
     });
   mockDb = await TestHelpers.PoolAddressesProvider.PoolConfiguratorUpdated.processEvent({
@@ -202,7 +202,9 @@ test('addresses provider registry updates pools and contracts', async () => {
   const pool = mockDb.entities.Pool.get(ADDRESSES.provider);
   assert.equal(pool?.active, false);
   assert.equal(pool?.pool, ADDRESSES.pool);
+  assert.equal(pool?.poolImpl, ADDRESSES.poolImpl);
   assert.equal(pool?.poolConfigurator, ADDRESSES.configurator);
+  assert.equal(pool?.poolConfiguratorImpl, ADDRESSES.configImpl);
   assert.equal(pool?.proxyPriceProvider, ADDRESSES.priceOracle);
   assert.equal(pool?.poolDataProviderImpl, ADDRESSES.dataProvider);
   assert.ok(mockDb.entities.PriceOracle.get(ADDRESSES.provider));
@@ -349,9 +351,20 @@ test('static provider bootstrap preserves isolated pool events before registry r
   let mockDb = TestHelpers.MockDb.createMockDb();
   const eventData = createEventDataFactory();
 
+  const proxyPool = TestHelpers.PoolAddressesProvider.ProxyCreated.createMockEvent({
+    id: POOL_ID,
+    proxyAddress: ADDRESSES.pool,
+    implementationAddress: ADDRESSES.poolImpl,
+    ...eventData(19, 1190, ADDRESSES.provider),
+  });
+  mockDb = await TestHelpers.PoolAddressesProvider.ProxyCreated.processEvent({
+    event: proxyPool,
+    mockDb,
+  });
+
   const poolUpdate = TestHelpers.PoolAddressesProvider.PoolUpdated.createMockEvent({
     oldAddress: ZERO_ADDRESS,
-    newAddress: ADDRESSES.pool,
+    newAddress: ADDRESSES.poolImpl,
     ...eventData(20, 1200, ADDRESSES.provider),
   });
   mockDb = await TestHelpers.PoolAddressesProvider.PoolUpdated.processEvent({
@@ -405,6 +418,7 @@ test('static provider bootstrap preserves isolated pool events before registry r
   let pool = mockDb.entities.Pool.get(ADDRESSES.provider);
   assert.equal(pool?.addressProviderId, 0n);
   assert.equal(pool?.pool, ADDRESSES.pool);
+  assert.equal(pool?.poolImpl, ADDRESSES.poolImpl);
   assert.equal(pool?.poolConfigurator, ADDRESSES.configurator);
   assert.equal(pool?.proxyPriceProvider, ADDRESSES.priceOracle);
   assert.equal(pool?.poolDataProviderImpl, ADDRESSES.dataProvider);
