@@ -48,29 +48,38 @@ Coverage is enforced at **100%** across the board, **except `src/handlers/lp.ts`
 ## Architecture / concepts that span multiple files
 
 ### Two-phase preload execution (`preload_handlers: true`)
+
 Every handler runs **twice per event**: first a concurrent *preload* pass to discover and batch DB reads (writes are no-ops), then a sequential pass with in-memory data. Consequences when editing handlers:
+
 - Guard side effects with `isPreload(context)` (`context.isPreload === true`). In `src/handlers/shared.ts`, cache-invalidation and other write-time-only logic is gated behind `if (isPreload(context)) return;`.
 - There is a **block-scoped read cache** in `shared.ts` for global singletons (`LeaderboardConfig`, `LeaderboardState`, active epoch, NFT registry, VP tiers). Mutation handlers must invalidate it; the cache also resets when the `context` identity changes (so test mocks don't leak across cases).
 
 ### Dynamic contract registration is forward-only
+
 Handlers register newly discovered contracts via `SomeEvent.contractRegister(...)` + `context.add<Name>(address)` (e.g. `PoolAddressesProvider.ProxyCreated → addPool/addPoolConfigurator`, `PoolConfigurator.ReserveInitialized → addAToken/…`, `LeaderboardConfig.LPPoolConfigured → addUniswapV2Pair/…`, `NFTPartnershipRegistry.PartnershipAdded → addPartnerNFT`). A dynamically added contract is indexed **only from the triggering block onward — no backfill.** When history predates the registration event, statically bootstrap the address in `config.yaml`; Envio dedupes on `(contractName, address)`, so the later registration event becomes a harmless no-op. See `docs/isolated-pool-indexing.md`.
 
 ⚠️ Envio does **not** dedupe across *different* contract names. Statically-configured NFT collections (`STATIC_NFT_COLLECTION_ADDRESSES` in `helpers/constants.ts`) must never be re-registered as the dynamic `PartnerNFT`, or each `Transfer` fires two handlers and double-counts NFT balances. Keep that list in sync with the static NFT entries in `config.yaml`.
 
 ### Entity keying (pool-parametric, DRY across markets)
-The lending layer is written to support multiple Aave markets from the same handlers. Reserves/positions/points key by `${asset}-${poolId}` (poolId = `PoolAddressesProvider` address) and resolve token roles via per-token `SubToken` rows. This is why the isolated `neverland-pendle-ausd` pool (a second market sharing the AUSD asset) coexists without collisions and its lending activity rolls into the **same** leaderboard automatically — scoring never filters by market. Regression-pinned by `config-events.test.ts`.
+
+The lending layer is written to support multiple Aave markets from the same handlers. Reserves/positions/points key by `${asset}-${poolId}` (poolId = `PoolAddressesProvider` address) and resolve token roles via per-token `SubToken` rows. This is why the isolated pools — `neverland-pendle-ausd` (shares the AUSD asset with canonical) and `neverland-pendle-shmon` (shares WMON) — coexist without collisions and their lending activity rolls into the **same** leaderboard automatically; scoring never filters by market. Each isolated market's `PoolAddressesProvider` is statically bootstrapped in `config.yaml` because neither is registered in the on-chain registry yet and dynamic registration is forward-only. Regression-pinned by `config-events.test.ts`; runbook in `docs/isolated-pool-indexing.md`.
 
 ### Leaderboard / points / settlement
+
 Points scoring is epoch-based and pool-agnostic: `settlePointsForUser` walks a user's flat `UserReserveList` and aggregates into one `UserEpochStats` keyed `${user}:${epoch}`. Config-driven per-hour rates (deposit/borrow/LP/VP) live in `helpers/points.ts`; combined multipliers (NFT decay + VP tiers, capped) in `shared.ts` and `helpers/leaderboard.ts`. The `LeaderboardKeeper` contract drives on-chain settlement/sync events (`leaderboardKeeper.ts`). Some epoch-1 values are **bootstrapped** from `helpers/constants.ts` (`EPOCH_1_*_OVERRIDE`, `BOOTSTRAP_*`) rather than events; this is gated by `ENVIO_DISABLE_BOOTSTRAP`.
 
 ### LP points "eras" (cutovers)
+
 The active LP-points pool has changed over time and is gated by block-number cutovers in `src/handlers/lp.ts` (`applyStaticLPPoolCutover`), using the `LP_*_CUTOVER_BLOCK`/`_TIMESTAMP` constants: UniswapV3 → UniswapV2 pair → Balancer AutoRange V3 → back to the UniswapV2 pair. All four LP contracts stay registered in `config.yaml`; the handler decides which era accrues points for a given block. `lp.ts` is large and coverage-excluded — tread carefully and lean on `lp-events.test.ts` / `lp-coverage.test.ts`.
 
 ### Event-only in production — no external RPC reads
+
 `shouldUseEthCalls()` in `shared.ts` is **hardcoded to `false`**: Monad full nodes can't serve archive-style historic state, so handlers must never depend on external chain reads. A `viem` public client exists (`helpers/viem.ts`) and there are opt-in env gates (`ENVIO_ENABLE_EXTERNAL_CALLS`, `ENVIO_ENABLE_ETH_CALLS`, `ENVIO_ENABLE_NFT_CHAIN_SYNC`, `ENVIO_ENABLE_LP_CHAIN_SYNC`), but they are effectively dead while `shouldUseEthCalls()` returns false. Do not introduce handler logic that requires live `eth_call`. `DEBUG_LP_POINTS=true` enables verbose LP tracing.
 
 ## Handler map
+
 `src/handlers/`: `config.ts` (addresses-provider registry, pool/configurator/vault discovery, EMode), `pool.ts` (lending events), `tokenization.ts` (aToken/debt-token balances), `rewards.ts` (RewardsController, DustToken, RevenueReward), `dustlock.ts` (veDUST locks), `leaderboard.ts` + `leaderboardKeeper.ts` (epochs, config, settlement), `nft.ts` (partnership multipliers), `lp.ts` (LP positions/points), `profileShop.ts`, `specialEditions.ts`, and `shared.ts` (the shared engine: caching, settlement, multipliers, protocol aggregation glue). `src/helpers/` holds pure logic (`math.ts` ray/wad, `points.ts`, `leaderboard.ts`, `uniswapV3.ts`, `protocolAggregation.ts`, `constants.ts`, `entityHelpers.ts`, `viem.ts`, `testnetTiers.ts`).
 
 ## Testing pattern
+
 Tests use the **native generated `TestHelpers`** loaded through the compatibility seam `src/__tests__/v3-test-helpers.ts` (it symlinks `generated/` into `dist-test/` and requires all handler modules so their `Contract.Event.handler(...)` registrations run before any `processEvent`). Pattern: `TestHelpers.MockDb.createMockDb()` → `TestHelpers.<Contract>.<Event>.createMockEvent({...})` → `processEvent({ event, mockDb })` → assert on `mockDb.entities.<Entity>.get(id)`. Tests set env gates (`ENVIO_ENABLE_EXTERNAL_CALLS='false'`, etc.) at the top of the file. Because tests run against compiled JS in `dist-test`, **run `test:build` (or `test`) after any source change** — stale `dist-test` output will silently test old code.
