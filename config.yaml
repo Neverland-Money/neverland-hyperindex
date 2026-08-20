@@ -230,11 +230,13 @@ networks:
 
       # PoolAddressesProvider - registered from PoolAddressesProviderRegistry
       #
-      # ISOLATED neverland-pendle-ausd POOL (ProviderId 2): that pool is deployed
-      # BEFORE its provider is registered in the on-chain registry (registration is
-      # a later timelock txn). Dynamic registration is FORWARD-ONLY, so to capture
-      # the isolated pool's full history from its deploy block, statically bootstrap
-      # its provider by giving this entry the deployed address below (same contract
+      # ISOLATED POOLS (neverland-pendle-ausd = ProviderId 2,
+      # neverland-pendle-shmon = ProviderId 3): each isolated pool is deployed and
+      # goes live BEFORE its provider is registered in the on-chain registry
+      # (registration is a later timelock txn; as of this writing NEITHER isolated
+      # provider is registered). Dynamic registration is FORWARD-ONLY, so to
+      # capture an isolated pool's full history from its deploy block, statically
+      # bootstrap its provider by listing the deployed address below (same contract
       # name -> same handler; Envio dedupes (name,address) so the later
       # AddressesProviderRegistered event is a harmless no-op, exactly like the LP
       # pools above). The whole Pool/Configurator/reserve/aToken chain then flows
@@ -242,16 +244,20 @@ networks:
       # Full runbook + rationale: docs/isolated-pool-indexing.md
       - name: PoolAddressesProvider
         abi_file_path: abis/lending/PoolAddressesProvider.json
-        # The isolated neverland-pendle-ausd pool has EXACTLY ONE
-        # PoolAddressesProvider (on-chain ProviderId 2), so this list must hold
-        # EXACTLY ONE address: the deployed
-        # PoolAddressesProvider-neverland-pendle-ausd address from the live deploy.
-        # Inherits the network start_block (full historical backfill). The canonical
-        # pool's provider stays purely dynamic (registered via
-        # PoolAddressesProviderRegistry.AddressesProviderRegistered) and is NOT listed
-        # here. Runbook: docs/isolated-pool-indexing.md.
+        # ONE ADDRESS PER ISOLATED MARKET. Each isolated pool has exactly one
+        # PoolAddressesProvider, so this list holds exactly one entry per deployed
+        # isolated market, and no duplicates. Every new isolated market adds a line
+        # here on deploy day. Deliberately NO start_block: a per-contract
+        # start_block applies to EVERY address in this entry, so it would truncate
+        # the backfill of the older markets; inheriting the network start_block
+        # gives each provider a full historical backfill and HyperSync filters by
+        # address server-side, so the empty pre-deploy range costs nothing. The
+        # canonical pool's provider stays purely dynamic (registered via
+        # PoolAddressesProviderRegistry.AddressesProviderRegistered) and is NOT
+        # listed here. Runbook: docs/isolated-pool-indexing.md.
         address:
           - 0xb80397A931FcFdA3aC999a3a5639C328Dc72A58F # PoolAddressesProvider-neverland-pendle-ausd
+          - 0x300fA05F6fc9503EAbaAcB1dec7C35D65229f86f # PoolAddressesProvider-neverland-pendle-shmon
         handler: src/handlers/config.ts
         events:
           - event: ProxyCreated(bytes32 indexed id, address indexed proxyAddress, address indexed implementationAddress)

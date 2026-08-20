@@ -12,6 +12,8 @@ import {
   POOL_CONFIGURATOR_ID,
   POOL_ID,
   PT_AUSD_8OCT2026_ADDRESS,
+  PT_SHMON_18MAR2027_ADDRESS,
+  WMON_ADDRESS,
   ZERO_ADDRESS,
 } from '../helpers/constants';
 import {
@@ -51,7 +53,12 @@ const ADDRESSES = {
   vaultMissing: '0x0000000000000000000000000000000000009018',
 };
 
-const PENDLE_AUSD_PROVIDER = '0xb80397a931fcfda3ac999a3a5639c328dc72a58f';
+// Deployed PoolAddressesProvider of every isolated market, in config.yaml order.
+// Every new isolated market adds its provider here AND to config.yaml.
+const ISOLATED_PROVIDERS = [
+  '0xb80397a931fcfda3ac999a3a5639c328dc72a58f', // neverland-pendle-ausd  (ProviderId 2)
+  '0x300fa05f6fc9503eabaacb1dec7c35d65229f86f', // neverland-pendle-shmon (ProviderId 3)
+];
 const CANONICAL_PROVIDER = '0x49d75170f55c964dfdd6726c74fdedee75553a0f';
 const PROVIDER_REGISTRY = '0xd0ccde10cacd12f1c839db6400b82a82ab90fa9b';
 
@@ -214,13 +221,16 @@ test('addresses provider registry updates pools and contracts', async () => {
   );
 });
 
-// Additive multi-pool invariant: the isolated neverland-pendle-ausd pool is a
-// second Aave market that must be tracked exactly like canonical. AUSD is listed
-// in BOTH pools with DIFFERENT aTokens, so the `${asset}-${poolId}` reserve key
-// and per-aToken SubToken rows must keep the two AUSD reserves fully separate
-// (no overwrite / no double-write of canonical data). PT-AUSD must resolve its
-// known metadata. Leaderboard aggregation stays pool-agnostic by construction.
-test('two pools list the same AUSD asset without colliding; PT-AUSD resolves known metadata', async () => {
+// Additive multi-pool invariant: each isolated pool (neverland-pendle-ausd,
+// neverland-pendle-shmon) is a further Aave market that must be tracked exactly
+// like canonical. AUSD is listed in canonical + pendle-ausd and WMON in canonical
+// + pendle-shmon, always with DIFFERENT aTokens, so the `${asset}-${poolId}`
+// reserve key and per-aToken SubToken rows must keep every shared-asset reserve
+// fully separate (no overwrite / no double-write of canonical data). Both PT
+// reserves must resolve their known metadata — including the 6-vs-18 decimals
+// split, where a fallback would silently misprice one of them by 1e12. Leaderboard
+// aggregation stays pool-agnostic by construction.
+test('markets sharing an asset never collide; both Pendle PTs resolve known metadata', async () => {
   const TestHelpers = loadTestHelpers();
   let mockDb = TestHelpers.MockDb.createMockDb();
   const eventData = createEventDataFactory();
@@ -235,6 +245,14 @@ test('two pools list the same AUSD asset without colliding; PT-AUSD resolves kno
   const vTokenAusdB = '0x0000000000000000000000000000000000009027';
   const aTokenPt = '0x0000000000000000000000000000000000009028';
   const vTokenPt = '0x0000000000000000000000000000000000009029';
+  const aTokenWmonA = '0x0000000000000000000000000000000000009030';
+  const vTokenWmonA = '0x0000000000000000000000000000000000009031';
+  const poolIdC = '0x0000000000000000000000000000000000009032'; // isolated pendle-shmon market
+  const configuratorC = '0x0000000000000000000000000000000000009033';
+  const aTokenWmonC = '0x0000000000000000000000000000000000009034';
+  const vTokenWmonC = '0x0000000000000000000000000000000000009035';
+  const aTokenPtShmon = '0x0000000000000000000000000000000000009036';
+  const vTokenPtShmon = '0x0000000000000000000000000000000000009037';
 
   const poolRow = (id: string, providerId: bigint, configurator: string) => ({
     id,
@@ -258,8 +276,10 @@ test('two pools list the same AUSD asset without colliding; PT-AUSD resolves kno
   mockDb = mockDb.entities.Protocol.set({ id: '1' });
   mockDb = mockDb.entities.Pool.set(poolRow(poolIdA, 1n, configuratorA));
   mockDb = mockDb.entities.Pool.set(poolRow(poolIdB, 2n, configuratorB));
+  mockDb = mockDb.entities.Pool.set(poolRow(poolIdC, 3n, configuratorC));
   mockDb = mockDb.entities.ContractToPoolMapping.set({ id: configuratorA, pool_id: poolIdA });
   mockDb = mockDb.entities.ContractToPoolMapping.set({ id: configuratorB, pool_id: poolIdB });
+  mockDb = mockDb.entities.ContractToPoolMapping.set({ id: configuratorC, pool_id: poolIdC });
 
   const initReserve = async (
     configurator: string,
@@ -282,10 +302,14 @@ test('two pools list the same AUSD asset without colliding; PT-AUSD resolves kno
     });
   };
 
-  // AUSD listed in BOTH markets (distinct aTokens), then PT-AUSD in the isolated one.
+  // AUSD listed in canonical + pendle-ausd, WMON in canonical + pendle-shmon (distinct
+  // aTokens each time), then each isolated market's own PT.
   await initReserve(configuratorA, AUSD_ADDRESS, aTokenAusdA, vTokenAusdA, 10);
   await initReserve(configuratorB, AUSD_ADDRESS, aTokenAusdB, vTokenAusdB, 11);
   await initReserve(configuratorB, PT_AUSD_8OCT2026_ADDRESS, aTokenPt, vTokenPt, 12);
+  await initReserve(configuratorA, WMON_ADDRESS, aTokenWmonA, vTokenWmonA, 13);
+  await initReserve(configuratorC, WMON_ADDRESS, aTokenWmonC, vTokenWmonC, 14);
+  await initReserve(configuratorC, PT_SHMON_18MAR2027_ADDRESS, aTokenPtShmon, vTokenPtShmon, 15);
 
   // The two AUSD reserves are distinct rows keyed by `${asset}-${pool}` and do not collide.
   const reserveAusdA = mockDb.entities.Reserve.get(`${AUSD_ADDRESS}-${poolIdA}`);
@@ -302,14 +326,37 @@ test('two pools list the same AUSD asset without colliding; PT-AUSD resolves kno
   assert.equal(mockDb.entities.SubToken.get(aTokenAusdA)?.pool_id, poolIdA);
   assert.equal(mockDb.entities.SubToken.get(aTokenAusdB)?.pool_id, poolIdB);
 
+  // Same invariant for the WMON leg shared by canonical and the isolated shMON market.
+  const reserveWmonA = mockDb.entities.Reserve.get(`${WMON_ADDRESS}-${poolIdA}`);
+  const reserveWmonC = mockDb.entities.Reserve.get(`${WMON_ADDRESS}-${poolIdC}`);
+  assert.ok(reserveWmonA, 'canonical WMON reserve exists');
+  assert.ok(reserveWmonC, 'isolated shMON-market WMON reserve exists');
+  assert.notEqual(reserveWmonA?.id, reserveWmonC?.id);
+  assert.equal(reserveWmonA?.aToken_id, aTokenWmonA);
+  assert.equal(reserveWmonC?.aToken_id, aTokenWmonC);
+  assert.equal(reserveWmonA?.symbol, 'WMON');
+  assert.equal(reserveWmonC?.symbol, 'WMON');
+  assert.equal(mockDb.entities.SubToken.get(aTokenWmonA)?.pool_id, poolIdA);
+  assert.equal(mockDb.entities.SubToken.get(aTokenWmonC)?.pool_id, poolIdC);
+
   // PT-AUSD resolves its hardcoded known metadata (6 decimals — not the 18-decimal fallback).
   const reservePt = mockDb.entities.Reserve.get(`${PT_AUSD_8OCT2026_ADDRESS}-${poolIdB}`);
   assert.equal(reservePt?.symbol, 'PT-AUSD-8OCT2026');
   assert.equal(reservePt?.name, 'PT AUSD 8OCT2026');
   assert.equal(reservePt?.decimals, 6);
+
+  // PT-shMON resolves its own known metadata (18 decimals, mirroring the deployed token).
+  const reservePtShmon = mockDb.entities.Reserve.get(`${PT_SHMON_18MAR2027_ADDRESS}-${poolIdC}`);
+  assert.equal(reservePtShmon?.symbol, 'PT-shMON-18MAR2027');
+  assert.equal(reservePtShmon?.name, 'PT ShMonad 18MAR2027');
+  assert.equal(reservePtShmon?.decimals, 18);
 });
 
-test('Pendle isolated provider static bootstrap is a single explicit address slot', () => {
+// Each isolated market is deployed and used BEFORE its provider is registered in the
+// on-chain PoolAddressesProviderRegistry, and dynamic registration is forward-only, so
+// every isolated provider must be statically bootstrapped in config.yaml or that market's
+// pre-registration history is lost forever. One slot per market, no more and no fewer.
+test('every isolated Pendle provider is statically bootstrapped, exactly once', () => {
   const configText = readFileSync('config.yaml', 'utf8');
   const providerBlock = extractYamlContractBlock(configText, 'PoolAddressesProvider');
   const addresses = readYamlAddressList(providerBlock);
@@ -319,30 +366,36 @@ test('Pendle isolated provider static bootstrap is a single explicit address slo
     addresses.length,
     'PoolAddressesProvider bootstrap addresses must not contain duplicates'
   );
+  assert.deepEqual(
+    addresses,
+    ISOLATED_PROVIDERS,
+    'config.yaml must bootstrap exactly the deployed isolated PoolAddressesProvider addresses'
+  );
+
+  for (const address of addresses) {
+    assert.notEqual(
+      address,
+      CANONICAL_PROVIDER,
+      'canonical PoolAddressesProvider must remain registry-discovered, not statically bootstrapped'
+    );
+    assert.notEqual(
+      address,
+      PROVIDER_REGISTRY,
+      'provider registry address is not an isolated PoolAddressesProvider'
+    );
+    assert.notEqual(
+      address,
+      ZERO_ADDRESS,
+      'isolated PoolAddressesProvider bootstrap address must not be zero'
+    );
+  }
+
+  // A per-contract start_block would apply to EVERY address in this entry and would
+  // truncate the backfill of the earlier-deployed markets.
   assert.equal(
-    addresses.length,
-    1,
-    'neverland-pendle-ausd must bootstrap exactly one isolated PoolAddressesProvider address'
-  );
-  assert.notEqual(
-    addresses[0],
-    CANONICAL_PROVIDER,
-    'canonical PoolAddressesProvider must remain registry-discovered, not statically bootstrapped'
-  );
-  assert.notEqual(
-    addresses[0],
-    PROVIDER_REGISTRY,
-    'provider registry address is not an isolated PoolAddressesProvider'
-  );
-  assert.notEqual(
-    addresses[0],
-    ZERO_ADDRESS,
-    'isolated PoolAddressesProvider bootstrap address must not be zero'
-  );
-  assert.equal(
-    addresses[0],
-    PENDLE_AUSD_PROVIDER,
-    'bootstrap address must be the deployed PoolAddressesProvider-neverland-pendle-ausd'
+    /^\s*start_block:/m.test(providerBlock),
+    false,
+    'PoolAddressesProvider must inherit the network start_block so every isolated market backfills fully'
   );
 });
 

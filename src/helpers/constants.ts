@@ -189,7 +189,7 @@ export const TREASURY_ADDRESSES = [
   '0x464c71f6c2f760dda6093dcb91c24c39e5d6e18c',
 ];
 
-// Known token addresses
+// Canonical Market
 export const WMON_ADDRESS = '0x3bd359c1119da7da1d913d1c4d2b7c461115433a';
 export const WBTC_ADDRESS = '0x0555e30da8f98308edb960aa94c0db47230d2b9c';
 export const WETH_ADDRESS = '0xee8c0e9f1bffb4eb878d8f15f368a02a35481242';
@@ -197,15 +197,16 @@ export const USDC_ADDRESS = '0x754704bc059f8c67012fed69bc8a327a5aafb603';
 export const USDT0_ADDRESS = '0xe7cd86e13ac4309349f30b3435a9d337750fc82d';
 export const AUSD_ADDRESS = '0x00000000efe302beaa2b3e6e1b18d08d69a9012a';
 export const EARNAUSD_ADDRESS = '0x103222f020e98bba0ad9809a011fdf8e6f067496';
-export const SAUSD_ADDRESS = '0xd793c04b87386a6bb84ee61d98e0065fde7fda5e';
-// PT-AUSD-8OCT2026: Pendle PT reserve listed in the isolated neverland-pendle-ausd pool.
-export const PT_AUSD_8OCT2026_ADDRESS = '0x9fc74f8ed616b5baf52a170caa97d6d3898602d1';
 export const GMON_ADDRESS = '0x8498312a6b3cbd158bf0c93abdcf29e6e4f55081';
 export const SMON_ADDRESS = '0xa3227c5969757783154c60bf0bc1944180ed81b9';
 export const SHMON_ADDRESS = '0x1b68626dca36c7fe922fd2d55e4f631d962de19c';
 export const SHMON_UPPER_ADDRESS = '0x1ce060d47a0fd08b0869748fd7eccf151f4ec5d1';
 export const LOAZND_ADDRESS = '0x9c82eb49b51f7dc61e22ff347931ca32adc6cd90';
 export const CBBTC_ADDRESS = '0xd18b7ec58cdf4876f6afebd3ed1730e4ce10414b';
+export const XAUT0_ADDRESS = '0x01bff41798a0bcf287b996046ca68b395dbc1071';
+// Isolated Markets
+export const PT_AUSD_8OCT2026_ADDRESS = '0x9fc74f8ed616b5baf52a170caa97d6d3898602d1';
+export const PT_SHMON_18MAR2027_ADDRESS = '0xa7deac306a4520f4f2f94d150ca2fbd13080b607';
 
 export interface TokenMetadata {
   name: string;
@@ -213,7 +214,7 @@ export interface TokenMetadata {
   decimals: number;
 }
 
-// Known token metadata for common tokens on Monad
+// Canonical Market
 const KNOWN_TOKENS: Record<string, TokenMetadata> = {
   [WMON_ADDRESS]: { name: 'Wrapped MON', symbol: 'WMON', decimals: 18 },
   [SMON_ADDRESS]: { name: 'Kintsu Staked Monad', symbol: 'sMON', decimals: 18 },
@@ -228,7 +229,14 @@ const KNOWN_TOKENS: Record<string, TokenMetadata> = {
   [USDT0_ADDRESS]: { name: 'USDT0', symbol: 'USDT0', decimals: 6 },
   [EARNAUSD_ADDRESS]: { name: 'earnAUSD', symbol: 'earnAUSD', decimals: 6 },
   [WBTC_ADDRESS]: { name: 'Wrapped BTC', symbol: 'WBTC', decimals: 8 },
+  [XAUT0_ADDRESS]: { name: 'XAUt0', symbol: 'XAUt0', decimals: 6 },
+  // Isolated Markets
   [PT_AUSD_8OCT2026_ADDRESS]: { name: 'PT AUSD 8OCT2026', symbol: 'PT-AUSD-8OCT2026', decimals: 6 },
+  [PT_SHMON_18MAR2027_ADDRESS]: {
+    name: 'PT ShMonad 18MAR2027',
+    symbol: 'PT-shMON-18MAR2027',
+    decimals: 18,
+  },
 };
 
 export function getTokenMetadata(address: string): TokenMetadata | null {
