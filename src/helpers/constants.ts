@@ -30,12 +30,53 @@ export const BALANCER_VAULT_ADDRESS = '0xba1333333333a1ba1108e8412f11850a5c319ba
 export const LP_V2_RESUME_CUTOVER_BLOCK = 87190222;
 export const LP_V2_RESUME_CUTOVER_TIMESTAMP = 1783827555;
 
-// Override epoch 1 start time - set to a timestamp to ignore the EpochStart event for epoch 1
-// and use this timestamp instead. Set to 0 to use the on-chain event.
-export const EPOCH_1_START_TIME_OVERRIDE = 1767434400;
-export const EPOCH_1_END_TIME_OVERRIDE = 1769983200;
-// Deterministic start block for epoch 1 (set to 0 to use first event's block)
-export const EPOCH_1_START_BLOCK_OVERRIDE = 46264051;
+// Epoch dates overrides. An epoch listed here takes its start and end from this
+// table instead of from the chain, and the EpochStart / EpochEnd payloads for it
+// are ignored - so a correction here is permanent and a later on-chain end
+// cannot move the tide.
+//
+// Epoch 1 predates the EpochManager deployment and has no on-chain events at
+// all, so its entry also bootstraps the leaderboard (see
+// bootstrapLeaderboardIfNeeded). ENVIO_DISABLE_BOOTSTRAP turns that off.
+//
+// Epoch 9 went on-chain with the intended end timestamp in the start field
+// (2026-09-26 17:00 UTC instead of 2026-08-28 05:00 UTC). EpochManager has no
+// way to rewrite a start time, so epoch 9's real dates live here.
+export type EpochDatesOverride = {
+  startTime: number;
+  endTime: number;
+  // Deterministic start block. Only meaningful for a bootstrapped epoch, where
+  // there is no event to take a block from. Omit to use the first event's block.
+  startBlock?: number;
+  // Seeds the leaderboard from nothing; disabled by ENVIO_DISABLE_BOOTSTRAP.
+  bootstrap?: boolean;
+};
+
+// Named so the bootstrap seeding below can read its fields without a fallback.
+const EPOCH_1_DATES = {
+  startTime: 1767434400,
+  endTime: 1769983200,
+  startBlock: 46264051,
+  bootstrap: true,
+} satisfies EpochDatesOverride;
+
+export const EPOCH_DATES_OVERRIDES: Record<string, EpochDatesOverride> = {
+  '1': EPOCH_1_DATES,
+  '9': { startTime: 1787893200, endTime: 1790442000 },
+};
+
+export function getEpochDatesOverride(epochNumber: bigint | number): EpochDatesOverride | null {
+  const override = EPOCH_DATES_OVERRIDES[epochNumber.toString()];
+  if (!override) return null;
+  if (override.bootstrap && process.env.ENVIO_DISABLE_BOOTSTRAP === 'true') return null;
+  return override;
+}
+
+// Epoch 1's bootstrap seeding reads these directly. They stay derived from the
+// entry above so the dates have a single source of truth.
+export const EPOCH_1_START_TIME_OVERRIDE = EPOCH_1_DATES.startTime;
+export const EPOCH_1_END_TIME_OVERRIDE = EPOCH_1_DATES.endTime;
+export const EPOCH_1_START_BLOCK_OVERRIDE = EPOCH_1_DATES.startBlock;
 
 // Bootstrap LeaderboardConfig when epoch 1 is overridden (no events received)
 // These values should match what the contracts would emit

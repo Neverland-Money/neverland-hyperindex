@@ -29,6 +29,7 @@ import {
   BOOTSTRAP_NFT_PARTNERSHIPS,
   BOOTSTRAP_NFT_MULTIPLIER_CONFIG,
   BOOTSTRAP_LP_POOL_CONFIGS,
+  getEpochDatesOverride,
 } from '../helpers/constants';
 import { calculateVotingPower, getCurrentDay } from '../helpers/points';
 import {
@@ -739,6 +740,13 @@ export async function applyScheduledEpochTransitions(
         continue;
       }
 
+      // An overridden epoch ends on its own overridden end and nothing else. The
+      // branch below would otherwise cut it short when the next epoch is given an
+      // earlier start - which startNewEpoch permits, since it accepts a
+      // retrospective timestamp. Its dates are owned by EPOCH_DATES_OVERRIDES, so
+      // the next tide waits for the end handled above.
+      if (getEpochDatesOverride(currentEpochNumber)) break;
+
       const nextEpochNumber = currentEpochNumber + 1n;
       const nextEpoch = await getCachedEpoch(context, nextEpochNumber);
       const scheduledStartTime = nextEpoch?.scheduledStartTime ?? 0;
@@ -769,10 +777,14 @@ export async function applyScheduledEpochTransitions(
         const { settleAllLPPoolPositions } = await import('./lp');
         await settleAllLPPoolPositions(context, endTime);
 
-        const startTime =
+        // A tide never starts before the previous one ended (see the gap branch
+        // below for why a scheduled start can land inside a running tide).
+        const startTime = Math.max(
           nextEpoch && nextEpoch.startTime > 0
             ? Math.min(nextEpoch.startTime, scheduledStartTime)
-            : scheduledStartTime;
+            : scheduledStartTime,
+          endTime
+        );
         const startBlock =
           nextEpoch?.startBlock && nextEpoch.startBlock > 0n
             ? nextEpoch.startBlock
@@ -807,10 +819,21 @@ export async function applyScheduledEpochTransitions(
 
     const scheduledStartTime = nextEpoch.scheduledStartTime ?? 0;
     if (scheduledStartTime > 0 && scheduledStartTime <= timestamp) {
-      const startTime =
+      // A tide never starts before the previous one ended. startNewEpoch accepts
+      // a retrospective timestamp, so the next epoch can be scheduled to start
+      // inside the tide still running - floor the effective start at that end so
+      // the two cannot overlap and double-credit accrual. scheduledStartTime
+      // keeps whatever was actually scheduled on-chain.
+      const previousEnd =
+        currentEpochNumber > 0n
+          ? ((await getCachedEpoch(context, currentEpochNumber))?.endTime ?? 0)
+          : 0;
+      const startTime = Math.max(
         nextEpoch.startTime > 0
           ? Math.min(nextEpoch.startTime, scheduledStartTime)
-          : scheduledStartTime;
+          : scheduledStartTime,
+        previousEnd
+      );
       const startBlock =
         nextEpoch.startBlock > 0n
           ? nextEpoch.startBlock
