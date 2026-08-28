@@ -30,6 +30,18 @@ export const BALANCER_VAULT_ADDRESS = '0xba1333333333a1ba1108e8412f11850a5c319ba
 export const LP_V2_RESUME_CUTOVER_BLOCK = 87190222;
 export const LP_V2_RESUME_CUTOVER_TIMESTAMP = 1783827555;
 
+// Block at which the lending pool stopped splitting the flash-loan premium.
+//
+// Before this block the deployed FlashLoanLogic sent
+// `premium.percentMul(flashLoanPremiumToProtocol)` to `accruedToTreasury` and the
+// remainder to LPs through `cumulateToLiquidityIndex`. From this block the whole
+// premium accrues to the treasury with no liquidityIndex bump;
+// `flashLoanPremiumToProtocol` is retained only for ABI and storage stability.
+//
+// Upgrade tx 0x62ee8a68a260bcfdd57c9c96ab5fd17ad90573f24fc21557ba033e452a943efc,
+// 2026-07-04T21:21:47Z, PoolUpdated 0xe3b56aad -> 0x507c53de.
+export const FLASH_LOAN_PREMIUM_TO_TREASURY_BLOCK = 85624557;
+
 // Epoch dates overrides. An epoch listed here takes its start and end from this
 // table instead of from the chain, and the EpochStart / EpochEnd payloads for it
 // are ignored - so a correction here is permanent and a later on-chain end

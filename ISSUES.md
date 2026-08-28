@@ -6,94 +6,7 @@ indexed data looks like today, and what changes once it is fixed.
 
 ---
 
-## 1. Flash-loan premium accounting contradicts the deployed contract
-
-**Severity:** high — wrong aggregates, and a double-counted supply.
-**Status:** open, deliberately deferred.
-**Where:** `src/handlers/pool.ts:446` (`Pool.FlashLoan.handler`), writes at `:475-481`.
-
-### What the indexer does
-
-```ts
-if (pool && pool.flashloanPremiumToProtocol) {
-  protocolFee = (premium * pool.flashloanPremiumToProtocol + 5000n) / 10000n;
-  lpFee = premium - protocolFee;                     // LP / protocol split
-}
-context.Reserve.set({
-  availableLiquidity: reserve.availableLiquidity + premium,     // <-- immediate
-  totalATokenSupply: reserve.totalATokenSupply + premium,       // <-- immediate
-  lifetimeFlashLoanLPPremium: ... + lpFee,
-  lifetimeFlashLoanProtocolPremium: ... + protocolFee,
-});
-```
-
-### What the deployed contract does
-
-`contracts/neverland-lending/contracts/protocol/libraries/logic/FlashLoanLogic.sol`,
-`_handleFlashLoanRepayment`, verbatim:
-
-> The entire flash-loan premium accrues to the treasury (Aave v3.5 behaviour): no
-> LP/protocol split and no liquidityIndex bump. `params.flashLoanPremiumToProtocol`
-> is retained for ABI / storage stability but no longer routes the premium.
-
-```solidity
-reserve.accruedToTreasury += params.totalPremium
-  .getATokenMintScaledAmount(reserveCache.nextLiquidityIndex).toUint128();
-```
-
-100% of the premium goes to `accruedToTreasury`. No index bump. The aTokens are
-minted **later**, by `mintToTreasury`, which emits `AToken.Mint(caller = Pool)`
-plus `Pool.MintedToTreasury`.
-
-### Consequences
-
-1. **`totalATokenSupply` is counted twice** — once here on `FlashLoan`, then
-   again when the deferred treasury mint lands. `suppliesUsd` / `tvlUsd` read
-   `totalATokenSupply`, so both inherit the error.
-2. **`lifetimeFlashLoanLPPremium` is fiction.** `flashloanPremiumToProtocol` is
-   retained only for ABI stability; there is no LP share any more. Any analytics
-   splitting flash-loan premium LP-vs-protocol is reporting a split that the
-   contract stopped making.
-
-**Not** a defect, despite looking like one: `availableLiquidity += premium` at
-flash-loan time is CORRECT. `_handleFlashLoanRepayment` does
-`safeTransferFrom(receiver, aTokenAddress, amountPlusPremium)` and
-`updateInterestRates(..., liquidityAdded = amountPlusPremium, 0)`, so the
-underlying really does arrive in that transaction. Only the aToken *minting* is
-deferred. Do not "fix" this line.
-
-This is pre-existing, not introduced by any recent change — but a from-genesis
-resync replays it deterministically into all of history.
-
-### Fix sketch
-
-- Drop the `lpFee` / `protocolFee` split; the premium is entirely protocol
-  revenue. Keep `lifetimeFlashLoanPremium`; retire or zero the LP-share field.
-- Keep `availableLiquidity += premium` — the underlying arrives now (see above).
-- Do **not** move `totalATokenSupply` here. The aTokens are minted later by
-  `mintToTreasury`, which the treasury path already handles correctly
-  (`AToken.Mint` with `caller = Pool` moves supply, `Pool.MintedToTreasury` books
-  the revenue through the shared aggregator).
-- Regression test: a `FlashLoan` followed by the paired
-  `AToken.Mint(caller = Pool)` + `MintedToTreasury`, asserting `totalATokenSupply`
-  rises exactly once and revenue is booked exactly once.
-
-### Data difference after the fix
-
-| Field | Today | After |
-|---|---|---|
-| `Reserve.totalATokenSupply` | premium counted twice per flash loan | counted once, at the treasury mint |
-| `suppliesUsd` / `tvlUsd` | inflated by the duplicate | corrected |
-| `availableLiquidity` | correct already | unchanged |
-| `lifetimeFlashLoanLPPremium` | non-zero, meaningless | zero / removed |
-| `lifetimeFlashLoanProtocolPremium` | partial share | full premium |
-
-Verify by replaying a block range containing a flash loan on both branches and
-diffing `Reserve`, `ProtocolStats`, `PoolStats` and `entity_history`.
-
----
-
-## 2. Epoch-9 gap settlement is best-effort if prices move (accepted)
+## 1. Epoch-9 gap settlement is best-effort if prices move (accepted)
 
 **Severity:** medium, epoch-9 specific. **Status:** accepted, no fix planned.
 **Where:** `src/handlers/shared.ts`, the cumulative price-index cap in the
@@ -115,7 +28,7 @@ enough. Recorded so nobody re-derives it as a new finding.
 
 ---
 
-## 3. Quiet multi-epoch rollover collapses epoch block numbers
+## 2. Quiet multi-epoch rollover collapses epoch block numbers
 
 **Severity:** low. **Status:** open.
 **Where:** `src/handlers/shared.ts:757`, `applyScheduledEpochTransitions`
@@ -142,7 +55,7 @@ no cheap way to do. Low value unless block ranges become load-bearing.
 
 ---
 
-## 4. Treasury mints drop the interest on the treasury's own position
+## 3. Treasury mints drop the interest on the treasury's own position
 
 **Severity:** low. **Status:** open.
 **Where:** `src/handlers/tokenization.ts:112` and the treasury branch below it.
@@ -165,7 +78,7 @@ reopens the question of whether the treasury should appear as a supplier at all.
 
 ---
 
-## 5. Also deferred
+## 4. Also deferred
 
 Smaller items consciously left alone; none blocks a resync.
 

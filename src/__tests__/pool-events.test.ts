@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { createDefaultReserve } from '../helpers/entityHelpers';
+import { FLASH_LOAN_PREMIUM_TO_TREASURY_BLOCK } from '../helpers/constants';
 import { TestHelpers, type MockDb } from './v3-test-helpers';
 
 process.env.ENVIO_ENABLE_EXTERNAL_CALLS = 'false';
@@ -138,7 +139,7 @@ function setAssetPrice(mockDb: MockDb, asset: string, priceUsd: number, timestam
   });
 }
 
-test('flashloan splits premium between protocol and LP', async () => {
+test('flashloan splits the premium before the treasury-routing upgrade', async () => {
   const TestHelpers = loadTestHelpers();
   let mockDb: MockDb = TestHelpers.MockDb.createMockDb();
   const eventData = createEventDataFactory();
@@ -166,8 +167,14 @@ test('flashloan splits premium between protocol and LP', async () => {
   const reserveId = `${ADDRESSES.collateral}-${ADDRESSES.pool}`;
   const reserve = mockDb.entities.Reserve.get(reserveId);
   assert.ok(reserve);
+  // The repayment transfers amount + premium to the aToken, so the underlying
+  // is here now.
   assert.equal(reserve?.availableLiquidity, 1100n * UNIT);
-  assert.equal(reserve?.totalATokenSupply, 1100n * UNIT);
+  // Only the LP half moves the supply: it reached holders through a
+  // liquidityIndex bump, which emits no Mint, so nothing else records it. The
+  // protocol half is minted later by mintToTreasury and must not be counted here
+  // as well.
+  assert.equal(reserve?.totalATokenSupply, 1050n * UNIT);
   assert.equal(reserve?.lifetimeFlashLoans, 500n * UNIT);
   assert.equal(reserve?.lifetimeFlashLoanPremium, 100n * UNIT);
   assert.equal(reserve?.lifetimeFlashLoanProtocolPremium, 50n * UNIT);
@@ -178,6 +185,49 @@ test('flashloan splits premium between protocol and LP', async () => {
   assert.ok(flashEntity);
   assert.equal(flashEntity?.protocolFee, 50n * UNIT);
   assert.equal(flashEntity?.lpFee, 50n * UNIT);
+});
+
+test('flashloan routes the whole premium to the protocol after the upgrade', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb: MockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  mockDb = mockDb.entities.Protocol.set({ id: '1' });
+  mockDb = seedPool(mockDb, ADDRESSES.pool, 1000, 5000n);
+  mockDb = seedReserve(mockDb, ADDRESSES.collateral, ADDRESSES.pool, 1000, {
+    totalATokenSupply: 1000n * UNIT,
+    totalLiquidity: 1000n * UNIT,
+    availableLiquidity: 1000n * UNIT,
+  });
+
+  // At the upgrade block. flashloanPremiumToProtocol is still 5000 on the pool
+  // row, exactly as it is on chain, where it is retained for ABI and storage
+  // stability and no longer routes anything.
+  const flash = TestHelpers.Pool.FlashLoan.createMockEvent({
+    target: ADDRESSES.flashTarget,
+    initiator: ADDRESSES.user,
+    asset: ADDRESSES.collateral,
+    amount: 500n * UNIT,
+    interestRateMode: 0n,
+    premium: 100n * UNIT,
+    referralCode: 0n,
+    ...eventData(FLASH_LOAN_PREMIUM_TO_TREASURY_BLOCK, 1001, ADDRESSES.pool),
+  });
+  mockDb = await TestHelpers.Pool.FlashLoan.processEvent({ event: flash, mockDb });
+
+  const reserve = mockDb.entities.Reserve.get(`${ADDRESSES.collateral}-${ADDRESSES.pool}`);
+  assert.ok(reserve);
+  assert.equal(reserve?.availableLiquidity, 1100n * UNIT);
+  // No LP share and no liquidityIndex bump, so the supply does not move here at
+  // all; the whole premium is minted later to the treasury.
+  assert.equal(reserve?.totalATokenSupply, 1000n * UNIT);
+  assert.equal(reserve?.lifetimeFlashLoanProtocolPremium, 100n * UNIT);
+  assert.equal(reserve?.lifetimeFlashLoanLPPremium, 0n);
+
+  const flashEntity = mockDb.entities.FlashLoan.get(`${flash.transaction.hash}-${flash.logIndex}`);
+  assert.ok(flashEntity);
+  assert.equal(flashEntity?.protocolFee, 100n * UNIT);
+  assert.equal(flashEntity?.lpFee, 0n);
 });
 
 test('liquidations update reserve totals and create event record', async () => {

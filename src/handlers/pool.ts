@@ -16,7 +16,7 @@ import {
 import { calculateGrowth } from '../helpers/math';
 import { getHistoryEntityId } from '../helpers/entityHelpers';
 import { updateReserveUsdValues } from '../helpers/protocolAggregation';
-import { normalizeAddress } from '../helpers/constants';
+import { normalizeAddress, FLASH_LOAN_PREMIUM_TO_TREASURY_BLOCK } from '../helpers/constants';
 
 async function resolvePoolId(context: handlerContext, contractAddress: string): Promise<string> {
   const normalized = normalizeAddress(contractAddress);
@@ -461,19 +461,35 @@ Pool.FlashLoan.handler(async ({ event, context }) => {
   const pool = await context.Pool.get(poolId);
 
   const premium = event.params.premium;
-  let lpFee = 0n;
-  let protocolFee = 0n;
 
-  if (pool && pool.flashloanPremiumToProtocol) {
-    protocolFee = (premium * pool.flashloanPremiumToProtocol + 5000n) / 10000n;
+  // The premium is split the way the deployed contract split it AT THIS BLOCK.
+  // Before the upgrade the LP share was real, distributed through
+  // cumulateToLiquidityIndex; from the upgrade on the whole premium accrues to
+  // the treasury with no liquidityIndex bump. Applying either rule to the whole
+  // history misreports one era, and a from-genesis resync replays both.
+  const splitPremium = Number(event.block.number) < FLASH_LOAN_PREMIUM_TO_TREASURY_BLOCK;
+  let protocolFee = premium;
+  let lpFee = 0n;
+  if (splitPremium) {
+    protocolFee = pool?.flashloanPremiumToProtocol
+      ? (premium * pool.flashloanPremiumToProtocol + 5000n) / 10000n
+      : 0n;
     lpFee = premium - protocolFee;
   }
 
   if (reserve) {
     context.Reserve.set({
       ...reserve,
+      // The underlying arrives now: the repayment transfers amount + premium to
+      // the aToken and updates rates with liquidityAdded = amountPlusPremium.
       availableLiquidity: reserve.availableLiquidity + premium,
-      totalATokenSupply: reserve.totalATokenSupply + premium,
+      // Only the LP share moves the supply here, and only in the era that had
+      // one. That share reached holders through a liquidityIndex bump, which
+      // emits no Mint, so nothing else would ever record it. The protocol share
+      // is NOT added: those aTokens are minted later by mintToTreasury and
+      // arrive as AToken.Mint(caller = Pool). Adding the whole premium here
+      // counted the protocol share twice and inflated suppliesUsd and tvlUsd.
+      totalATokenSupply: reserve.totalATokenSupply + lpFee,
       lifetimeFlashLoans: reserve.lifetimeFlashLoans + event.params.amount,
       lifetimeFlashLoanPremium: reserve.lifetimeFlashLoanPremium + premium,
       lifetimeFlashLoanLPPremium: reserve.lifetimeFlashLoanLPPremium + lpFee,
