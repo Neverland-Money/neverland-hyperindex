@@ -1,6 +1,6 @@
 {
   "name": "neverland-hyperindex",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Neverland Protocol Indexer - Envio HyperIndex",
   "scripts": {
     "codegen": "envio codegen",
@@ -16,7 +16,7 @@
     "test:build": "tsc -p tsconfig.json --outDir dist-test --sourceMap",
     "test": "npm run test:build && node --test dist-test/src/__tests__/*.test.js",
     "test:coverage": "npm run test:build && c8 --reporter=text --reporter=lcov --reporter=html node --test dist-test/src/__tests__/*.test.js",
-    "test:coverage:check": "npm run test:coverage -- --check-coverage --lines 100 --functions 100 --branches 100 --statements 100",
+    "test:coverage:check": "npm run test:build && c8 --check-coverage --lines 100 --functions 100 --branches 100 --statements 100 --reporter=text node --test dist-test/src/__tests__/*.test.js",
     "type-check": "envio codegen && tsc --noEmit",
     "check:special-edition-config": "tsx scripts/check-special-edition-config.ts",
     "prepare": "husky",

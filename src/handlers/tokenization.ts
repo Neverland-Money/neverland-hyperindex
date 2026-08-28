@@ -26,11 +26,7 @@ import {
   awardDailyRepayPoints,
 } from './shared';
 import { updateReserveUsdValues } from '../helpers/protocolAggregation';
-import {
-  createDefaultReserve,
-  getHistoryEntityId,
-  isTreasuryAddress,
-} from '../helpers/entityHelpers';
+import { createDefaultReserve, getHistoryEntityId } from '../helpers/entityHelpers';
 
 import { AToken, StableDebtToken, VariableDebtToken } from '../../generated';
 import type { handlerContext } from '../../generated';
@@ -96,7 +92,15 @@ AToken.Mint.handler(async ({ event, context }) => {
   const userAddress = normalizeAddress(event.params.onBehalfOf);
   const userReserveId = `${userAddress}-${reserveId}`;
 
-  const isTreasury = isTreasuryAddress(userAddress);
+  // A treasury mint is Mint(caller = the Pool contract, onBehalfOf = treasury),
+  // emitted by AToken.mintToTreasury. An ordinary deposit - including one made
+  // BY the treasury address - carries the supplier as caller, and an aToken
+  // transfer is not a Mint at all, so neither is misread as revenue here.
+  const aTokenTreasury = await context.ATokenTreasury.get(tokenAddress);
+  const isTreasury =
+    aTokenTreasury !== undefined &&
+    normalizeAddress(event.params.caller) === aTokenTreasury.poolContract &&
+    userAddress === aTokenTreasury.treasury;
   if (!isTreasury) {
     await getOrCreateUser(context, userAddress);
   }
@@ -199,11 +203,14 @@ AToken.Mint.handler(async ({ event, context }) => {
         Number(event.logIndex)
       );
     } else {
-      // Treasury mint - this is protocol revenue
+      // Treasury mint. Only the aToken supply moves: no underlying entered the
+      // pool, so liquidity must not grow, and no user position is created.
+      // Revenue is booked by Pool.MintedToTreasury, which fires later in this
+      // same transaction and owns lifetimeReserveFactorAccrued - crediting it
+      // here as well would count the same premium twice.
       context.Reserve.set({
         ...reserve,
         totalATokenSupply: newTotalATokenSupply,
-        lifetimeReserveFactorAccrued: reserve.lifetimeReserveFactorAccrued + userBalanceChange,
       });
 
       await updateReserveUsdValues(
@@ -641,6 +648,17 @@ AToken.Initialized.handler(async ({ event, context }) => {
     BigInt(event.block.number)
   );
   const tokenId = normalizeAddress(event.srcAddress);
+
+  // Written before the SubToken guard below: AToken.Initialized fires earlier
+  // than ReserveInitialized in the same transaction, so the SubToken row may not
+  // exist yet and this wiring must not be lost with it.
+  context.ATokenTreasury.set({
+    id: tokenId,
+    treasury: normalizeAddress(event.params.treasury),
+    poolContract: normalizeAddress(event.params.pool),
+    updatedAt: Number(event.block.timestamp),
+  });
+
   const subToken = await context.SubToken.get(tokenId);
 
   if (subToken) {

@@ -1171,3 +1171,305 @@ test('lp pool disabled defaults to epoch 1 when leaderboard state missing', asyn
   const poolConfig = mockDb.entities.LPPoolConfig.get(pool.toLowerCase());
   assert.equal(poolConfig?.disabledAtEpoch, 1n);
 });
+
+test('epoch dates override replaces the on-chain start and seeds the end', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  // Epoch 9 went on-chain with the intended end (1790442000) in the start field.
+  const epochStart = TestHelpers.EpochManager.EpochStart.createMockEvent({
+    epochNumber: 9n,
+    startTime: 1790442000n,
+    ...eventData(99800000, 1787890000, ADDRESSES.epochManager),
+  });
+  mockDb = await TestHelpers.EpochManager.EpochStart.processEvent({
+    event: epochStart,
+    mockDb,
+  });
+
+  const epoch = mockDb.entities.LeaderboardEpoch.get('9');
+  assert.equal(epoch?.scheduledStartTime, 1787893200);
+  assert.equal(epoch?.scheduledEndTime, 1790442000);
+  // Override start is still in the future at this block, so no start block yet.
+  assert.equal(epoch?.startBlock, 0n);
+});
+
+test('epoch dates override activates the tide once the override start passes', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  mockDb = mockDb.entities.LeaderboardState.set({
+    id: 'current',
+    currentEpochNumber: 8n,
+    isActive: false,
+  });
+  mockDb = mockDb.entities.LeaderboardEpoch.set({
+    id: '8',
+    epochNumber: 8n,
+    startBlock: 91385944n,
+    startTime: 1785340800,
+    endBlock: 99797722n,
+    endTime: 1787889600,
+    isActive: false,
+    duration: 2548800n,
+    scheduledStartTime: 1785340800,
+    scheduledEndTime: 1787889600,
+  });
+
+  const epochStart = TestHelpers.EpochManager.EpochStart.createMockEvent({
+    epochNumber: 9n,
+    startTime: 1790442000n,
+    ...eventData(99810000, 1787893300, ADDRESSES.epochManager),
+  });
+  mockDb = await TestHelpers.EpochManager.EpochStart.processEvent({
+    event: epochStart,
+    mockDb,
+  });
+
+  const epoch = mockDb.entities.LeaderboardEpoch.get('9');
+  assert.equal(epoch?.isActive, true);
+  assert.equal(epoch?.startTime, 1787893200);
+  assert.equal(epoch?.scheduledEndTime, 1790442000);
+
+  const state = mockDb.entities.LeaderboardState.get('current');
+  assert.equal(state?.currentEpochNumber, 9n);
+  assert.equal(state?.isActive, true);
+});
+
+test('epoch dates override ignores a later on-chain end', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  mockDb = mockDb.entities.LeaderboardEpoch.set({
+    id: '9',
+    epochNumber: 9n,
+    startBlock: 99810000n,
+    startTime: 1787893200,
+    endBlock: undefined,
+    endTime: undefined,
+    isActive: true,
+    duration: undefined,
+    scheduledStartTime: 1787893200,
+    scheduledEndTime: 1790442000,
+  });
+
+  // On-chain, epoch 9 can only be ended after its (wrong) chain start passes.
+  // That end must not stretch the tide the indexer already scheduled.
+  const epochEnd = TestHelpers.EpochManager.EpochEnd.createMockEvent({
+    epochNumber: 9n,
+    endTime: 1790442300n,
+    ...eventData(99900000, 1790442100, ADDRESSES.epochManager),
+  });
+  mockDb = await TestHelpers.EpochManager.EpochEnd.processEvent({
+    event: epochEnd,
+    mockDb,
+  });
+
+  const epoch = mockDb.entities.LeaderboardEpoch.get('9');
+  assert.equal(epoch?.scheduledEndTime, 1790442000);
+  assert.equal(epoch?.scheduledStartTime, 1787893200);
+});
+
+test('epoch dates override keeps its start when a later start event arrives on an active tide', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  mockDb = mockDb.entities.LeaderboardEpoch.set({
+    id: '9',
+    epochNumber: 9n,
+    startBlock: 99810000n,
+    startTime: 1787893200,
+    endBlock: undefined,
+    endTime: undefined,
+    isActive: true,
+    duration: undefined,
+    scheduledStartTime: 1790442000,
+    scheduledEndTime: 0,
+  });
+
+  const epochStart = TestHelpers.EpochManager.EpochStart.createMockEvent({
+    epochNumber: 9n,
+    startTime: 1790442000n,
+    ...eventData(99820000, 1787894000, ADDRESSES.epochManager),
+  });
+  mockDb = await TestHelpers.EpochManager.EpochStart.processEvent({
+    event: epochStart,
+    mockDb,
+  });
+
+  const epoch = mockDb.entities.LeaderboardEpoch.get('9');
+  assert.equal(epoch?.scheduledStartTime, 1787893200);
+  assert.equal(epoch?.scheduledEndTime, 1790442000);
+});
+
+test('epoch end seeds the override start when the epoch entity is missing', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  const epochEnd = TestHelpers.EpochManager.EpochEnd.createMockEvent({
+    epochNumber: 9n,
+    endTime: 1790442300n,
+    ...eventData(99900001, 1790442100, ADDRESSES.epochManager),
+  });
+  mockDb = await TestHelpers.EpochManager.EpochEnd.processEvent({
+    event: epochEnd,
+    mockDb,
+  });
+
+  const epoch = mockDb.entities.LeaderboardEpoch.get('9');
+  assert.equal(epoch?.scheduledStartTime, 1787893200);
+  assert.equal(epoch?.scheduledEndTime, 1790442000);
+  // The effective start is seeded too, so the epoch this path creates carries
+  // a duration rather than an end with no beginning.
+  assert.equal(epoch?.startTime, 1787893200);
+});
+
+test('ending an overridden epoch on-chain later leaves it alone and lets the next tide start', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  // Tide 9 is live on the indexer with its overridden dates.
+  mockDb = mockDb.entities.LeaderboardState.set({
+    id: 'current',
+    currentEpochNumber: 9n,
+    isActive: true,
+  });
+  mockDb = mockDb.entities.LeaderboardEpoch.set({
+    id: '9',
+    epochNumber: 9n,
+    startBlock: 99810000n,
+    startTime: 1787893200,
+    endBlock: undefined,
+    endTime: undefined,
+    isActive: true,
+    duration: undefined,
+    scheduledStartTime: 1787893200,
+    scheduledEndTime: 1790442000,
+  });
+
+  // On-chain, epoch 9 only becomes endable once its (wrong) chain start passes,
+  // so the EpochEnd payload is necessarily later than the overridden end.
+  const epochEnd = TestHelpers.EpochManager.EpochEnd.createMockEvent({
+    epochNumber: 9n,
+    endTime: 1790442300n,
+    ...eventData(100000000, 1790442100, ADDRESSES.epochManager),
+  });
+  mockDb = await TestHelpers.EpochManager.EpochEnd.processEvent({
+    event: epochEnd,
+    mockDb,
+  });
+
+  const ended = mockDb.entities.LeaderboardEpoch.get('9');
+  assert.equal(ended?.isActive, false);
+  assert.equal(ended?.endTime, 1790442000);
+  assert.equal(ended?.scheduledEndTime, 1790442000);
+  assert.equal(ended?.duration, 2548800n);
+
+  const gap = mockDb.entities.LeaderboardState.get('current');
+  assert.equal(gap?.currentEpochNumber, 9n);
+  assert.equal(gap?.isActive, false);
+
+  // Tide 10 then starts normally, straight from the chain.
+  const epochStart = TestHelpers.EpochManager.EpochStart.createMockEvent({
+    epochNumber: 10n,
+    startTime: 1790445600n,
+    ...eventData(100000100, 1790445700, ADDRESSES.epochManager),
+  });
+  mockDb = await TestHelpers.EpochManager.EpochStart.processEvent({
+    event: epochStart,
+    mockDb,
+  });
+
+  const tideTen = mockDb.entities.LeaderboardEpoch.get('10');
+  assert.equal(tideTen?.scheduledStartTime, 1790445600);
+  assert.equal(tideTen?.isActive, true);
+  assert.equal(tideTen?.startTime, 1790445600);
+
+  const state = mockDb.entities.LeaderboardState.get('current');
+  assert.equal(state?.currentEpochNumber, 10n);
+  assert.equal(state?.isActive, true);
+
+  // Tide 9 is untouched by tide 10 starting.
+  const stillEnded = mockDb.entities.LeaderboardEpoch.get('9');
+  assert.equal(stillEnded?.endTime, 1790442000);
+  assert.equal(stillEnded?.duration, 2548800n);
+});
+
+test('an overridden epoch is not cut short when the next tide is given an earlier start', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  mockDb = mockDb.entities.LeaderboardState.set({
+    id: 'current',
+    currentEpochNumber: 9n,
+    isActive: true,
+  });
+  mockDb = mockDb.entities.LeaderboardEpoch.set({
+    id: '9',
+    epochNumber: 9n,
+    startBlock: 99810000n,
+    startTime: 1787893200,
+    endBlock: undefined,
+    endTime: undefined,
+    isActive: true,
+    duration: undefined,
+    scheduledStartTime: 1787893200,
+    scheduledEndTime: 1790442000,
+  });
+
+  // startNewEpoch accepts a retrospective timestamp, so tide 10 can be given a
+  // start that falls inside tide 9. That must not end tide 9 early.
+  const earlyStart = TestHelpers.EpochManager.EpochStart.createMockEvent({
+    epochNumber: 10n,
+    startTime: 1789000000n,
+    ...eventData(99900000, 1789100000, ADDRESSES.epochManager),
+  });
+  mockDb = await TestHelpers.EpochManager.EpochStart.processEvent({
+    event: earlyStart,
+    mockDb,
+  });
+
+  const stillRunning = mockDb.entities.LeaderboardEpoch.get('9');
+  assert.equal(stillRunning?.isActive, true);
+  assert.equal(stillRunning?.endTime, undefined);
+
+  const held = mockDb.entities.LeaderboardState.get('current');
+  assert.equal(held?.currentEpochNumber, 9n);
+  assert.equal(held?.isActive, true);
+  assert.equal(mockDb.entities.LeaderboardEpoch.get('10')?.isActive, false);
+
+  // Once the overridden end passes, tide 9 closes on that end - not on tide 10's
+  // start - and tide 10 takes over.
+  const epochEnd = TestHelpers.EpochManager.EpochEnd.createMockEvent({
+    epochNumber: 9n,
+    endTime: 1790442300n,
+    ...eventData(100000000, 1790442100, ADDRESSES.epochManager),
+  });
+  mockDb = await TestHelpers.EpochManager.EpochEnd.processEvent({
+    event: epochEnd,
+    mockDb,
+  });
+
+  const closed = mockDb.entities.LeaderboardEpoch.get('9');
+  assert.equal(closed?.isActive, false);
+  assert.equal(closed?.endTime, 1790442000);
+  assert.equal(closed?.duration, 2548800n);
+
+  // Tide 10 takes over from tide 9's end, not from its own retrospective start,
+  // so the two never overlap and accrual cannot be credited twice.
+  const tideTen = mockDb.entities.LeaderboardEpoch.get('10');
+  assert.equal(tideTen?.isActive, true);
+  assert.equal(tideTen?.startTime, 1790442000);
+  assert.equal(tideTen?.scheduledStartTime, 1789000000, 'what was scheduled is still recorded');
+  assert.ok(
+    Number(tideTen?.startTime) >= Number(closed?.endTime),
+    'tide 10 must not start before tide 9 ended'
+  );
+});

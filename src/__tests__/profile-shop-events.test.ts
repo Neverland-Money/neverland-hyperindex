@@ -68,7 +68,7 @@ async function configureConsumable(mockDb: ReturnType<typeof TestHelpers.MockDb.
   });
 }
 
-test('profile shop item configuration builds catalogue and history', async () => {
+test('profile shop item configuration builds catalog and history', async () => {
   let mockDb = TestHelpers.MockDb.createMockDb();
 
   mockDb = await configurePermanent(mockDb);

@@ -40,6 +40,7 @@ import {
   USDC_ADDRESS,
   USDT0_ADDRESS,
 } from '../helpers/constants';
+import { pow10 } from '../helpers/math';
 import { getTestnetBonusBps } from '../helpers/testnetTiers';
 import { getAmountsForLiquidity } from '../helpers/uniswapV3';
 
@@ -80,6 +81,8 @@ const BALANCER_AUTORANGE_V3_TOKEN0 = USDC_ADDRESS;
 const BALANCER_AUTORANGE_V3_TOKEN1 = DUST_TOKEN_ADDRESS;
 const BALANCER_AUTORANGE_V3_FEE = 10000;
 const WAD = 10n ** 18n;
+// Loop-invariant: a 193-bit exponentiation that was rebuilt on every price update.
+const Q192 = 2n ** 192n;
 
 function logLpDebug(context: handlerContext, message: string) {
   if (process.env.DEBUG_LP_POINTS === 'true') {
@@ -406,6 +409,38 @@ async function ensureLegacyV3PoolConfigEntity(context: handlerContext, timestamp
   return config;
 }
 
+/**
+ * Whether a rebuilt pool config differs from the stored row in any field that
+ * carries meaning.
+ *
+ * `lastUpdate` is deliberately excluded. These two ensure* helpers run on every
+ * event past their cutover, and rewriting an otherwise identical row purely to
+ * advance `lastUpdate` costs a write plus an entity-history row on every event
+ * across the whole replay. Nothing reads `LPPoolConfig.lastUpdate` - not the
+ * indexer, not the scripts, and not the app, which selects only pool, token0,
+ * token1, fee and lpRateBps - so it now marks the last time the config actually
+ * changed rather than the last time any event happened to touch it.
+ */
+function lpPoolConfigChanged(
+  existing: LPPoolConfigRecord | undefined,
+  next: LPPoolConfigRecord
+): boolean {
+  if (!existing) return true;
+  return (
+    existing.pool !== next.pool ||
+    existing.positionManager !== next.positionManager ||
+    existing.token0 !== next.token0 ||
+    existing.token1 !== next.token1 ||
+    existing.fee !== next.fee ||
+    existing.lpRateBps !== next.lpRateBps ||
+    existing.isActive !== next.isActive ||
+    existing.enabledAtEpoch !== next.enabledAtEpoch ||
+    existing.enabledAtTimestamp !== next.enabledAtTimestamp ||
+    existing.disabledAtEpoch !== next.disabledAtEpoch ||
+    existing.disabledAtTimestamp !== next.disabledAtTimestamp
+  );
+}
+
 async function ensureV2PoolConfigEntity(
   context: handlerContext,
   timestamp: number,
@@ -434,14 +469,21 @@ async function ensureV2PoolConfigEntity(
       : (existing?.disabledAtTimestamp ?? LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP),
     lastUpdate: timestamp,
   };
-  context.LPPoolConfig.set(config);
+  // Unchanged rows are returned as stored rather than rewritten, so nothing
+  // mutates the freshly built literal after the fact.
+  let stored: LPPoolConfigRecord = config;
+  if (lpPoolConfigChanged(existing, config)) {
+    context.LPPoolConfig.set(config);
+  } else if (existing) {
+    stored = existing;
+  }
   await ensurePoolInRegistry(context, V2_LP_POOL, timestamp);
   await ensurePoolState(context, V2_LP_POOL, timestamp, {
     currentTick: 0,
     sqrtPriceX96: 0n,
   });
   await getOrCreateLPPoolV2State(context, V2_LP_POOL, timestamp);
-  return config;
+  return stored;
 }
 
 async function ensureBalancerAutoRangePoolConfigEntity(
@@ -470,14 +512,21 @@ async function ensureBalancerAutoRangePoolConfigEntity(
     disabledAtTimestamp: isActive ? undefined : existing?.disabledAtTimestamp,
     lastUpdate: timestamp,
   };
-  context.LPPoolConfig.set(config);
+  // Unchanged rows are returned as stored rather than rewritten, so nothing
+  // mutates the freshly built literal after the fact.
+  let stored: LPPoolConfigRecord = config;
+  if (lpPoolConfigChanged(existing, config)) {
+    context.LPPoolConfig.set(config);
+  } else if (existing) {
+    stored = existing;
+  }
   await ensurePoolInRegistry(context, BALANCER_AUTORANGE_V3_POOL, timestamp);
   await ensurePoolState(context, BALANCER_AUTORANGE_V3_POOL, timestamp, {
     currentTick: 0,
     sqrtPriceX96: 0n,
   });
   await getOrCreateLPPoolV2State(context, BALANCER_AUTORANGE_V3_POOL, timestamp);
-  return config;
+  return stored;
 }
 
 export async function applyStaticLPPoolCutover(
@@ -902,8 +951,8 @@ function calculateSwapVolumeUsd(
   token0Decimals: number,
   token1Decimals: number
 ): bigint {
-  const scale0 = 10n ** BigInt(token0Decimals);
-  const scale1 = 10n ** BigInt(token1Decimals);
+  const scale0 = pow10(token0Decimals);
+  const scale1 = pow10(token1Decimals);
   const value0 = (absBigInt(amount0) * token0PriceUsd) / scale0;
   const value1 = (absBigInt(amount1) * token1PriceUsd) / scale1;
   // Use average of both sides to match Uniswap's volume calculation
@@ -1260,7 +1309,6 @@ function calculateDustPriceFromPool(
 
   // price = (sqrtPriceX96 / 2^96)^2
   // To avoid precision loss, we calculate: price = sqrtPriceX96^2 / 2^192
-  const Q192 = 2n ** 192n;
 
   // sqrtPriceX96^2 gives us token1/token0 * 2^192
   const priceX192 = sqrtPriceX96 * sqrtPriceX96;
@@ -1274,9 +1322,9 @@ function calculateDustPriceFromPool(
     let denominator = priceX192;
     const decDiff = token1Decimals - token0Decimals;
     if (decDiff >= 0) {
-      numerator *= 10n ** BigInt(decDiff);
+      numerator *= pow10(decDiff);
     } else {
-      denominator *= 10n ** BigInt(-decDiff);
+      denominator *= pow10(-decDiff);
     }
     return numerator / denominator;
   }
@@ -1287,9 +1335,9 @@ function calculateDustPriceFromPool(
   let denominator = Q192;
   const decDiff = token0Decimals - token1Decimals;
   if (decDiff >= 0) {
-    numerator *= 10n ** BigInt(decDiff);
+    numerator *= pow10(decDiff);
   } else {
-    denominator *= 10n ** BigInt(-decDiff);
+    denominator *= pow10(-decDiff);
   }
   return numerator / denominator;
 }
@@ -1318,8 +1366,8 @@ function calculatePositionValueUsd(
 ): bigint {
   // Value = (amount0 * price0 / 10^decimals0) + (amount1 * price1 / 10^decimals1)
   // Result is in 8 decimals (price decimals)
-  const scale0 = 10n ** BigInt(token0Decimals);
-  const scale1 = 10n ** BigInt(token1Decimals);
+  const scale0 = pow10(token0Decimals);
+  const scale1 = pow10(token1Decimals);
   const value0 = (amount0 * token0PriceUsd) / scale0;
   const value1 = (amount1 * token1PriceUsd) / scale1;
   return value0 + value1;
@@ -1354,8 +1402,8 @@ function calculateTokenPriceFromStableReserves(
 ): bigint {
   if (stableReserve <= 0n || tokenReserve <= 0n) return 0n;
   // tokenPriceUsd = stablePriceUsd * (stableReserve / tokenReserve) * 10^(tokenDecimals-stableDecimals)
-  const numerator = BigInt(1e8) * stableReserve * 10n ** BigInt(tokenDecimals);
-  const denominator = tokenReserve * 10n ** BigInt(stableDecimals);
+  const numerator = BigInt(1e8) * stableReserve * pow10(tokenDecimals);
+  const denominator = tokenReserve * pow10(stableDecimals);
   if (denominator === 0n) return 0n;
   return numerator / denominator;
 }

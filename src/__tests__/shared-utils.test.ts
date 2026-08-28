@@ -107,15 +107,28 @@ function createStoreWithSize<T extends { readonly id: string }>(): StoreEntityWi
 
 test('token list helpers handle duplicates and removals', async () => {
   const userStore = createStore<UserTokenList>();
-  const context = { UserTokenList: userStore } as unknown as handlerContext;
+  const ownershipStore = createStore<{ id: string; acquiredAt: number }>();
+  const context = {
+    UserTokenList: userStore,
+    UserTokenOwnership: ownershipStore,
+  } as unknown as handlerContext;
 
   await updateUserTokenList(context, '0xuser', 1n, 1, 'add');
   await updateUserTokenList(context, '0xuser', 1n, 2, 'add');
+
+  // The duplicate add must not reset the acquisition clock: doing so would cut
+  // the holder's VP credit for time they actually held the token.
+  assert.equal((await ownershipStore.get('0xuser:1'))?.acquiredAt, 1);
+
   await updateUserTokenList(context, '0xuser', 1n, 3, 'remove');
 
   const list = await userStore.get('0xuser');
   assert.ok(list);
   assert.equal(list?.tokenIds.length, 0);
+
+  // Re-acquiring starts a fresh claim rather than reviving the old one.
+  await updateUserTokenList(context, '0xuser', 1n, 4, 'add');
+  assert.equal((await ownershipStore.get('0xuser:1'))?.acquiredAt, 4);
 });
 
 test('protocol stats snapshots overwrite within the same timestamp', async () => {

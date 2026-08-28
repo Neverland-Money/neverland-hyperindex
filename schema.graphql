@@ -438,7 +438,7 @@ type Reserve {
   isActive: Boolean!
   isFrozen: Boolean!
   reserveInterestRateStrategy: String!
-  optimalUtilisationRate: BigInt!
+  optimalUtilizationRate: BigInt!
   variableRateSlope1: BigInt!
   variableRateSlope2: BigInt!
   stableRateSlope1: BigInt!
@@ -471,6 +471,12 @@ type Reserve {
   stableDebtLastUpdateTimestamp: Int!
   isPaused: Boolean!
   isDropped: Boolean!
+  # True only once PoolConfigurator.ReserveInitialized has listed this reserve.
+  # A Reserve row can also be created by AToken.Initialized, which fires earlier
+  # in the same listing transaction and knows nothing about the listing itself;
+  # those stub rows stay false. PoolStats.reserveCount counts reserves that are
+  # listed and not dropped, so it needs to tell the two apart.
+  isListed: Boolean!
   borrowCap: BigInt
   supplyCap: BigInt
   debtCeiling: BigInt
@@ -829,6 +835,16 @@ type ProtocolStats {
   combinedSuppliesE8: BigInt!
   combinedBorrowsE8: BigInt!
   combinedAvailableE8: BigInt!
+  # Borrows / supplies for this scope, 0 when nothing is supplied. Stored rather
+  # than left to consumers so every caller reads the same number: computing it
+  # from the USD floats gives a slightly different answer than the E8 integers,
+  # and the two drift further apart the larger the market gets.
+  #
+  # NOT comparable to Reserve.utilizationRate, which divides
+  # (totalLiquidity - availableLiquidity) by totalLiquidity. This one is debt
+  # over aToken supply. The two bases diverge in practice — a flash loan credits
+  # availableLiquidity and totalATokenSupply but not totalLiquidity.
+  utilizationRate: Float!
   totalRevenueUsd: Float!
   supplyRevenueUsd: Float!
   protocolRevenueUsd: Float!
@@ -859,7 +875,66 @@ type PoolStats {
   borrowsE8: BigInt!
   availableE8: BigInt!
   tvlE8: BigInt!
+  # Borrows / supplies for this market, 0 when nothing is supplied. Stored for
+  # the same reason as ProtocolStats.utilizationRate, and derived identically,
+  # so a market's rate and the protocol's are directly comparable. Neither is
+  # comparable to Reserve.utilizationRate — see ProtocolStats.utilizationRate.
+  utilizationRate: Float!
+  # Cumulative since genesis, same semantics as the ProtocolStats trio: the same
+  # per-reserve interest/fee deltas that roll into ProtocolStats, bucketed to
+  # this market instead. Cumulative on purpose — any window (24h, 7d, MTD) is a
+  # difference between two PoolStatsSnapshot rows, whereas a stored weekly
+  # bucket would fix the window and need care at period boundaries.
+  totalRevenueUsd: Float!
+  supplyRevenueUsd: Float!
+  protocolRevenueUsd: Float!
+  # Reserves in this market that are listed and not dropped — the count moves
+  # only on a transition of (Reserve.isListed && !Reserve.isDropped), so
+  # re-listing a dropped reserve restores it and a replayed event does not
+  # inflate it. The current count is also derivable by aggregating Reserve, but
+  # a historical count is not, which is why the snapshot carries it.
+  #
+  # Accurate only for markets whose ReserveInitialized events fall inside the
+  # indexed range. Every market's start_block predates its first listing, so a
+  # from-genesis index is correct; an index started later would undercount.
+  reserveCount: Int!
   updatedAt: Int!
+}
+
+# Per-pool historical time series — the per-market analogue of
+# ProtocolStatsSnapshot, which only ever covered the all-pool grand total.
+#
+# Written whenever a market's aggregates are recomputed, with
+# id = "<pool_id>-<timestamp>" so repeated updates inside one second collapse to
+# a single row (last write wins), matching ProtocolStatsSnapshot's per-second
+# overwrite. A row is written per second in which the market saw activity, even
+# if that activity left the totals unchanged, so rows are sparse but not
+# strictly change-only: a consumer asking for a daily or weekly series takes the
+# last row at or before each period boundary and carries it forward. Summing the
+# rows that fall inside a period instead will read zero on a quiet day.
+#
+# Deliberately carries no txHash/blockNumber. Those live on the transaction path
+# (recordProtocolTransaction), while pool identity lives on the aggregation path
+# (updatePoolStatsIncremental); threading them together would touch every
+# updateReserveUsdValues call site to add fields no consumer of this entity
+# needs. ProtocolStatsSnapshot keeps them because it is written from that path.
+type PoolStatsSnapshot @index(fields: ["pool_id", "timestamp"]) {
+  id: ID!
+  pool_id: String! @index
+  timestamp: Int! @index
+  suppliesUsd: Float!
+  borrowsUsd: Float!
+  availableUsd: Float!
+  tvlUsd: Float!
+  suppliesE8: BigInt!
+  borrowsE8: BigInt!
+  availableE8: BigInt!
+  tvlE8: BigInt!
+  utilizationRate: Float!
+  totalRevenueUsd: Float!
+  supplyRevenueUsd: Float!
+  protocolRevenueUsd: Float!
+  reserveCount: Int!
 }
 
 type ProtocolStatsSnapshot {
@@ -875,6 +950,7 @@ type ProtocolStatsSnapshot {
   suppliesE8: BigInt!
   borrowsE8: BigInt!
   availableE8: BigInt!
+  utilizationRate: Float!
   totalRevenueUsd: Float!
   supplyRevenueUsd: Float!
   protocolRevenueUsd: Float!
@@ -1576,11 +1652,42 @@ type VotingPowerTierIndex {
   lastUpdate: Int!
 }
 
+# Per-aToken treasury wiring, taken from AToken.Initialized.
+#
+# A treasury mint is NOT identified by the recipient address: the treasury also
+# makes ordinary deposits, and can receive ordinary aToken transfers. The
+# protocol's own signal is the CALLER - AToken.mintToTreasury emits
+# Mint(caller = the Pool contract, onBehalfOf = treasury), while every real
+# deposit emits Mint(caller = the supplier, ...). Both halves are stored so the
+# check mirrors the contract exactly, and a treasury change is picked up from
+# the chain rather than from a hardcoded list.
+type ATokenTreasury {
+  id: ID!
+  treasury: String! @index
+  poolContract: String! @index
+  updatedAt: Int!
+}
+
 type UserTokenList {
   id: ID!
   user_id: String! @index
   tokenIds: [BigInt!]!
   lastUpdate: Int!
+}
+
+# When a user took ownership of a veDUST token, keyed "<user>:<tokenId>".
+#
+# VP accrual averages a token's voting power across the accrual window. Without
+# this, a token that arrives mid-epoch is averaged over the whole window as
+# though the recipient had held it from epoch start - and since the sender
+# already banked their own holding period, the same token-seconds paid twice.
+# Re-acquiring a token overwrites acquiredAt, so a round trip does not restore
+# the earlier claim.
+type UserTokenOwnership {
+  id: ID!
+  user_id: String! @index
+  tokenId: BigInt! @index
+  acquiredAt: Int!
 }
 
 type UserReserveList {

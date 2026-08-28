@@ -12,7 +12,6 @@ field_selection:
   transaction_fields:
     - hash
     - from
-    - to
 
 networks:
   - id: 143 # Monad mainnet

@@ -365,6 +365,29 @@ docker exec neverland-postgres psql -U postgres -d envio -c "SELECT 1"
 - Increase Docker memory limit (Settings → Resources)
 - Adjust `ENVIO_THROTTLE_*` environment variables to reduce concurrency
 
+### Per-market aggregates and history
+
+`PoolStats` carries one row per market (keyed by `PoolAddressesProvider` address)
+and `PoolStatsSnapshot` is its time series, the per-market analogue of
+`ProtocolStatsSnapshot`. Both are queried for the per-market breakdown (Global
+Markets, Isolated Pendle AUSD, Isolated Pendle shMON) rather than the all-pool
+grand total that `ProtocolStats` holds.
+
+Two things to know before querying them:
+
+- `totalRevenueUsd` / `supplyRevenueUsd` / `protocolRevenueUsd` on `PoolStats` are
+  **cumulative since genesis**, matching the `ProtocolStats` trio. Any window
+  (24h, 7d, MTD) is the difference between two `PoolStatsSnapshot` rows, not a
+  sum of rows. The per-pool rows sum back to the `ProtocolStats` total only on an
+  index built from genesis — see the reindex note below.
+- `utilizationRate` on `PoolStats` / `ProtocolStats` is debt over aToken supply.
+  It is **not** comparable to `Reserve.utilizationRate`, which divides
+  `totalLiquidity - availableLiquidity` by `totalLiquidity`. Do not mix them in
+  one chart or reconcile one against the other.
+
+As with the entities below, historical rows only exist after a reindex from the
+release that introduced them.
+
 ### GoldSky charts-subgraph replacement entities
 
 `ReserveTx` (unified per-reserve transaction feed) and `ReserveRateSnapshot`

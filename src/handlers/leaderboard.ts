@@ -23,6 +23,7 @@ import {
   EPOCH_1_START_TIME_OVERRIDE,
   BOOTSTRAP_CONFIG,
   BALANCER_AUTORANGE_V3_POOL_ADDRESS,
+  getEpochDatesOverride,
 } from '../helpers/constants';
 import './lp';
 
@@ -69,15 +70,11 @@ EpochManager.EpochStart.handler(async ({ event, context }) => {
   const epochId = epochNumber.toString();
   const currentTimestamp = Number(event.block.timestamp);
 
-  // If epoch 1 override is set and this is epoch 1, use the override timestamp instead
-  // (unless bootstrap is disabled via env var for testing)
-  const useOverride =
-    epochNumber === 1n &&
-    EPOCH_1_START_TIME_OVERRIDE > 0 &&
-    process.env.ENVIO_DISABLE_BOOTSTRAP !== 'true';
-  const scheduledStartTime = useOverride
-    ? EPOCH_1_START_TIME_OVERRIDE
-    : Number(event.params.startTime);
+  // An epoch listed in EPOCH_DATES_OVERRIDES takes its dates from that table:
+  // the on-chain payload is ignored, which is how epoch 1 (no events at all) and
+  // epoch 9 (scheduled with the wrong start) both get the right dates.
+  const override = getEpochDatesOverride(epochNumber);
+  const scheduledStartTime = override ? override.startTime : Number(event.params.startTime);
 
   const existingEpoch = await context.LeaderboardEpoch.get(epochId);
   const shouldSetStartBlock = scheduledStartTime > 0 && scheduledStartTime <= currentTimestamp;
@@ -91,24 +88,30 @@ EpochManager.EpochStart.handler(async ({ event, context }) => {
   // Never overwrite scheduledStartTime for an active epoch
   // This is a defensive measure - altering start time of an active epoch would corrupt point calculations
   // Note: this also protects bootstrap's start time since bootstrap sets isActive: true
-  const finalScheduledStartTime = existingEpoch?.isActive
-    ? existingEpoch.scheduledStartTime
-    : scheduledStartTime;
+  // An overridden epoch is exempt: its dates are owned by the table, active or
+  // not. For epoch 1 that is a no-op - bootstrap seeds the same timestamp.
+  const finalScheduledStartTime =
+    !override && existingEpoch?.isActive ? existingEpoch.scheduledStartTime : scheduledStartTime;
+
+  const base = existingEpoch ?? {
+    id: epochId,
+    epochNumber,
+    startBlock,
+    startTime: 0,
+    endBlock: undefined,
+    endTime: undefined,
+    isActive: false,
+    duration: undefined,
+    scheduledStartTime: 0,
+    scheduledEndTime: 0,
+  };
 
   writeLeaderboardEpoch(context, {
-    ...(existingEpoch ?? {
-      id: epochId,
-      epochNumber,
-      startBlock,
-      startTime: 0,
-      endBlock: undefined,
-      endTime: undefined,
-      isActive: false,
-      duration: undefined,
-      scheduledStartTime: 0,
-      scheduledEndTime: 0,
-    }),
+    ...base,
     scheduledStartTime: finalScheduledStartTime,
+    // Seed the overridden end here too - the on-chain EpochEnd for an overridden
+    // epoch can arrive long after the tide is meant to be over, or not at all.
+    scheduledEndTime: override ? override.endTime : base.scheduledEndTime,
     startBlock,
   });
 
@@ -124,7 +127,11 @@ EpochManager.EpochEnd.handler(async ({ event, context }) => {
   );
   const epochNumber = event.params.epochNumber;
   const epochId = epochNumber.toString();
-  const scheduledEndTime = Number(event.params.endTime);
+
+  // An overridden epoch keeps the end from the table. Ending it on-chain is the
+  // only way to start the next one, and that end must not move this tide.
+  const override = getEpochDatesOverride(epochNumber);
+  const scheduledEndTime = override ? override.endTime : Number(event.params.endTime);
   const currentTimestamp = Number(event.block.timestamp);
 
   const existingEpoch = await context.LeaderboardEpoch.get(epochId);
@@ -136,19 +143,25 @@ EpochManager.EpochEnd.handler(async ({ event, context }) => {
         ? BigInt(event.block.number)
         : undefined;
 
+  const base = existingEpoch ?? {
+    id: epochId,
+    epochNumber,
+    startBlock: 0n,
+    // Seeded from the override so a fallback-created epoch closes coherently:
+    // applyScheduledEpochTransitions only computes duration when startTime > 0,
+    // so leaving it at 0 here would store an epoch with an end and no duration.
+    startTime: override ? override.startTime : 0,
+    endBlock,
+    endTime: undefined,
+    isActive: true,
+    duration: undefined,
+    scheduledStartTime: 0,
+    scheduledEndTime: 0,
+  };
+
   writeLeaderboardEpoch(context, {
-    ...(existingEpoch ?? {
-      id: epochId,
-      epochNumber,
-      startBlock: 0n,
-      startTime: 0,
-      endBlock,
-      endTime: undefined,
-      isActive: true,
-      duration: undefined,
-      scheduledStartTime: 0,
-      scheduledEndTime: 0,
-    }),
+    ...base,
+    scheduledStartTime: override ? override.startTime : base.scheduledStartTime,
     scheduledEndTime,
     endBlock,
   });

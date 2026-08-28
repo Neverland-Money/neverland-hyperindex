@@ -408,3 +408,42 @@ test('withdrawals clamp balances and burns clear ownership', async () => {
   assert.equal(token?.lockedAmount, 0n);
   assert.equal(token?.owner, '');
 });
+
+test('a self-transfer does not reset when the holder acquired the token', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+  const startBlock = DUST_LOCK_START_BLOCK;
+
+  // Mint: the holder takes ownership at 1000.
+  mockDb = await TestHelpers.DustLock.Transfer.processEvent({
+    event: TestHelpers.DustLock.Transfer.createMockEvent({
+      from: ZERO_ADDRESS,
+      to: ADDRESSES.user,
+      tokenId: 77n,
+      ...eventData(startBlock + 1, 1000, ADDRESSES.dustLock),
+    }),
+    mockDb,
+  });
+  assert.equal(mockDb.entities.UserTokenOwnership.get(`${ADDRESSES.user}:77`)?.acquiredAt, 1000);
+
+  // Sending the token to yourself changes nothing about who holds it. Churning
+  // the list here would look like a fresh acquisition and silently cut the
+  // holder's own VP credit for time they never stopped holding it.
+  mockDb = await TestHelpers.DustLock.Transfer.processEvent({
+    event: TestHelpers.DustLock.Transfer.createMockEvent({
+      from: ADDRESSES.user,
+      to: ADDRESSES.user,
+      tokenId: 77n,
+      ...eventData(startBlock + 2, 9000, ADDRESSES.dustLock),
+    }),
+    mockDb,
+  });
+
+  assert.equal(
+    mockDb.entities.UserTokenOwnership.get(`${ADDRESSES.user}:77`)?.acquiredAt,
+    1000,
+    'a self-transfer must not restart the ownership clock'
+  );
+  assert.deepEqual(mockDb.entities.UserTokenList.get(ADDRESSES.user)?.tokenIds, [77n]);
+});

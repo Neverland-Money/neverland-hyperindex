@@ -30,12 +30,71 @@ export const BALANCER_VAULT_ADDRESS = '0xba1333333333a1ba1108e8412f11850a5c319ba
 export const LP_V2_RESUME_CUTOVER_BLOCK = 87190222;
 export const LP_V2_RESUME_CUTOVER_TIMESTAMP = 1783827555;
 
-// Override epoch 1 start time - set to a timestamp to ignore the EpochStart event for epoch 1
-// and use this timestamp instead. Set to 0 to use the on-chain event.
-export const EPOCH_1_START_TIME_OVERRIDE = 1767434400;
-export const EPOCH_1_END_TIME_OVERRIDE = 1769983200;
-// Deterministic start block for epoch 1 (set to 0 to use first event's block)
-export const EPOCH_1_START_BLOCK_OVERRIDE = 46264051;
+// Block at which the lending pool stopped splitting the flash-loan premium.
+//
+// Before this block the deployed FlashLoanLogic sent
+// `premium.percentMul(flashLoanPremiumToProtocol)` to `accruedToTreasury` and the
+// remainder to LPs through `cumulateToLiquidityIndex`. From this block the whole
+// premium accrues to the treasury with no liquidityIndex bump;
+// `flashLoanPremiumToProtocol` is retained only for ABI and storage stability.
+//
+// Upgrade tx 0x62ee8a68a260bcfdd57c9c96ab5fd17ad90573f24fc21557ba033e452a943efc,
+// 2026-07-04T21:21:47Z, PoolUpdated 0xe3b56aad -> 0x507c53de.
+export const FLASH_LOAN_PREMIUM_TO_TREASURY_BLOCK = 85624557;
+
+// Epoch dates overrides. An epoch listed here takes its start and end from this
+// table instead of from the chain, and the EpochStart / EpochEnd payloads for it
+// are ignored - so a correction here is permanent and a later on-chain end
+// cannot move the tide.
+//
+// Epoch 1 predates the EpochManager deployment and has no on-chain events at
+// all, so its entry also bootstraps the leaderboard (see
+// bootstrapLeaderboardIfNeeded). ENVIO_DISABLE_BOOTSTRAP turns that off.
+//
+// Epoch 9 went on-chain with the intended end timestamp in the start field
+// (2026-09-26 17:00 UTC instead of 2026-08-28 05:00 UTC). EpochManager has no
+// way to rewrite a start time, so epoch 9's real dates live here.
+export type EpochDatesOverride = {
+  startTime: number;
+  endTime: number;
+  // Deterministic start block. Only meaningful for a bootstrapped epoch, where
+  // there is no event to take a block from. Omit to use the first event's block.
+  startBlock?: number;
+  // Seeds the leaderboard from nothing; disabled by ENVIO_DISABLE_BOOTSTRAP.
+  bootstrap?: boolean;
+};
+
+// Named so the bootstrap seeding below can read its fields without a fallback.
+const EPOCH_1_DATES = {
+  startTime: 1767434400,
+  endTime: 1769983200,
+  startBlock: 46264051,
+  bootstrap: true,
+} satisfies EpochDatesOverride;
+
+export const EPOCH_DATES_OVERRIDES: Record<string, EpochDatesOverride> = {
+  '1': EPOCH_1_DATES,
+  '9': { startTime: 1787893200, endTime: 1790442000 },
+};
+
+// VP accrual weights a token by the slice of the window its holder actually
+// owned it, from this timestamp on. Set to epoch 9's start: tides 1-8 are
+// settled and paid, so their rankings keep the semantics they were scored
+// under, and the correction applies from the first tide it can affect.
+export const VP_OWNERSHIP_WEIGHTING_FROM = EPOCH_DATES_OVERRIDES['9'].startTime;
+
+export function getEpochDatesOverride(epochNumber: bigint | number): EpochDatesOverride | null {
+  const override = EPOCH_DATES_OVERRIDES[epochNumber.toString()];
+  if (!override) return null;
+  if (override.bootstrap && process.env.ENVIO_DISABLE_BOOTSTRAP === 'true') return null;
+  return override;
+}
+
+// Epoch 1's bootstrap seeding reads these directly. They stay derived from the
+// entry above so the dates have a single source of truth.
+export const EPOCH_1_START_TIME_OVERRIDE = EPOCH_1_DATES.startTime;
+export const EPOCH_1_END_TIME_OVERRIDE = EPOCH_1_DATES.endTime;
+export const EPOCH_1_START_BLOCK_OVERRIDE = EPOCH_1_DATES.startBlock;
 
 // Bootstrap LeaderboardConfig when epoch 1 is overridden (no events received)
 // These values should match what the contracts would emit
@@ -178,16 +237,12 @@ export const POOL_ADMIN_ID = '0x504f4f4c5f41444d494e0000000000000000000000000000
 export const EMERGENCY_ADMIN_ID =
   '0x454d455247454e43595f41444d494e0000000000000000000000000000000000'; // keccak256("EMERGENCY_ADMIN")
 
-// Treasury addresses (mints to these are protocol revenue, not user deposits)
-export const TREASURY_ADDRESSES = [
-  '0xb2289e329d2f85f1ed31adbb30ea345278f21bcf',
-  '0xe8599f3cc5d38a9ad6f3684cd5cea72f10dbc383',
-  '0xbe85413851d195fc6341619cd68bfdc26a25b928',
-  '0x5ba7fd868c40c16f7adfae6cf87121e13fc2f7a0',
-  '0x8a020d92d6b119978582be4d3edfdc9f7b28bf31',
-  '0x053d55f9b5af8694c503eb288a1b7e552f590710',
-  '0x464c71f6c2f760dda6093dcb91c24c39e5d6e18c',
-];
+// Treasury identity is NOT a list. AToken.Initialized reports each aToken's
+// treasury, and AToken.mintToTreasury emits Mint(caller = the Pool contract),
+// so a treasury mint is recognized from the chain - see ATokenTreasury and the
+// caller check in the AToken.Mint handler. A hardcoded list silently went stale
+// when the treasury wallet changed, and "just add the new address" flipped the
+// handler into a branch that counted revenue twice.
 
 // Canonical Market
 export const WMON_ADDRESS = '0x3bd359c1119da7da1d913d1c4d2b7c461115433a';

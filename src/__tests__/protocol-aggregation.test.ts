@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { createDefaultReserve } from '../helpers/entityHelpers';
-import { TREASURY_ADDRESSES } from '../helpers/constants';
 import { calculateGrowth } from '../helpers/math';
 import {
   updateProtocolStatsIncremental,
@@ -263,28 +262,33 @@ test('aggregation helpers return early when data is missing', async () => {
 
   await updateReserveUsdValues(contextMissingOracle, 'reserve', 'asset', 0);
 
-  await updateProtocolStatsIncremental(
+  // No ProtocolStats row: the delta is refused rather than applied, which is
+  // the signal updateReserveUsdValues uses to skip the pool row too.
+  const applied = await updateProtocolStatsIncremental(
     { ProtocolStats: noopStore } as unknown as handlerContext,
-    0,
-    0,
-    0,
-    0,
-    0,
-    0,
-    0n,
-    0n,
-    0n,
-    0n,
-    0n,
-    0n,
-    0n,
-    0n,
-    0n,
-    0n,
-    0n,
-    0,
+    {
+      oldSuppliesUsd: 0,
+      oldBorrowsUsd: 0,
+      oldAvailableUsd: 0,
+      newSuppliesUsd: 0,
+      newBorrowsUsd: 0,
+      newAvailableUsd: 0,
+      oldSuppliesE8: 0n,
+      oldBorrowsE8: 0n,
+      oldAvailableE8: 0n,
+      newSuppliesE8: 0n,
+      newBorrowsE8: 0n,
+      newAvailableE8: 0n,
+      oldSuppliersInterestEarned: 0n,
+      oldProtocolAccrued: 0n,
+      newSuppliersInterestEarned: 0n,
+      newProtocolAccrued: 0n,
+      priceE8: 0n,
+      decimals: 0,
+    },
     0
   );
+  assert.equal(applied, false);
 });
 
 test('borrows and available update after variable debt mint', async () => {
@@ -352,9 +356,20 @@ test('treasury mints increase protocol revenue', async () => {
     timestamp: 3000,
   }));
 
-  const treasury = TREASURY_ADDRESSES[0];
+  // The treasury is whatever the aToken says it is - not an entry in a list.
+  const treasury = '0x00000000000000000000000000000000000000aa';
+  mockDb = mockDb.entities.ATokenTreasury.set({
+    id: ADDRESSES.aTokenA,
+    treasury,
+    poolContract: ADDRESSES.pool,
+    updatedAt: 3000,
+  });
+
+  // AToken.mintToTreasury emits Mint(caller = the Pool contract). That moves
+  // aToken supply only; it must not book revenue, or the amount would be
+  // counted again when MintedToTreasury lands later in the same transaction.
   const mint = TestHelpers.AToken.Mint.createMockEvent({
-    caller: treasury,
+    caller: ADDRESSES.pool,
     onBehalfOf: treasury,
     value: 50n * UNIT,
     balanceIncrease: 0n,
@@ -362,6 +377,16 @@ test('treasury mints increase protocol revenue', async () => {
     ...eventData(1, 3001, ADDRESSES.aTokenA),
   });
   mockDb = await TestHelpers.AToken.Mint.processEvent({ event: mint, mockDb });
+
+  assertApprox(mockDb.entities.ProtocolStats.get('1')?.protocolRevenueUsd ?? 0, 0);
+
+  // Pool.MintedToTreasury is the single owner of revenue.
+  const minted = TestHelpers.Pool.MintedToTreasury.createMockEvent({
+    reserve: ADDRESSES.assetA,
+    amountMinted: 50n * UNIT,
+    ...eventData(2, 3002, ADDRESSES.pool),
+  });
+  mockDb = await TestHelpers.Pool.MintedToTreasury.processEvent({ event: minted, mockDb });
 
   const stats = mockDb.entities.ProtocolStats.get('1');
   assert.ok(stats);
@@ -372,6 +397,102 @@ test('treasury mints increase protocol revenue', async () => {
   assertApprox(stats?.protocolRevenueUsd ?? 0, protocolRevenueUsd);
   assertApprox(stats?.supplyRevenueUsd ?? 0, 0);
   assertApprox(stats?.totalRevenueUsd ?? 0, protocolRevenueUsd);
+});
+
+test('an OTC return supplied onBehalfOf the treasury is a deposit, not revenue', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb: MockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  mockDb = seedPool(mockDb, ADDRESSES.pool, 3000);
+  ({ mockDb } = seedReserve(mockDb, {
+    asset: ADDRESSES.assetA,
+    pool: ADDRESSES.pool,
+    aToken: ADDRESSES.aTokenA,
+    vToken: ADDRESSES.vTokenA,
+    priceE8: 200000000n,
+    timestamp: 3000,
+  }));
+
+  const treasury = '0x00000000000000000000000000000000000000aa';
+  mockDb = mockDb.entities.ATokenTreasury.set({
+    id: ADDRESSES.aTokenA,
+    treasury,
+    poolContract: ADDRESSES.pool,
+    updatedAt: 3000,
+  });
+
+  // Returning OTC funds is supply(onBehalfOf = treasury) sent by someone else,
+  // so the aTokens land on the treasury while the caller is the supplier. That
+  // is real liquidity being returned to the protocol, NOT premium being
+  // recognised - recipient-based detection would have swallowed it as revenue
+  // and lost the treasury's position.
+  const otcReturn = TestHelpers.AToken.Mint.createMockEvent({
+    caller: ADDRESSES.user,
+    onBehalfOf: treasury,
+    value: 250n * UNIT,
+    balanceIncrease: 0n,
+    index: RAY,
+    ...eventData(1, 3001, ADDRESSES.aTokenA),
+  });
+  mockDb = await TestHelpers.AToken.Mint.processEvent({ event: otcReturn, mockDb });
+
+  const stats = mockDb.entities.ProtocolStats.get('1');
+  assertApprox(stats?.protocolRevenueUsd ?? 0, 0);
+
+  const reserve = mockDb.entities.Reserve.get(`${ADDRESSES.assetA}-${ADDRESSES.pool}`);
+  assert.equal(reserve?.availableLiquidity, 250n * UNIT, 'the returned funds are liquidity');
+  assert.equal(reserve?.lifetimeReserveFactorAccrued, 0n, 'and are not protocol revenue');
+
+  const position = mockDb.entities.UserReserve.get(
+    `${treasury}-${ADDRESSES.assetA}-${ADDRESSES.pool}`
+  );
+  assert.ok(position, 'the treasury keeps a real position for what it is owed');
+});
+
+test('a deposit made BY the treasury address is a deposit, not revenue', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb: MockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  mockDb = seedPool(mockDb, ADDRESSES.pool, 3000);
+  ({ mockDb } = seedReserve(mockDb, {
+    asset: ADDRESSES.assetA,
+    pool: ADDRESSES.pool,
+    aToken: ADDRESSES.aTokenA,
+    vToken: ADDRESSES.vTokenA,
+    priceE8: 200000000n,
+    timestamp: 3000,
+  }));
+
+  const treasury = '0x00000000000000000000000000000000000000aa';
+  mockDb = mockDb.entities.ATokenTreasury.set({
+    id: ADDRESSES.aTokenA,
+    treasury,
+    poolContract: ADDRESSES.pool,
+    updatedAt: 3000,
+  });
+
+  // Same recipient, but the treasury supplied it itself, so the caller is the
+  // treasury rather than the Pool. This is an ordinary deposit and must be
+  // booked as one - liquidity moves, no revenue is recognised.
+  const deposit = TestHelpers.AToken.Mint.createMockEvent({
+    caller: treasury,
+    onBehalfOf: treasury,
+    value: 50n * UNIT,
+    balanceIncrease: 0n,
+    index: RAY,
+    ...eventData(1, 3001, ADDRESSES.aTokenA),
+  });
+  mockDb = await TestHelpers.AToken.Mint.processEvent({ event: deposit, mockDb });
+
+  const stats = mockDb.entities.ProtocolStats.get('1');
+  assertApprox(stats?.protocolRevenueUsd ?? 0, 0);
+  assertApprox(stats?.totalRevenueUsd ?? 0, 0);
+
+  const reserve = mockDb.entities.Reserve.get(`${ADDRESSES.assetA}-${ADDRESSES.pool}`);
+  assert.equal(reserve?.availableLiquidity, 50n * UNIT, 'a real deposit adds liquidity');
+  assert.equal(reserve?.lifetimeReserveFactorAccrued, 0n, 'and books no protocol revenue');
 });
 
 test('reserve interest accrual updates supply revenue', async () => {

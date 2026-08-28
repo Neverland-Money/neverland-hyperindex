@@ -1,7 +1,7 @@
 /**
  * NeverlandProfileItemsSeller event handlers.
  *
- * The profile shop index is event-only. The seller contract emits all catalogue
+ * The profile shop index is event-only. The seller contract emits all catalog
  * configuration and purchase-line data needed for deterministic lookup without
  * receipt reads or historic chain calls.
  */

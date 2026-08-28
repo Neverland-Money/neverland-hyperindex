@@ -5,7 +5,6 @@ import {
   DEFAULT_BORROW_RATE_BPS,
   DEFAULT_DEPOSIT_RATE_BPS,
   STATIC_NFT_COLLECTION_ADDRESSES,
-  TREASURY_ADDRESSES,
   WMON_ADDRESS,
   ZERO_ADDRESS,
   fromScaledPoints,
@@ -13,17 +12,11 @@ import {
   isStaticNftCollection,
   toScaledPoints,
 } from '../helpers/constants';
-import {
-  getHistoryEntityId,
-  getReserveId,
-  getUserReserveId,
-  isTreasuryAddress,
-} from '../helpers/entityHelpers';
+import { getHistoryEntityId, getReserveId, getUserReserveId } from '../helpers/entityHelpers';
 import {
   calculateCompoundedInterest,
   calculateGrowth,
   calculateLinearInterest,
-  calculateUtilizationRate,
   exponentToBigInt,
   rayDiv,
   rayMul,
@@ -89,9 +82,6 @@ test('constants and entity helpers return expected defaults', () => {
   assert.equal(knownMetadata.name, 'Wrapped MON');
   assert.equal(knownMetadata.decimals, 18);
 
-  assert.ok(isTreasuryAddress(TREASURY_ADDRESSES[0]));
-  assert.equal(isTreasuryAddress(TEST_ADDRESS), false);
-
   assert.equal(getReserveId('asset', 'pool'), 'asset-pool');
   assert.equal(getUserReserveId('user', 'reserve'), 'user-reserve');
   assert.equal(getHistoryEntityId('0xabc', 7), '0xabc-7');
@@ -120,9 +110,6 @@ test('math helpers cover branches and conversions', () => {
 
   assert.equal(calculateGrowth(100n, RAY, 10n, 5n), 0n);
   assert.ok(calculateGrowth(100n, RAY, 0n, 10n) >= 0n);
-
-  assert.equal(calculateUtilizationRate(0n, 0n), 0);
-  assert.equal(calculateUtilizationRate(50n, 50n), 0.5);
 
   assert.equal(toDecimal(123000n, 3), 123);
   assert.equal(toDecimal(123n, 0), 123);
