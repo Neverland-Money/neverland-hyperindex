@@ -65,6 +65,12 @@ export const EPOCH_DATES_OVERRIDES: Record<string, EpochDatesOverride> = {
   '9': { startTime: 1787893200, endTime: 1790442000 },
 };
 
+// VP accrual weights a token by the slice of the window its holder actually
+// owned it, from this timestamp on. Set to epoch 9's start: tides 1-8 are
+// settled and paid, so their rankings keep the semantics they were scored
+// under, and the correction applies from the first tide it can affect.
+export const VP_OWNERSHIP_WEIGHTING_FROM = EPOCH_DATES_OVERRIDES['9'].startTime;
+
 export function getEpochDatesOverride(epochNumber: bigint | number): EpochDatesOverride | null {
   const override = EPOCH_DATES_OVERRIDES[epochNumber.toString()];
   if (!override) return null;
@@ -219,16 +225,12 @@ export const POOL_ADMIN_ID = '0x504f4f4c5f41444d494e0000000000000000000000000000
 export const EMERGENCY_ADMIN_ID =
   '0x454d455247454e43595f41444d494e0000000000000000000000000000000000'; // keccak256("EMERGENCY_ADMIN")
 
-// Treasury addresses (mints to these are protocol revenue, not user deposits)
-export const TREASURY_ADDRESSES = [
-  '0xb2289e329d2f85f1ed31adbb30ea345278f21bcf',
-  '0xe8599f3cc5d38a9ad6f3684cd5cea72f10dbc383',
-  '0xbe85413851d195fc6341619cd68bfdc26a25b928',
-  '0x5ba7fd868c40c16f7adfae6cf87121e13fc2f7a0',
-  '0x8a020d92d6b119978582be4d3edfdc9f7b28bf31',
-  '0x053d55f9b5af8694c503eb288a1b7e552f590710',
-  '0x464c71f6c2f760dda6093dcb91c24c39e5d6e18c',
-];
+// Treasury identity is NOT a list. AToken.Initialized reports each aToken's
+// treasury, and AToken.mintToTreasury emits Mint(caller = the Pool contract),
+// so a treasury mint is recognized from the chain - see ATokenTreasury and the
+// caller check in the AToken.Mint handler. A hardcoded list silently went stale
+// when the treasury wallet changed, and "just add the new address" flipped the
+// handler into a branch that counted revenue twice.
 
 // Canonical Market
 export const WMON_ADDRESS = '0x3bd359c1119da7da1d913d1c4d2b7c461115433a';

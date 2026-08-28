@@ -30,11 +30,13 @@ import {
   BOOTSTRAP_NFT_MULTIPLIER_CONFIG,
   BOOTSTRAP_LP_POOL_CONFIGS,
   getEpochDatesOverride,
+  VP_OWNERSHIP_WEIGHTING_FROM,
 } from '../helpers/constants';
 import { calculateVotingPower, getCurrentDay } from '../helpers/points';
 import {
   calculateCompoundedInterest,
   calculateLinearInterest,
+  pow10,
   rayMul,
   toDecimal,
 } from '../helpers/math';
@@ -172,6 +174,18 @@ function cacheActive(): boolean {
 // see stale data. So in preload we delegate to context.X.get/set so Envio's
 // batcher can do its thing, and only memoize in the sequential processing
 // phase.
+// `./lp` is imported dynamically to break a circular dependency. The compiled
+// form is `Promise.resolve().then(() => require('./lp'))`, so every call site
+// allocated a promise and forced a microtask - on essentially every event, in
+// both the preload and the processing pass. Memoize the promise: the module
+// registry already returns the same object, so this changes nothing but the
+// allocation. Still lazy, so the cycle stays broken.
+let lpModulePromise: Promise<typeof import('./lp')> | undefined;
+function loadLpModule(): Promise<typeof import('./lp')> {
+  lpModulePromise ??= import('./lp');
+  return lpModulePromise;
+}
+
 function isPreload(context: handlerContext): boolean {
   return context.isPreload === true;
 }
@@ -254,12 +268,15 @@ async function getCachedVotingPowerTiers(context: handlerContext): Promise<Cache
     // Backwards compat: no index entity yet (older state, or partial test mock
     // that wrote directly to VotingPowerTier without touching the index). Scan
     // 0..MAX_VP_TIERS once; subsequent calls in the same block hit the cache.
-    const scanned: string[] = [];
-    for (let i = 0; i < MAX_VP_TIERS; i++) {
-      const tier = await context.VotingPowerTier.get(i.toString());
-      if (tier && tier.isActive) scanned.push(tier.id);
-    }
-    ids = scanned;
+    // Issued as one wave rather than 20 chained awaits: this branch is the
+    // steady state (BOOTSTRAP_VP_TIERS is empty), and getCachedVotingPowerTiers
+    // deliberately bypasses the cache under preload, so the sequential form
+    // costs a 20-deep await chain on every settle. Promise.all preserves index
+    // order, so the ids collected here are identical to the sequential build.
+    const candidates = await Promise.all(
+      Array.from({ length: MAX_VP_TIERS }, (_, i) => context.VotingPowerTier.get(i.toString()))
+    );
+    ids = candidates.filter(tier => tier && tier.isActive).map(tier => tier!.id);
   }
   if (ids.length === 0) {
     if (!preload && cacheActive()) globalCache.vpTiers = [];
@@ -441,6 +458,7 @@ export async function getOrCreateProtocolStats(context: handlerContext, timestam
       combinedSuppliesE8: 0n,
       combinedBorrowsE8: 0n,
       combinedAvailableE8: 0n,
+      utilizationRate: 0,
       totalRevenueUsd: 0,
       supplyRevenueUsd: 0,
       protocolRevenueUsd: 0,
@@ -521,6 +539,11 @@ export async function bootstrapLeaderboardIfNeeded(
       lastUpdate: EPOCH_1_START_TIME_OVERRIDE,
     });
   }
+  // These two entities are written raw above rather than through a write*()
+  // helper, so nothing invalidated the tier cache. Inert while
+  // BOOTSTRAP_VP_TIERS is empty, but the moment tiers are configured a stale
+  // cached list would silently score users against the wrong multipliers.
+  if (!isPreload(context)) invalidateVotingPowerTiersCache();
 
   // Bootstrap NFT Partnerships
   const activeCollections: string[] = [];
@@ -620,7 +643,7 @@ export async function recordProtocolTransaction(
   if (blockNumber !== undefined) {
     ensureBlockCache(context, blockNumber);
     await bootstrapLeaderboardIfNeeded(context, timestamp, blockNumber);
-    const { applyStaticLPPoolCutover } = await import('./lp');
+    const { applyStaticLPPoolCutover } = await loadLpModule();
     await applyStaticLPPoolCutover(context, timestamp, blockNumber);
   }
 
@@ -653,6 +676,7 @@ async function maybeCreateProtocolSnapshot(
     suppliesE8: bigint;
     borrowsE8: bigint;
     availableE8: bigint;
+    utilizationRate: number;
     totalRevenueUsd: number;
     supplyRevenueUsd: number;
     protocolRevenueUsd: number;
@@ -678,6 +702,7 @@ async function maybeCreateProtocolSnapshot(
     suppliesE8: ps.suppliesE8,
     borrowsE8: ps.borrowsE8,
     availableE8: ps.availableE8,
+    utilizationRate: ps.utilizationRate,
     totalRevenueUsd: ps.totalRevenueUsd,
     supplyRevenueUsd: ps.supplyRevenueUsd,
     protocolRevenueUsd: ps.protocolRevenueUsd,
@@ -687,6 +712,32 @@ async function maybeCreateProtocolSnapshot(
 }
 
 const MAX_SCHEDULED_TRANSITIONS = 5;
+
+// The epoch-end LP sweep is global and expensive. During the preload pass every
+// event in the boundary batch re-enters the end branch: preload writes are
+// no-ops at the framework level (generated/src/UserContext.res binds `set` to
+// noopSet when isPreload), so the epoch is never observed as closed by the next
+// preload event and the sweep repeats once per event in the batch.
+//
+// Run it once per boundary in that pass - the first event still issues and
+// groups the reads, which is the whole point of preload - and never skip it in
+// the processing pass, which is where the sweep actually writes. Skipping can
+// therefore only ever drop work whose writes are discarded.
+let lastPreloadEpochSweep: string | null = null;
+
+async function settleLPPositionsForEpochEnd(
+  context: handlerContext,
+  epochNumber: bigint,
+  endTime: number
+): Promise<void> {
+  if (isPreload(context)) {
+    const key = `${epochNumber}:${endTime}`;
+    if (lastPreloadEpochSweep === key) return;
+    lastPreloadEpochSweep = key;
+  }
+  const { settleAllLPPoolPositions } = await loadLpModule();
+  await settleAllLPPoolPositions(context, endTime);
+}
 
 export async function applyScheduledEpochTransitions(
   context: handlerContext,
@@ -732,8 +783,7 @@ export async function applyScheduledEpochTransitions(
           isActive: false,
           duration,
         });
-        const { settleAllLPPoolPositions } = await import('./lp');
-        await settleAllLPPoolPositions(context, endTime);
+        await settleLPPositionsForEpochEnd(context, currentEpochNumber, endTime);
 
         isActive = false;
         updated = true;
@@ -774,8 +824,7 @@ export async function applyScheduledEpochTransitions(
           isActive: false,
           duration,
         });
-        const { settleAllLPPoolPositions } = await import('./lp');
-        await settleAllLPPoolPositions(context, endTime);
+        await settleLPPositionsForEpochEnd(context, currentEpochNumber, endTime);
 
         // A tide never starts before the previous one ended (see the gap branch
         // below for why a scheduled start can land inside a running tide).
@@ -894,6 +943,17 @@ export async function updateUserTokenList(
     }
     if (!alreadyExists) {
       tokenIds = [...tokenIds, tokenId];
+      // Stamp acquisition so VP accrual can weight this token by the slice of
+      // the window this user actually held it. Only on a genuinely new hold: a
+      // duplicate add must not reset the clock and quietly cut the holder's
+      // credit, while a token that left and came back is new again here and so
+      // starts a fresh claim rather than reviving the old one.
+      context.UserTokenOwnership.set({
+        id: `${normalizedUser}:${tokenId}`,
+        user_id: normalizedUser,
+        tokenId,
+        acquiredAt: timestamp,
+      });
     }
   } else {
     tokenIds = tokenIds.filter((id: bigint) => id !== tokenId);
@@ -1014,13 +1074,34 @@ async function calculateAverageVPFromStorage(
     return 0n;
   }
 
+  // From the cutover on, a token only earns for the part of the window its
+  // current holder actually owned it. Before it, windows are scored exactly as
+  // they were when those tides were settled and paid.
+  const weightByOwnership = startTimestamp >= VP_OWNERSHIP_WEIGHTING_FROM;
+  const windowSeconds = BigInt(endTimestamp - startTimestamp);
+
   let totalVP = 0n;
   for (const tokenId of userTokens.tokenIds) {
     const token = await context.DustLockToken.get(tokenId.toString());
     if (!token) continue;
 
-    const vp = await calculateAverageTokenVotingPower(token, startTimestamp, endTimestamp);
-    totalVP += vp;
+    let heldFrom = startTimestamp;
+    if (weightByOwnership) {
+      const ownership = await context.UserTokenOwnership.get(`${normalizedUser}:${tokenId}`);
+      // No record means the token predates ownership tracking, so treat it as
+      // held for the whole window rather than penalizing a long-time holder.
+      if (ownership && ownership.acquiredAt > heldFrom) heldFrom = ownership.acquiredAt;
+      if (heldFrom >= endTimestamp) continue;
+    }
+
+    const vp = await calculateAverageTokenVotingPower(token, heldFrom, endTimestamp);
+    if (heldFrom === startTimestamp) {
+      totalVP += vp;
+      continue;
+    }
+    // The caller multiplies this average by the FULL window, so scale the held
+    // slice back onto it: average over [heldFrom, end] * held / window.
+    totalVP += (vp * BigInt(endTimestamp - heldFrom)) / windowSeconds;
   }
 
   return totalVP;
@@ -1404,6 +1485,27 @@ async function collectSpecialEditionMultiplierBoundaries(
     );
     for (const ts of userEdition?.countTimestamps ?? []) {
       if (ts > startTimestamp && ts < endTimestamp) boundaries.add(ts);
+    }
+  }
+
+  // Taking delivery of a veDUST token steps this user's voting power at that
+  // instant, so the multiplier has to be evaluated separately either side of it.
+  // Without this boundary the segment spanning an acquisition scores a single
+  // blended tier across its whole length - under-crediting the part where the
+  // token was genuinely held. Gated exactly like the weighting itself, so
+  // windows that are not ownership-weighted gain no boundary either.
+  if (
+    startTimestamp >= VP_OWNERSHIP_WEIGHTING_FROM &&
+    context.UserTokenList &&
+    context.UserTokenOwnership
+  ) {
+    const userTokens = await context.UserTokenList.get(normalizedUserId);
+    for (const tokenId of userTokens?.tokenIds ?? []) {
+      const ownership = await context.UserTokenOwnership.get(`${normalizedUserId}:${tokenId}`);
+      const acquiredAt = ownership?.acquiredAt;
+      if (acquiredAt !== undefined && acquiredAt > startTimestamp && acquiredAt < endTimestamp) {
+        boundaries.add(acquiredAt);
+      }
     }
   }
 
@@ -2705,7 +2807,7 @@ export async function accruePointsForUserReserve(
     useEpochBaseline && fallbackPriceUsdE8 > 0n && balanceTimestamp > epochStartTs
       ? (fallbackPriceUsdE8 * BigInt(balanceTimestamp - epochStartTs)) / 3600n
       : 0n;
-  const decimalsScale = 10n ** BigInt(reserve.decimals);
+  const decimalsScale = pow10(reserve.decimals);
   const pointsDenominator = decimalsScale * 10n ** 8n * BASIS_POINTS * HOURS_PER_DAY_BI;
 
   if (depositTokensScaledForAccrual > 0n) {
@@ -2910,11 +3012,11 @@ export async function settlePointsForUser(
     await syncUserNFTOwnershipFromChain(context, normalizedUserId, timestamp, blockNumber);
   }
   if (!options?.skipLPSync && !options?.skipLPChainSync && shouldSyncLPPositionsFromChain()) {
-    const { syncUserLPPositionsFromChain } = await import('./lp');
+    const { syncUserLPPositionsFromChain } = await loadLpModule();
     await syncUserLPPositionsFromChain(context, normalizedUserId, timestamp, blockNumber);
   }
   if (!options?.skipLPSync) {
-    const { settleUserLPPositions } = await import('./lp');
+    const { settleUserLPPositions } = await loadLpModule();
     await settleUserLPPositions(context, normalizedUserId, timestamp, blockNumber);
   }
   const vpState = await refreshUserVotingPowerState(context, normalizedUserId, timestamp);

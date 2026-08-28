@@ -90,13 +90,20 @@ export function calculateGrowth(
 }
 
 /**
- * Calculate utilization rate
- * utilization = totalBorrows / (totalBorrows + availableLiquidity)
+ * `10n ** BigInt(decimals)`, memoized.
+ *
+ * The LP and accrual hot paths rebuild this constant per call - twice per pair
+ * in several places - for a handful of decimal values that never change. Same
+ * BigInt out, built once per distinct exponent.
  */
-export function calculateUtilizationRate(totalBorrows: bigint, availableLiquidity: bigint): number {
-  const total = totalBorrows + availableLiquidity;
-  if (total === 0n) return 0;
-  return Number((totalBorrows * 10000n) / total) / 10000;
+const POW10_CACHE = new Map<number, bigint>();
+export function pow10(decimals: number): bigint {
+  let value = POW10_CACHE.get(decimals);
+  if (value === undefined) {
+    value = 10n ** BigInt(decimals);
+    POW10_CACHE.set(decimals, value);
+  }
+  return value;
 }
 
 /**

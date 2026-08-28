@@ -557,11 +557,17 @@ DustLock.Transfer.handler(async ({ event, context }) => {
     updatedAt: timestamp,
   });
 
-  if (from !== ZERO_ADDRESS) {
-    await updateUserTokenList(context, from, event.params.tokenId, timestamp, 'remove');
-  }
-  if (to !== ZERO_ADDRESS) {
-    await updateUserTokenList(context, to, event.params.tokenId, timestamp, 'add');
+  // A self-transfer leaves ownership exactly where it was, so the list must not
+  // churn: removing and re-adding would look like a fresh acquisition and reset
+  // UserTokenOwnership.acquiredAt, cutting the holder's own VP credit for time
+  // they never stopped holding the token.
+  if (from !== to) {
+    if (from !== ZERO_ADDRESS) {
+      await updateUserTokenList(context, from, event.params.tokenId, timestamp, 'remove');
+    }
+    if (to !== ZERO_ADDRESS) {
+      await updateUserTokenList(context, to, event.params.tokenId, timestamp, 'add');
+    }
   }
 
   if (from !== ZERO_ADDRESS) {

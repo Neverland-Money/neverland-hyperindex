@@ -3,7 +3,7 @@
  * Provides get-or-initialize patterns for all entities
  */
 
-import { ZERO_ADDRESS, TREASURY_ADDRESSES, normalizeAddress } from './constants';
+import { ZERO_ADDRESS } from './constants';
 
 // Types for entity creation
 export interface ProtocolEntity {
@@ -54,7 +54,7 @@ export interface ReserveEntity {
   isActive: boolean;
   isFrozen: boolean;
   reserveInterestRateStrategy: string;
-  optimalUtilisationRate: bigint;
+  optimalUtilizationRate: bigint;
   variableRateSlope1: bigint;
   variableRateSlope2: bigint;
   stableRateSlope1: bigint;
@@ -87,6 +87,7 @@ export interface ReserveEntity {
   stableDebtLastUpdateTimestamp: number;
   isPaused: boolean;
   isDropped: boolean;
+  isListed: boolean;
   borrowCap: bigint | undefined;
   supplyCap: bigint | undefined;
   debtCeiling: bigint | undefined;
@@ -135,7 +136,11 @@ export function createDefaultUser(userId: string): UserEntity {
 }
 
 /**
- * Create default Reserve entity
+ * Create default Reserve entity.
+ *
+ * This is the stub a token handler builds when it sees a reserve the
+ * configurator has not listed yet, so `isListed` stays false until
+ * PoolConfigurator.ReserveInitialized says otherwise.
  */
 export function createDefaultReserve(
   reserveId: string,
@@ -155,7 +160,7 @@ export function createDefaultReserve(
     isActive: false,
     isFrozen: false,
     reserveInterestRateStrategy: ZERO_ADDRESS,
-    optimalUtilisationRate: 0n,
+    optimalUtilizationRate: 0n,
     variableRateSlope1: 0n,
     variableRateSlope2: 0n,
     stableRateSlope1: 0n,
@@ -188,6 +193,7 @@ export function createDefaultReserve(
     stableDebtLastUpdateTimestamp: 0,
     isPaused: false,
     isDropped: false,
+    isListed: false,
     borrowCap: undefined,
     supplyCap: undefined,
     debtCeiling: undefined,
@@ -217,13 +223,6 @@ export function createDefaultReserve(
     priceInUsd: 0,
     priceInUsdE8: 0n,
   };
-}
-
-/**
- * Check if address is a treasury address
- */
-export function isTreasuryAddress(address: string): boolean {
-  return TREASURY_ADDRESSES.includes(normalizeAddress(address));
 }
 
 /**

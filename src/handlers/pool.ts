@@ -738,44 +738,13 @@ Pool.MintedToTreasury.handler(async ({ event, context }) => {
       lifetimeReserveFactorAccrued: newProtocolAccrued,
     });
 
-    const ps = await context.ProtocolStats.get('1');
-    if (ps) {
-      const decimalsBI = 10n ** BigInt(reserve.decimals);
-      const priceUsd =
-        reserve.priceInUsd ||
-        (await getAssetPriceUSD(context, reserveAddress, Number(event.block.timestamp)));
-      const deltaProtocolUsd = (Number(event.params.amountMinted) / Number(decimalsBI)) * priceUsd;
-      const updatedProtocolRevenueUsd = ps.protocolRevenueUsd + deltaProtocolUsd;
-      context.ProtocolStats.set({
-        ...ps,
-        protocolRevenueUsd: updatedProtocolRevenueUsd,
-        totalRevenueUsd: updatedProtocolRevenueUsd + ps.supplyRevenueUsd,
-        updatedAt: Number(event.block.timestamp),
-      });
-    }
-
-    const aggregate = await context.ReserveAggregate.get(reserveId);
-    if (aggregate) {
-      context.ReserveAggregate.set({
-        ...aggregate,
-        lastProtocolAccruedToken: newProtocolAccrued,
-        updatedAt: Number(event.block.timestamp),
-      });
-    } else {
-      context.ReserveAggregate.set({
-        id: reserveId,
-        suppliesUsd: 0,
-        borrowsUsd: 0,
-        availableUsd: 0,
-        suppliesE8: 0n,
-        borrowsE8: 0n,
-        availableE8: 0n,
-        priceE8: 0n,
-        lastSuppliersInterestEarnedToken: 0n,
-        lastProtocolAccruedToken: newProtocolAccrued,
-        updatedAt: Number(event.block.timestamp),
-      });
-    }
+    // Revenue is booked through the shared aggregator rather than inline. The
+    // old inline path advanced ReserveAggregate.lastProtocolAccruedToken itself
+    // and wrote straight to ProtocolStats, which meant PoolStats - whose only
+    // feed is this aggregator - never saw a single unit of treasury revenue.
+    // updateReserveUsdValues reads that same watermark, books the delta to both
+    // rows and advances it, so the amount is still counted exactly once.
+    await updateReserveUsdValues(context, reserveId, reserveAddress, Number(event.block.timestamp));
   }
 });
 

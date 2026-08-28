@@ -4,6 +4,7 @@
  */
 
 import { recordProtocolTransaction, getOrCreateUser, getOrCreateProtocolStats } from './shared';
+import { adjustPoolReserveCount } from '../helpers/protocolAggregation';
 import { getHistoryEntityId } from '../helpers/entityHelpers';
 import {
   POOL_ID,
@@ -56,6 +57,19 @@ function recordReserveConfigurationHistory(
     reserveLiquidationBonus: reserve.reserveLiquidationBonus,
     timestamp,
   });
+}
+
+/**
+ * Whether a reserve counts toward PoolStats.reserveCount.
+ *
+ * A reserve counts once the configurator has listed it and until it is dropped.
+ * Row existence is deliberately not the test: AToken.Initialized creates an
+ * unlisted stub earlier in the same listing transaction, and a dropped reserve
+ * keeps its row. Every count adjustment is the difference of this predicate
+ * across one event, so replays and re-listings both land on the right number.
+ */
+function isCountedReserve(reserve: { isListed: boolean; isDropped: boolean } | undefined): boolean {
+  return reserve !== undefined && reserve.isListed && !reserve.isDropped;
 }
 
 async function resolvePoolId(context: handlerContext, contractAddress: string): Promise<string> {
@@ -577,9 +591,10 @@ PoolConfigurator.ReserveInitialized.handler(async ({ event, context }) => {
     isActive: true,
     isFrozen: false,
     isPaused: false,
+    isListed: true,
     reserveFactor: 0n,
     baseLTVasCollateral: 0n,
-    optimalUtilisationRate: 0n,
+    optimalUtilizationRate: 0n,
     reserveLiquidationThreshold: 0n,
     reserveLiquidationBonus: 0n,
     reserveInterestRateStrategy: interestRateStrategy,
@@ -639,6 +654,16 @@ PoolConfigurator.ReserveInitialized.handler(async ({ event, context }) => {
     accruedToTreasury: 0n,
     unbacked: 0n,
   };
+
+  // Count the reserve only when it actually enters the counted state. Row
+  // existence is not the signal: AToken.Initialized fires earlier in this same
+  // transaction and leaves an unlisted stub behind, and a dropped reserve keeps
+  // its row too. Both must still be counted here, while a replay of an already
+  // listed, undropped reserve must not inflate the count.
+  const previous = await context.Reserve.get(reserveId);
+  if (!isCountedReserve(previous)) {
+    await adjustPoolReserveCount(context, actualPoolId, 1, timestamp);
+  }
 
   context.Reserve.set(reserveEntity);
 
@@ -780,6 +805,15 @@ PoolConfigurator.ReserveActive.handler(async ({ event, context }) => {
       isDropped: event.params.active ? false : reserve.isDropped,
       lastUpdateTimestamp: Number(event.block.timestamp),
     };
+
+    // Reactivating clears isDropped, which puts a previously dropped reserve
+    // back into the counted state; without this the count would never recover
+    // from the drop.
+    const countDelta = Number(isCountedReserve(updated)) - Number(isCountedReserve(reserve));
+    if (countDelta !== 0) {
+      await adjustPoolReserveCount(context, poolId, countDelta, Number(event.block.timestamp));
+    }
+
     context.Reserve.set(updated);
     recordReserveConfigurationHistory(
       context,
@@ -850,6 +884,12 @@ PoolConfigurator.ReserveDropped.handler(async ({ event, context }) => {
   const reserveId = `${asset}-${poolId}`;
   const reserve = await context.Reserve.get(reserveId);
   if (reserve) {
+    // Only the transition out of the counted state changes the count; dropping
+    // an already-dropped reserve, or one the configurator never listed, is a
+    // no-op. isListed stays true so a later re-listing counts again.
+    if (isCountedReserve(reserve)) {
+      await adjustPoolReserveCount(context, poolId, -1, Number(event.block.timestamp));
+    }
     context.Reserve.set({
       ...reserve,
       isActive: false,
