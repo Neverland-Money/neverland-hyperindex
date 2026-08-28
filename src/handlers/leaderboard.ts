@@ -147,7 +147,10 @@ EpochManager.EpochEnd.handler(async ({ event, context }) => {
     id: epochId,
     epochNumber,
     startBlock: 0n,
-    startTime: 0,
+    // Seeded from the override so a fallback-created epoch closes coherently:
+    // applyScheduledEpochTransitions only computes duration when startTime > 0,
+    // so leaving it at 0 here would store an epoch with an end and no duration.
+    startTime: override ? override.startTime : 0,
     endBlock,
     endTime: undefined,
     isActive: true,

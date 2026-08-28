@@ -1324,6 +1324,9 @@ test('epoch end seeds the override start when the epoch entity is missing', asyn
   const epoch = mockDb.entities.LeaderboardEpoch.get('9');
   assert.equal(epoch?.scheduledStartTime, 1787893200);
   assert.equal(epoch?.scheduledEndTime, 1790442000);
+  // The effective start is seeded too, so the epoch this path creates carries
+  // a duration rather than an end with no beginning.
+  assert.equal(epoch?.startTime, 1787893200);
 });
 
 test('ending an overridden epoch on-chain later leaves it alone and lets the next tide start', async () => {
