@@ -6,4 +6,4 @@ git diff --exit-code -- . ':(exclude)generated' ':(exclude)coverage' ':(exclude)
 pnpm run format:check
 pnpm run lint
 pnpm run type-check
-pnpm run test:coverage
+pnpm run test:coverage:check

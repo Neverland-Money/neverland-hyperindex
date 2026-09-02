@@ -63,7 +63,7 @@ interface Lock {
 interface Reserve {
   reserve_id: string;
   scaledATokenBalance: string | number;
-  scaledVariableDebt: string | number;
+  scaledDebt: string | number;
 }
 interface LpPos {
   pool: string;
@@ -106,7 +106,7 @@ async function fetchWallet(url: string, addr: string): Promise<WalletData> {
     UserPoints(where: { id: { _eq: "${a}" } }) { lifetimeTotalPoints }
     UserLeaderboardState(where: { id: { _eq: "${a}" } }) { votingPower combinedMultiplier lifetimePoints }
     DustLockToken(where: { owner: { _eq: "${a}" } }) { id lockedAmount isPermanent }
-    UserReserve(where: { user_id: { _eq: "${a}" } }) { reserve_id scaledATokenBalance scaledVariableDebt }
+    UserReserve(where: { user_id: { _eq: "${a}" } }) { reserve_id scaledATokenBalance scaledDebt }
     UserLPPosition(where: { user_id: { _eq: "${a}" } }) { pool settledLpPoints valueUsd }
   }`;
   const d = await gql<{
@@ -201,7 +201,7 @@ function reportWallet(addr: string, note: string, L: WalletData, P: WalletData):
     const lr = L.reserves.find(r => r.reserve_id === rid);
     const pr = P.reserves.find(r => r.reserve_id === rid);
     console.log(
-      `    ${rid.slice(0, 12)}..: supply ${tag(n(lr?.scaledATokenBalance), n(pr?.scaledATokenBalance))} | debt ${tag(n(lr?.scaledVariableDebt), n(pr?.scaledVariableDebt))}`
+      `    ${rid.slice(0, 12)}..: supply ${tag(n(lr?.scaledATokenBalance), n(pr?.scaledATokenBalance))} | debt ${tag(n(lr?.scaledDebt), n(pr?.scaledDebt))}`
     );
   }
 

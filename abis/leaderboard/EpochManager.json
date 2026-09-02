@@ -337,17 +337,7 @@
   },
   {
     "type": "error",
-    "name": "EpochAlreadyEnded",
-    "inputs": []
-  },
-  {
-    "type": "error",
     "name": "EpochStillActive",
-    "inputs": []
-  },
-  {
-    "type": "error",
-    "name": "InvalidScheduledTime",
     "inputs": []
   },
   {

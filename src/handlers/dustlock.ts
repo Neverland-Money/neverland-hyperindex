@@ -2,6 +2,7 @@
  * DustLock (veNFT) Event Handlers
  */
 
+import { DustLock } from '../../generated';
 import {
   recalculateUserTotalVP,
   recordProtocolTransaction,
@@ -13,12 +14,12 @@ import {
 import {
   DUST_LOCK_START_BLOCK,
   MAX_LOCK_TIME,
+  SECONDS_PER_WEEK,
   ZERO_ADDRESS,
   normalizeAddress,
 } from '../helpers/constants';
 import { handleDustLockSpecialEditionTransfer } from './specialEditions';
 
-import { DustLock } from '../../generated';
 import type { handlerContext } from '../../generated';
 
 function shouldUpdateVotingPower(blockNumber: number): boolean {
@@ -33,8 +34,7 @@ function shouldUpdateVotingPower(blockNumber: number): boolean {
 // before the lock write and let `calculateAverageVPFromStorage` decide.
 //
 // veDUST state changes do not otherwise trigger point accrual, so without this a
-// pure-VP user only accrues when the keeper settles them — which the backfill
-// gate (ENVIO_LEADERBOARD_LIVE_EPOCH) skips for closed past epochs. Cheap for
+// pure-VP user only accrues when the keeper settles them. Cheap for
 // pure-VP users (empty reserve loop, no eth_call) and idempotent: the monotonic
 // per-(user,epoch) `lastVPAccrualTimestamp` cursor makes repeat settles no-ops.
 async function settleVpOwnerBeforeMutate(
@@ -47,12 +47,8 @@ async function settleVpOwnerBeforeMutate(
   if (Number(blockNumber) < DUST_LOCK_START_BLOCK) return;
   await settlePointsForAllReserves(context, owner, timestamp, blockNumber, {
     ignoreCooldown: true,
-    skipNftSync: true,
-    skipLPChainSync: true,
   });
 }
-
-const SECONDS_PER_WEEK = 7 * 24 * 60 * 60;
 
 async function getOrInitDustLockToken(context: handlerContext, tokenId: string, timestamp: number) {
   let token = await context.DustLockToken.get(tokenId);

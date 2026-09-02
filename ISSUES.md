@@ -42,7 +42,7 @@ more whole epochs:
   events, the remainder wait for the following events. Self-correcting, since
   every protocol transaction drives the loop.
 - **Block numbers collapse.** `startBlock` / `endBlock` for every epoch crossed
-  during the catch-up are stamped with the *catch-up event's* block, because that
+  during the catch-up are stamped with the _catch-up event's_ block, because that
   is the only block in hand. The timestamps stay correct (they come from the
   stored schedule), so points and durations are unaffected — but a consumer
   reading epoch block ranges for a quiet span gets a degenerate range.
@@ -66,7 +66,7 @@ no cheap way to do. Low value unless block ranges become load-bearing.
 on their `UserReserve`. The treasury branch writes no `UserReserve`, so nothing
 recovers it there.
 
-So when `mintToTreasury` fires while the treasury *also* holds a real aToken
+So when `mintToTreasury` fires while the treasury _also_ holds a real aToken
 position — which happens, since OTC returns are supplied `onBehalfOf` the
 treasury — the interest accrued on that position is dropped from
 `totalATokenSupply` and is never credited anywhere.
@@ -103,13 +103,43 @@ Smaller items consciously left alone; none blocks a resync.
   — never worse than the pre-change baseline, and it cannot affect stored data
   because preload writes are `noopSet`. A per-boundary `Set` would close it.
 
-- **`test:coverage:check` now fails honestly.**
-  The thresholds used to be passed after `node --test`, so c8 never saw them and
-  the gate always passed. Fixed to enforce; it now reports the real number
-  (~96.4% statements), dragged mainly by `src/handlers/specialEditions.ts` at
-  16.4%. CI does not run it. `.husky/pre-commit` still runs the report-only
-  `test:coverage`, not the enforcing variant.
+## 5. Point-accrual blacklist from Tide 9 (implemented)
 
-- **`optimalUtilisationRate` → `optimalUtilizationRate`** is an unversioned public
-  GraphQL/DB column rename. No in-repo consumer; external consumers were accepted
-  as a deliberate call.
+25 addresses stop accruing points entirely from the start of Tide 9. Tides 1-8 keep
+the values they were scored and paid under.
+
+**Sources**, deduplicated in `POINT_ACCRUAL_BLACKLIST` (`src/helpers/constants.ts`):
+the 14 entries of `neverland-tide-draw/blacklist.json` plus the 12 Neverland
+Foundation multisigs. `0x909b176220b7e782C0f3cEccaB4b19D2c433c6BB` appears in both,
+so the union is 25, not 26. Stored lowercase; every call site normalizes first.
+
+**Boundary.** `POINT_ACCRUAL_BLACKLIST_FROM` is derived from
+`EPOCH_DATES_OVERRIDES['9'].startTime` (1787893200 = 2026-08-28 05:00 UTC) rather
+than duplicated, so the two can never drift apart.
+
+Gated on timestamp only, not on a block, unlike the LP cutovers which pin both. The
+LP eras need a block because they are also compared against block numbers elsewhere;
+this has a single comparison site, and under sub-second block production two
+independent signals can disagree at the boundary — the exact failure
+`applyStaticLPPoolCutover` documents. One signal cannot disagree with itself.
+
+**Gated call sites** — six, covering every automatic accrual path:
+`settlePointsForUser` and the four `awardDaily*Points` functions in
+`src/handlers/shared.ts`, and `updateUserEpochLPPoints` in `src/handlers/lp.ts`.
+`settlePointsForUser` returns before touching any store, including the voting-power
+refresh: multiplier state only feeds points these addresses cannot earn.
+
+**Deliberately NOT gated: manual admin awards.** `LeaderboardConfig`'s manual
+points-added / points-removed handlers (`src/handlers/leaderboard.ts`) still apply to
+blacklisted addresses. Those are explicit, signed, on-chain admin actions; silently
+voiding one would hide an operator's intent rather than enforce a policy. Revisit if
+that is not wanted.
+
+**Note on the pre-existing blacklist.** `LeaderboardBlacklist`, driven by the
+on-chain `AddressBlacklisted` / `AddressUnblacklisted` events, is a separate
+mechanism and still suppresses _ranking only_ — a user on it continues to accrue and
+is merely hidden from the board. It was left as-is.
+
+**No resync needed.** The change only affects Tide 9 onward, and the data being
+validated against production is Tides 1-8. Points these addresses accrued between the
+Tide 9 open and this landing will be corrected by the next full resync.

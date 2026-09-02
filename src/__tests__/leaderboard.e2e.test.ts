@@ -2,14 +2,30 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { createDefaultReserve } from '../helpers/entityHelpers';
-import { LEADERBOARD_START_BLOCK, ZERO_ADDRESS } from '../helpers/constants';
+import {
+  BALANCER_AUTORANGE_V3_POOL_ADDRESS,
+  BALANCER_VAULT_ADDRESS,
+  LEADERBOARD_START_BLOCK,
+  LP_BALANCER_AUTORANGE_CUTOVER_BLOCK,
+  LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP,
+  LP_V2_CUTOVER_BLOCK,
+  LP_V2_CUTOVER_TIMESTAMP,
+  USDC_ADDRESS,
+  ZERO_ADDRESS,
+} from '../helpers/constants';
+import { LP_GROWTH_Q128 } from '../helpers/lpGrowthMath';
 import { calculateLinearInterest, rayMul, toDecimal } from '../helpers/math';
-import { TestHelpers, type MockDb } from './v3-test-helpers';
+import { getSqrtRatioAtTick } from '../helpers/uniswapV3';
+import { TestHelpers, type MockDb, type EntityRow } from './v3-test-helpers';
 
 const DAY = 86400;
 const RAY = 10n ** 27n;
 const DECIMALS = 6;
 const UNIT = 10n ** 6n;
+// Above the statically configured leaderboard-contract start blocks, but still
+// before the first historical LP cutover. Lower values are interpreted by the
+// V3 compatibility seam as relative block offsets.
+const E2E_BASE_BLOCK = LEADERBOARD_START_BLOCK + 300_000;
 
 process.env.ENVIO_ENABLE_EXTERNAL_CALLS = 'false';
 process.env.ENVIO_ENABLE_ETH_CALLS = 'false';
@@ -31,7 +47,25 @@ const ADDRESSES = {
   nftCollection: '0x00000000000000000000000000000000000000f4',
   vpMultiplier: '0x00000000000000000000000000000000000000f5',
   dustLock: '0x00000000000000000000000000000000000000f6',
+  userTwo: '0x0000000000000000000000000000000000000102',
+  ceremonyV3Pool: '0x0000000000000000000000000000000000000103',
+  ceremonyV3Manager: '0x0000000000000000000000000000000000000104',
+  ceremonyV3Token1: '0x0000000000000000000000000000000000000105',
+  ceremonyV2Pool: '0x0000000000000000000000000000000000000106',
+  ceremonyV2Token1: '0x0000000000000000000000000000000000000107',
 };
+
+const CEREMONY_DUST_TOKEN = '0xad96c3dffcd6374294e2573a7fbba96097cc8d7c';
+const CEREMONY_LEGACY_V3_POOL = '0xd15965968fe8bf2babbe39b2fc5de1ab6749141f';
+const CEREMONY_CANONICAL_V2_POOL = '0x86dbf00485871c901c5129bd525348db96c2eb2d';
+const CEREMONY_RATE_BPS = 10_000n;
+const CEREMONY_PRICE_E8 = 100_000_000n;
+const CEREMONY_POINTS_SCALE = 10n ** 18n;
+const CEREMONY_Q96 = 1n << 96n;
+const CEREMONY_TICK_LOWER = -120;
+const CEREMONY_TICK_UPPER = 120;
+const CEREMONY_V3_LIQUIDITY = 1_000n;
+const CEREMONY_V2_LIQUIDITY = 100n;
 
 type TestHelpersApi = typeof TestHelpers;
 
@@ -139,6 +173,34 @@ function assertApprox(actual: number | bigint, expected: number, epsilon = 1e-6)
   assert.ok(Math.abs(actualNum - expected) < epsilon, `expected ${expected} got ${actualNum}`);
 }
 
+function ceremonyFungibleGrowthX128(
+  intervals: readonly {
+    reserve0: bigint;
+    reserve1: bigint;
+    token0PriceE8: bigint;
+    token1PriceE8: bigint;
+    seconds: number;
+  }[]
+): bigint {
+  return intervals.reduce((growth, interval) => {
+    const poolValueUsdE8 =
+      interval.reserve0 * interval.token0PriceE8 + interval.reserve1 * interval.token1PriceE8;
+    const unitValueUsdE8X128 = (poolValueUsdE8 * LP_GROWTH_Q128) / 1_000n;
+    return growth + unitValueUsdE8X128 * CEREMONY_RATE_BPS * BigInt(interval.seconds);
+  }, 0n);
+}
+
+function ceremonyGrowthToPoints(liquidity: bigint, growthX128: bigint): bigint {
+  return (
+    (liquidity * growthX128 * CEREMONY_POINTS_SCALE) /
+    (LP_GROWTH_Q128 * CEREMONY_PRICE_E8 * 10_000n * BigInt(DAY))
+  );
+}
+
+function applyCeremonyMultiplier(points: bigint, multiplierBps: bigint): bigint {
+  return (points * multiplierBps) / 10_000n;
+}
+
 test('accrues across epochs and caps gap settlements', async () => {
   const TestHelpers = loadTestHelpers();
   let mockDb = TestHelpers.MockDb.createMockDb();
@@ -153,7 +215,7 @@ test('accrues across epochs and caps gap settlements', async () => {
   const epoch2StartTs = epochStartTs + DAY * 20;
   const epoch2SettleTs = epoch2StartTs + DAY * 5;
 
-  const baseBlock = LEADERBOARD_START_BLOCK + 100;
+  const baseBlock = E2E_BASE_BLOCK + 100;
   const preEpochBlock = baseBlock - 1;
   const epochStartBlock = baseBlock;
   const midEpochBlock = baseBlock + 2;
@@ -317,7 +379,7 @@ test('keeper state and NFT multipliers update leaderboard', async () => {
   const preEpochTs = epochStartTs - DAY;
   const settleTs = epochStartTs + DAY;
 
-  const baseBlock = LEADERBOARD_START_BLOCK + 200;
+  const baseBlock = E2E_BASE_BLOCK + 200;
   const preEpochBlock = baseBlock - 1;
   const epochStartBlock = baseBlock;
   const settleBlock = baseBlock + 1;
@@ -462,7 +524,7 @@ test('dust lock voting power applies VP multiplier', async () => {
   const preEpochTs = epochStartTs - DAY;
   const settleTs = epochStartTs + DAY;
 
-  const baseBlock = LEADERBOARD_START_BLOCK + 300;
+  const baseBlock = E2E_BASE_BLOCK + 300;
   const preEpochBlock = baseBlock - 1;
   const epochStartBlock = baseBlock;
   const settleBlock = baseBlock + 1;
@@ -574,7 +636,7 @@ test('repay and withdraw bonuses only apply during active epochs', async () => {
   const epochEndTs = epochStartTs + DAY * 2;
   const gapTs = epochStartTs + DAY * 3;
 
-  const baseBlock = LEADERBOARD_START_BLOCK + 400;
+  const baseBlock = E2E_BASE_BLOCK + 400;
   const preEpochBlock = baseBlock - 1;
   const epochStartBlock = baseBlock;
   const repayBlock = baseBlock + 1;
@@ -667,7 +729,7 @@ test('repay and withdraw bonuses only apply during active epochs', async () => {
     `${ADDRESSES.user}-${ADDRESSES.asset}-${ADDRESSES.pool}`
   );
   assert.ok(userReserve);
-  assert.equal(userReserve.currentVariableDebt, 400n * UNIT);
+  assert.equal(userReserve.currentDebt, 400n * UNIT);
   assert.equal(userReserve.currentATokenBalance, 950n * UNIT);
 
   const epochEndEvent = TestHelpers.EpochManager.EpochEnd.createMockEvent({
@@ -717,7 +779,7 @@ test('gap settlements use epoch-end indices snapshots', async () => {
   const reserveUpdateTs = epochStartTs + DAY * 3;
   const gapSettleTs = epochStartTs + DAY * 4;
 
-  const baseBlock = LEADERBOARD_START_BLOCK + 500;
+  const baseBlock = E2E_BASE_BLOCK + 500;
   const preEpochBlock = baseBlock - 1;
   const epochStartBlock = baseBlock;
   const epochEndBlock = baseBlock + 2;
@@ -827,7 +889,7 @@ test('lending actions settle supply and borrow reserves during cooldown', async 
   const firstSettleTs = epochStartTs + DAY;
   const cooldownSettleTs = firstSettleTs + 3600;
 
-  const baseBlock = LEADERBOARD_START_BLOCK + 700;
+  const baseBlock = E2E_BASE_BLOCK + 700;
   const preEpochBlock = baseBlock - 1;
   const epochStartBlock = baseBlock;
   const firstSettleBlock = baseBlock + 1;
@@ -922,18 +984,12 @@ test('lending actions settle supply and borrow reserves during cooldown', async 
     reserve_id: reserveTwoId,
     scaledATokenBalance: 0n,
     currentATokenBalance: 0n,
-    scaledVariableDebt: 500n * UNIT,
-    currentVariableDebt: 500n * UNIT,
-    principalStableDebt: 0n,
-    currentStableDebt: 0n,
-    currentTotalDebt: 500n * UNIT,
-    stableBorrowRate: 0n,
-    oldStableBorrowRate: 0n,
+    scaledDebt: 500n * UNIT,
+    currentDebt: 500n * UNIT,
     liquidityRate: 0n,
     variableBorrowIndex: RAY,
     usageAsCollateralEnabledOnUser: false,
     lastUpdateTimestamp: preEpochTs,
-    stableBorrowLastUpdateTimestamp: 0,
   });
   mockDb = mockDb.entities.UserReserveList.set({
     id: ADDRESSES.user,
@@ -992,7 +1048,7 @@ test('daily supply bonus respects min usd threshold', async () => {
   const preEpochTs = epochStartTs - DAY;
   const supplyTs = epochStartTs + 3600;
 
-  const baseBlock = LEADERBOARD_START_BLOCK + 800;
+  const baseBlock = E2E_BASE_BLOCK + 800;
   const preEpochBlock = baseBlock - 1;
   const epochStartBlock = baseBlock;
   const supplyBlock = baseBlock + 1;
@@ -1068,7 +1124,7 @@ test('manual points updates epoch and lifetime totals', async () => {
   const eventData = createEventDataFactory();
 
   const epochStartTs = DAY * 10;
-  const baseBlock = LEADERBOARD_START_BLOCK + 900;
+  const baseBlock = E2E_BASE_BLOCK + 900;
   const epochStartBlock = baseBlock;
 
   const epochStartEvent = TestHelpers.EpochManager.EpochStart.createMockEvent({
@@ -1131,4 +1187,717 @@ test('manual points updates epoch and lifetime totals', async () => {
   const allTimeIndex = mockDb.entities.UserIndex.get(`${ADDRESSES.user}:0`);
   assert.ok(allTimeIndex);
   assertApprox(allTimeIndex.points, 60);
+});
+
+test('Task 8 Tide ceremony preserves lazy LP parity, multiplier splits, and immutable gap proofs', async () => {
+  const previousFinalOnlyFloor = process.env.ENVIO_KEEPER_FINAL_ONLY_FROM_EPOCH;
+  delete process.env.ENVIO_KEEPER_FINAL_ONLY_FROM_EPOCH;
+
+  async function runCeremony(includeRedundantV3Swap: boolean) {
+    const TestHelpers = loadTestHelpers();
+    const eventData = createEventDataFactory();
+    const hour = 3_600;
+    const epochNumber = 42n;
+    const nextEpochNumber = 43n;
+    const startTime = LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP + hour;
+    const v3FirstSwapTime = startTime + 6 * hour;
+    const redundantSwapTime = startTime + 8 * hour;
+    const v2SyncTime = startTime + 9 * hour;
+    const balancerSwapTime = startTime + 10 * hour;
+    const multiplierChangeTime = startTime + 12 * hour;
+    const v3SecondSwapTime = startTime + 18 * hour;
+    const endTime = startTime + DAY;
+    const firstGapTime = endTime + hour;
+    const duplicateGapTime = endTime + 2 * hour;
+    const secondUserGapTime = endTime + 3 * hour;
+    const nextStartTime = endTime + 4 * hour;
+    const baseBlock = LP_BALANCER_AUTORANGE_CUTOVER_BLOCK + 1_000;
+    const sqrtAtOne = getSqrtRatioAtTick(1);
+    const primaryV3Position = `ceremony-v3:${ADDRESSES.user}`;
+    const primaryV2Position = `v2:${ADDRESSES.ceremonyV2Pool}:${ADDRESSES.user}`;
+    const primaryBalancerPosition = `v2:${BALANCER_AUTORANGE_V3_POOL_ADDRESS}:${ADDRESSES.user}`;
+    const secondaryV3Position = `ceremony-v3:${ADDRESSES.userTwo}`;
+    const secondaryV2Position = `v2:${ADDRESSES.ceremonyV2Pool}:${ADDRESSES.userTwo}`;
+    const secondaryBalancerPosition = `v2:${BALANCER_AUTORANGE_V3_POOL_ADDRESS}:${ADDRESSES.userTwo}`;
+
+    let mockDb = TestHelpers.MockDb.createMockDb();
+    ({ mockDb } = seedBaseState(mockDb, {
+      asset: ADDRESSES.asset,
+      pool: ADDRESSES.pool,
+      aToken: ADDRESSES.aToken,
+      vToken: ADDRESSES.vToken,
+      priceTimestamp: startTime,
+    }));
+    mockDb = mockDb.entities.LeaderboardConfig.set({
+      id: 'global',
+      depositRateBps: CEREMONY_RATE_BPS,
+      borrowRateBps: 0n,
+      vpRateBps: CEREMONY_RATE_BPS,
+      lpRateBps: 0n,
+      supplyDailyBonus: 0,
+      borrowDailyBonus: 0,
+      repayDailyBonus: 0,
+      withdrawDailyBonus: 0,
+      cooldownSeconds: 0,
+      minDailyBonusUsd: 0,
+      lastUpdate: startTime,
+    });
+    mockDb = mockDb.entities.LeaderboardState.set({
+      id: 'current',
+      currentEpochNumber: epochNumber - 1n,
+      isActive: false,
+    });
+    mockDb = mockDb.entities.LeaderboardEpoch.set({
+      id: (epochNumber - 1n).toString(),
+      epochNumber: epochNumber - 1n,
+      startBlock: BigInt(baseBlock - 2),
+      startTime: startTime - 2 * hour,
+      endBlock: BigInt(baseBlock - 1),
+      endTime: startTime - hour,
+      isActive: false,
+      duration: BigInt(hour),
+      scheduledStartTime: startTime - 2 * hour,
+      scheduledEndTime: startTime - hour,
+    });
+    mockDb = mockDb.entities.NFTMultiplierConfig.set({
+      id: 'current',
+      firstBonus: 5_000n,
+      decayRatio: 10_000n,
+      lastUpdate: startTime,
+    });
+    mockDb = mockDb.entities.NFTPartnershipRegistryState.set({
+      id: 'current',
+      activeCollections: [ADDRESSES.nftCollection],
+      lastUpdate: startTime,
+    });
+    mockDb = mockDb.entities.NFTPartnership.set({
+      id: ADDRESSES.nftCollection,
+      collection: ADDRESSES.nftCollection,
+      name: 'Ceremony collection',
+      active: true,
+      staticBoostBps: undefined,
+      startTimestamp: startTime,
+      endTimestamp: undefined,
+      addedAt: startTime,
+      lastUpdate: startTime,
+    });
+    mockDb = mockDb.entities.LPStaticTransition.set({
+      id: 'legacy-v3-to-v2',
+      outgoingPool: CEREMONY_LEGACY_V3_POOL,
+      incomingPool: CEREMONY_CANONICAL_V2_POOL,
+      blockNumber: BigInt(LP_V2_CUTOVER_BLOCK),
+      timestamp: LP_V2_CUTOVER_TIMESTAMP,
+    });
+    mockDb = mockDb.entities.LPStaticTransition.set({
+      id: 'v2-to-balancer-autorange',
+      outgoingPool: CEREMONY_CANONICAL_V2_POOL,
+      incomingPool: BALANCER_AUTORANGE_V3_POOL_ADDRESS,
+      blockNumber: BigInt(LP_BALANCER_AUTORANGE_CUTOVER_BLOCK),
+      timestamp: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP,
+    });
+    mockDb = mockDb.entities.LPPoolRegistry.set({
+      id: 'global',
+      poolIds: [
+        ADDRESSES.ceremonyV3Pool,
+        ADDRESSES.ceremonyV2Pool,
+        BALANCER_AUTORANGE_V3_POOL_ADDRESS,
+      ],
+      lastUpdate: startTime,
+    });
+
+    const poolConfigs = [
+      {
+        pool: ADDRESSES.ceremonyV3Pool,
+        positionManager: ADDRESSES.ceremonyV3Manager,
+        token0: USDC_ADDRESS,
+        token1: ADDRESSES.ceremonyV3Token1,
+        fee: 3_000,
+      },
+      {
+        pool: ADDRESSES.ceremonyV2Pool,
+        positionManager: ADDRESSES.ceremonyV2Pool,
+        token0: USDC_ADDRESS,
+        token1: ADDRESSES.ceremonyV2Token1,
+        fee: 3_000,
+      },
+      {
+        pool: BALANCER_AUTORANGE_V3_POOL_ADDRESS,
+        positionManager: BALANCER_AUTORANGE_V3_POOL_ADDRESS,
+        token0: USDC_ADDRESS,
+        token1: CEREMONY_DUST_TOKEN,
+        fee: 10_000,
+      },
+    ];
+    for (const config of poolConfigs) {
+      mockDb = mockDb.entities.LPPoolConfig.set({
+        id: config.pool,
+        ...config,
+        // The concentrated pool runs at a zero LP rate here. Its swaps, freezes and gap
+        // certificates still flow through every handler, but it contributes no points, so
+        // every LP expectation below stays closed-form on the two fungible legs. The V3
+        // per-swap point arithmetic is covered directly in lp-events.test.ts.
+        lpRateBps: config.pool === ADDRESSES.ceremonyV3Pool ? 0n : CEREMONY_RATE_BPS,
+        isActive: true,
+        enabledAtEpoch: epochNumber,
+        enabledAtTimestamp: startTime,
+        disabledAtEpoch: undefined,
+        disabledAtTimestamp: undefined,
+        lastUpdate: startTime,
+      });
+      mockDb = mockDb.entities.LPPoolState.set({
+        id: config.pool,
+        pool: config.pool,
+        currentTick: 0,
+        sqrtPriceX96: config.pool === ADDRESSES.ceremonyV3Pool ? CEREMONY_Q96 : 0n,
+        token0Price: CEREMONY_PRICE_E8,
+        token1Price: CEREMONY_PRICE_E8,
+        feeProtocol0: 0,
+        feeProtocol1: 0,
+        lastUpdate: startTime,
+      });
+      if (config.pool !== ADDRESSES.ceremonyV3Pool) {
+        mockDb = mockDb.entities.LPPoolV2State.set({
+          id: config.pool,
+          pool: config.pool,
+          reserve0: 500n,
+          reserve1: 500n,
+          lpTotalSupply: 1_000n,
+          lastUpdate: startTime,
+        });
+      }
+    }
+    for (const [address, symbol] of [
+      [USDC_ADDRESS, 'USDC'],
+      [ADDRESSES.ceremonyV3Token1, 'V3X'],
+      [ADDRESSES.ceremonyV2Token1, 'V2X'],
+      [CEREMONY_DUST_TOKEN, 'DUST'],
+    ] as const) {
+      mockDb = mockDb.entities.TokenInfo.set({
+        id: address,
+        address,
+        decimals: 0,
+        symbol,
+        name: `${symbol} ceremony token`,
+        lastUpdate: startTime,
+      });
+    }
+
+    const positions = [
+      {
+        id: primaryV3Position,
+        tokenId: 8_001n,
+        user: ADDRESSES.user,
+        pool: ADDRESSES.ceremonyV3Pool,
+        manager: ADDRESSES.ceremonyV3Manager,
+        tickLower: CEREMONY_TICK_LOWER,
+        tickUpper: CEREMONY_TICK_UPPER,
+        liquidity: CEREMONY_V3_LIQUIDITY,
+      },
+      {
+        id: primaryV2Position,
+        tokenId: 8_002n,
+        user: ADDRESSES.user,
+        pool: ADDRESSES.ceremonyV2Pool,
+        manager: ADDRESSES.ceremonyV2Pool,
+        tickLower: -887_272,
+        tickUpper: 887_272,
+        liquidity: CEREMONY_V2_LIQUIDITY,
+      },
+      {
+        id: primaryBalancerPosition,
+        tokenId: 8_003n,
+        user: ADDRESSES.user,
+        pool: BALANCER_AUTORANGE_V3_POOL_ADDRESS,
+        manager: BALANCER_AUTORANGE_V3_POOL_ADDRESS,
+        tickLower: -887_272,
+        tickUpper: 887_272,
+        liquidity: CEREMONY_V2_LIQUIDITY,
+      },
+      {
+        id: secondaryV3Position,
+        tokenId: 8_004n,
+        user: ADDRESSES.userTwo,
+        pool: ADDRESSES.ceremonyV3Pool,
+        manager: ADDRESSES.ceremonyV3Manager,
+        tickLower: CEREMONY_TICK_LOWER,
+        tickUpper: CEREMONY_TICK_UPPER,
+        liquidity: CEREMONY_V3_LIQUIDITY / 2n,
+      },
+      {
+        id: secondaryV2Position,
+        tokenId: 8_005n,
+        user: ADDRESSES.userTwo,
+        pool: ADDRESSES.ceremonyV2Pool,
+        manager: ADDRESSES.ceremonyV2Pool,
+        tickLower: -887_272,
+        tickUpper: 887_272,
+        liquidity: CEREMONY_V2_LIQUIDITY / 2n,
+      },
+      {
+        id: secondaryBalancerPosition,
+        tokenId: 8_006n,
+        user: ADDRESSES.userTwo,
+        pool: BALANCER_AUTORANGE_V3_POOL_ADDRESS,
+        manager: BALANCER_AUTORANGE_V3_POOL_ADDRESS,
+        tickLower: -887_272,
+        tickUpper: 887_272,
+        liquidity: CEREMONY_V2_LIQUIDITY / 2n,
+      },
+    ];
+    for (const position of positions) {
+      mockDb = mockDb.entities.UserLPPosition.set({
+        id: position.id,
+        tokenId: position.tokenId,
+        user_id: position.user,
+        pool: position.pool,
+        positionManager: position.manager,
+        tickLower: position.tickLower,
+        tickUpper: position.tickUpper,
+        liquidity: position.liquidity,
+        amount0: 0n,
+        amount1: 0n,
+        isInRange: true,
+        valueUsd: 0n,
+        lastInRangeTimestamp: startTime,
+        accumulatedInRangeSeconds: 0n,
+        lastSettledAt: startTime,
+        settledLpPoints: 0n,
+        createdAt: startTime - 1,
+        lastUpdate: startTime,
+      });
+    }
+    mockDb = mockDb.entities.UserLPPositionIndex.set({
+      id: ADDRESSES.user,
+      user_id: ADDRESSES.user,
+      positionIds: [primaryV3Position, primaryV2Position, primaryBalancerPosition],
+      lastUpdate: startTime,
+    });
+    mockDb = mockDb.entities.UserLPPositionIndex.set({
+      id: ADDRESSES.userTwo,
+      user_id: ADDRESSES.userTwo,
+      positionIds: [secondaryV3Position, secondaryV2Position, secondaryBalancerPosition],
+      lastUpdate: startTime,
+    });
+    mockDb = mockDb.entities.UserTokenList.set({
+      id: ADDRESSES.user,
+      user_id: ADDRESSES.user,
+      tokenIds: [8_100n],
+      lastUpdate: startTime,
+    });
+    mockDb = mockDb.entities.UserTokenList.set({
+      id: ADDRESSES.userTwo,
+      user_id: ADDRESSES.userTwo,
+      tokenIds: [],
+      lastUpdate: startTime,
+    });
+    mockDb = mockDb.entities.DustLockToken.set({
+      id: '8100',
+      owner: ADDRESSES.user,
+      lockedAmount: CEREMONY_POINTS_SCALE,
+      end: 0,
+      isPermanent: true,
+      createdAt: startTime,
+      updatedAt: startTime,
+      lastDepositType: undefined,
+      selfRepayEnabled: false,
+      rewardReceiver: undefined,
+    });
+
+    const epochStart = TestHelpers.EpochManager.EpochStart.createMockEvent({
+      epochNumber,
+      startTime: BigInt(startTime),
+      ...eventData(baseBlock, startTime, ADDRESSES.epochManager),
+    });
+    mockDb = await TestHelpers.EpochManager.EpochStart.processEvent({
+      event: epochStart,
+      mockDb,
+    });
+    const supply = TestHelpers.AToken.Mint.createMockEvent({
+      caller: ADDRESSES.user,
+      onBehalfOf: ADDRESSES.user,
+      value: 1_000n * UNIT,
+      balanceIncrease: 0n,
+      index: RAY,
+      ...eventData(baseBlock + 1, startTime, ADDRESSES.aToken),
+    });
+    mockDb = await TestHelpers.AToken.Mint.processEvent({ event: supply, mockDb });
+
+    const v3FirstSwap = TestHelpers.UniswapV3Pool.Swap.createMockEvent({
+      sender: ADDRESSES.user,
+      recipient: ADDRESSES.user,
+      amount0: 0n,
+      amount1: 0n,
+      sqrtPriceX96: sqrtAtOne,
+      liquidity: 0n,
+      tick: 1n,
+      ...eventData(baseBlock + 2, v3FirstSwapTime, ADDRESSES.ceremonyV3Pool),
+    });
+    mockDb = await TestHelpers.UniswapV3Pool.Swap.processEvent({
+      event: v3FirstSwap,
+      mockDb,
+    });
+    if (includeRedundantV3Swap) {
+      const redundantV3Swap = TestHelpers.UniswapV3Pool.Swap.createMockEvent({
+        sender: ADDRESSES.user,
+        recipient: ADDRESSES.user,
+        amount0: 0n,
+        amount1: 0n,
+        sqrtPriceX96: sqrtAtOne,
+        liquidity: 0n,
+        tick: 1n,
+        ...eventData(baseBlock + 3, redundantSwapTime, ADDRESSES.ceremonyV3Pool),
+      });
+      mockDb = await TestHelpers.UniswapV3Pool.Swap.processEvent({
+        event: redundantV3Swap,
+        mockDb,
+      });
+    }
+    const v2Sync = TestHelpers.UniswapV2Pair.Sync.createMockEvent({
+      reserve0: 600n,
+      reserve1: 400n,
+      ...eventData(baseBlock + 4, v2SyncTime, ADDRESSES.ceremonyV2Pool),
+    });
+    mockDb = await TestHelpers.UniswapV2Pair.Sync.processEvent({ event: v2Sync, mockDb });
+    const balancerSwap = TestHelpers.BalancerVault.Swap.createMockEvent({
+      pool: BALANCER_AUTORANGE_V3_POOL_ADDRESS,
+      tokenIn: USDC_ADDRESS,
+      tokenOut: CEREMONY_DUST_TOKEN,
+      amountIn: 50n,
+      amountOut: 50n,
+      swapFeePercentage: 10n ** 16n,
+      swapFeeAmount: 0n,
+      ...eventData(baseBlock + 5, balancerSwapTime, BALANCER_VAULT_ADDRESS),
+    });
+    mockDb = await TestHelpers.BalancerVault.Swap.processEvent({
+      event: balancerSwap,
+      mockDb,
+    });
+    const multiplierChange = TestHelpers.PartnerNFT.Transfer.createMockEvent({
+      from: ZERO_ADDRESS,
+      to: ADDRESSES.user,
+      id: 42n,
+      ...eventData(baseBlock + 6, multiplierChangeTime, ADDRESSES.nftCollection),
+    });
+    mockDb = await TestHelpers.PartnerNFT.Transfer.processEvent({
+      event: multiplierChange,
+      mockDb,
+    });
+    const statsAtMultiplierBoundary = mockDb.entities.UserEpochStats.get(
+      `${ADDRESSES.user}:${epochNumber.toString()}`
+    );
+    assert.ok(
+      statsAtMultiplierBoundary,
+      `missing boundary stats state=${JSON.stringify(
+        mockDb.entities.LeaderboardState.get('current'),
+        (_, value) => (typeof value === 'bigint' ? value.toString() : value)
+      )} ownership=${JSON.stringify(
+        mockDb.entities.UserNFTOwnership.get(`${ADDRESSES.user}:${ADDRESSES.nftCollection}`),
+        (_, value) => (typeof value === 'bigint' ? value.toString() : value)
+      )}`
+    );
+    assert.equal(
+      mockDb.entities.UserLeaderboardState.get(ADDRESSES.user)?.combinedMultiplier,
+      15_000n
+    );
+
+    const v3SecondSwap = TestHelpers.UniswapV3Pool.Swap.createMockEvent({
+      sender: ADDRESSES.user,
+      recipient: ADDRESSES.user,
+      amount0: 0n,
+      amount1: 0n,
+      sqrtPriceX96: CEREMONY_Q96,
+      liquidity: 0n,
+      tick: 0n,
+      ...eventData(baseBlock + 7, v3SecondSwapTime, ADDRESSES.ceremonyV3Pool),
+    });
+    mockDb = await TestHelpers.UniswapV3Pool.Swap.processEvent({
+      event: v3SecondSwap,
+      mockDb,
+    });
+    const epochEnd = TestHelpers.EpochManager.EpochEnd.createMockEvent({
+      epochNumber,
+      endTime: BigInt(endTime),
+      ...eventData(baseBlock + 8, endTime, ADDRESSES.epochManager),
+    });
+    mockDb = await TestHelpers.EpochManager.EpochEnd.processEvent({ event: epochEnd, mockDb });
+
+    const oldGrowthIds = [
+      `${ADDRESSES.ceremonyV2Pool}:${epochNumber.toString()}`,
+      `${BALANCER_AUTORANGE_V3_POOL_ADDRESS}:${epochNumber.toString()}`,
+    ];
+    const frozenGrowthBeforeGap = oldGrowthIds.map(id => mockDb.entities.LPPoolEpochGrowth.get(id));
+    for (const growth of frozenGrowthBeforeGap) {
+      assert.equal(growth?.isFrozen, true);
+      assert.equal(growth?.lastTimestamp, endTime);
+      assert.equal(growth?.frozenAt, endTime);
+    }
+    const firstGap = TestHelpers.LeaderboardKeeper.UserSettled.createMockEvent({
+      user: ADDRESSES.user,
+      timestamp: BigInt(firstGapTime),
+      ...eventData(baseBlock + 9, firstGapTime, ADDRESSES.leaderboardKeeper),
+    });
+    mockDb = await TestHelpers.LeaderboardKeeper.UserSettled.processEvent({
+      event: firstGap,
+      mockDb,
+    });
+    const primaryFinalizationId = `${ADDRESSES.user}:${epochNumber.toString()}`;
+    const firstCertificate = mockDb.entities.UserEpochFinalization.get(primaryFinalizationId);
+    assert.ok(firstCertificate);
+    const duplicateGap = TestHelpers.LeaderboardKeeper.UserSettled.createMockEvent({
+      user: ADDRESSES.user,
+      timestamp: BigInt(duplicateGapTime),
+      ...eventData(baseBlock + 10, duplicateGapTime, ADDRESSES.leaderboardKeeper),
+    });
+    mockDb = await TestHelpers.LeaderboardKeeper.UserSettled.processEvent({
+      event: duplicateGap,
+      mockDb,
+    });
+    assert.deepEqual(
+      mockDb.entities.UserEpochFinalization.get(primaryFinalizationId),
+      firstCertificate,
+      'duplicate gap preserves the first certificate byte-for-byte'
+    );
+    const secondUserGap = TestHelpers.LeaderboardKeeper.UserSettled.createMockEvent({
+      user: ADDRESSES.userTwo,
+      timestamp: BigInt(secondUserGapTime),
+      ...eventData(baseBlock + 11, secondUserGapTime, ADDRESSES.leaderboardKeeper),
+    });
+    mockDb = await TestHelpers.LeaderboardKeeper.UserSettled.processEvent({
+      event: secondUserGap,
+      mockDb,
+    });
+
+    assert.deepEqual(
+      oldGrowthIds.map(id => mockDb.entities.LPPoolEpochGrowth.get(id)),
+      frozenGrowthBeforeGap,
+      'gap settlements add zero pool growth'
+    );
+
+    const v2Token1PriceAfterSync = (CEREMONY_PRICE_E8 * 600n) / 400n;
+    const balancerToken1PriceAfterSwap = (CEREMONY_PRICE_E8 * 550n) / 450n;
+    const preV2Growth = ceremonyFungibleGrowthX128([
+      {
+        reserve0: 500n,
+        reserve1: 500n,
+        token0PriceE8: CEREMONY_PRICE_E8,
+        token1PriceE8: CEREMONY_PRICE_E8,
+        seconds: 9 * hour,
+      },
+      {
+        reserve0: 600n,
+        reserve1: 400n,
+        token0PriceE8: CEREMONY_PRICE_E8,
+        token1PriceE8: v2Token1PriceAfterSync,
+        seconds: 3 * hour,
+      },
+    ]);
+    const postV2Growth = ceremonyFungibleGrowthX128([
+      {
+        reserve0: 600n,
+        reserve1: 400n,
+        token0PriceE8: CEREMONY_PRICE_E8,
+        token1PriceE8: v2Token1PriceAfterSync,
+        seconds: 12 * hour,
+      },
+    ]);
+    const preBalancerGrowth = ceremonyFungibleGrowthX128([
+      {
+        reserve0: 500n,
+        reserve1: 500n,
+        token0PriceE8: CEREMONY_PRICE_E8,
+        token1PriceE8: CEREMONY_PRICE_E8,
+        seconds: 10 * hour,
+      },
+      {
+        reserve0: 550n,
+        reserve1: 450n,
+        token0PriceE8: CEREMONY_PRICE_E8,
+        token1PriceE8: balancerToken1PriceAfterSwap,
+        seconds: 2 * hour,
+      },
+    ]);
+    const postBalancerGrowth = ceremonyFungibleGrowthX128([
+      {
+        reserve0: 550n,
+        reserve1: 450n,
+        token0PriceE8: CEREMONY_PRICE_E8,
+        token1PriceE8: balancerToken1PriceAfterSwap,
+        seconds: 12 * hour,
+      },
+    ]);
+    const primaryPreLP =
+      ceremonyGrowthToPoints(CEREMONY_V2_LIQUIDITY, preV2Growth) +
+      ceremonyGrowthToPoints(CEREMONY_V2_LIQUIDITY, preBalancerGrowth);
+    const primaryPostLP =
+      ceremonyGrowthToPoints(CEREMONY_V2_LIQUIDITY, postV2Growth) +
+      ceremonyGrowthToPoints(CEREMONY_V2_LIQUIDITY, postBalancerGrowth);
+    const expectedPrimaryLP = primaryPreLP + primaryPostLP;
+    const expectedPrimaryLPWithMultiplier =
+      primaryPreLP + applyCeremonyMultiplier(primaryPostLP, 15_000n);
+    const expectedSecondaryLP =
+      ceremonyGrowthToPoints(CEREMONY_V2_LIQUIDITY / 2n, preV2Growth + postV2Growth) +
+      ceremonyGrowthToPoints(CEREMONY_V2_LIQUIDITY / 2n, preBalancerGrowth + postBalancerGrowth);
+    const halfDayDeposit = 500n * CEREMONY_POINTS_SCALE;
+    const halfDayVP = CEREMONY_POINTS_SCALE / 2n;
+    const expectedDeposit = 2n * halfDayDeposit;
+    const expectedDepositWithMultiplier =
+      halfDayDeposit + applyCeremonyMultiplier(halfDayDeposit, 15_000n);
+    const expectedVP = 2n * halfDayVP;
+    const expectedVPWithMultiplier = halfDayVP + applyCeremonyMultiplier(halfDayVP, 15_000n);
+
+    assert.equal(statsAtMultiplierBoundary.lpPoints, primaryPreLP);
+    assert.equal(statsAtMultiplierBoundary.lpPointsWithMultiplier, primaryPreLP);
+    assert.equal(statsAtMultiplierBoundary.depositPoints, halfDayDeposit);
+    assert.equal(statsAtMultiplierBoundary.depositPointsWithMultiplier, halfDayDeposit);
+    assert.equal(statsAtMultiplierBoundary.dailyVPPoints, halfDayVP);
+    assert.equal(statsAtMultiplierBoundary.vpPointsWithMultiplier, halfDayVP);
+
+    const primaryStats = mockDb.entities.UserEpochStats.get(
+      `${ADDRESSES.user}:${epochNumber.toString()}`
+    );
+    const secondaryStats = mockDb.entities.UserEpochStats.get(
+      `${ADDRESSES.userTwo}:${epochNumber.toString()}`
+    );
+    assert.ok(primaryStats);
+    assert.ok(secondaryStats);
+    assert.equal(primaryStats.lpPoints, expectedPrimaryLP);
+    assert.equal(primaryStats.lpPointsWithMultiplier, expectedPrimaryLPWithMultiplier);
+    assert.equal(primaryStats.depositPoints, expectedDeposit);
+    assert.equal(primaryStats.depositPointsWithMultiplier, expectedDepositWithMultiplier);
+    assert.equal(primaryStats.dailyVPPoints, expectedVP);
+    assert.equal(primaryStats.vpPointsWithMultiplier, expectedVPWithMultiplier);
+    assert.equal(primaryStats.totalPoints, expectedPrimaryLP + expectedDeposit + expectedVP);
+    assert.equal(
+      primaryStats.totalPointsWithMultiplier,
+      expectedPrimaryLPWithMultiplier + expectedDepositWithMultiplier + expectedVPWithMultiplier
+    );
+    assert.equal(primaryStats.lpMultiplierBps, 15_000n);
+    assert.equal(primaryStats.depositMultiplierBps, 15_000n);
+    assert.equal(primaryStats.vpMultiplierBps, 15_000n);
+    assert.equal(secondaryStats.lpPoints, expectedSecondaryLP);
+    assert.equal(secondaryStats.lpPointsWithMultiplier, expectedSecondaryLP);
+    assert.equal(secondaryStats.totalPoints, expectedSecondaryLP);
+    assert.equal(secondaryStats.totalPointsWithMultiplier, expectedSecondaryLP);
+
+    assert.equal(
+      mockDb.entities.LPPoolEpochGrowth.get(`${ADDRESSES.ceremonyV2Pool}:${epochNumber.toString()}`)
+        ?.scalarGrowthX128,
+      preV2Growth + postV2Growth
+    );
+    assert.equal(
+      mockDb.entities.LPPoolEpochGrowth.get(
+        `${BALANCER_AUTORANGE_V3_POOL_ADDRESS}:${epochNumber.toString()}`
+      )?.scalarGrowthX128,
+      preBalancerGrowth + postBalancerGrowth
+    );
+
+    const rawGapRows = mockDb.entities.LeaderboardKeeperUserSettled.getAll().filter(
+      (row: EntityRow) => row.epochNumber === epochNumber && row.isGap
+    );
+    const primaryRawRows = rawGapRows.filter((row: EntityRow) => row.user_id === ADDRESSES.user);
+    const secondaryRawRows = rawGapRows.filter(
+      (row: EntityRow) => row.user_id === ADDRESSES.userTwo
+    );
+    assert.equal(primaryRawRows.length, 2);
+    assert.equal(secondaryRawRows.length, 1);
+    assert.deepEqual(
+      primaryRawRows.map((row: EntityRow) => [row.timestamp, row.txHash]),
+      [
+        [firstGapTime, firstGap.transaction.hash],
+        [duplicateGapTime, duplicateGap.transaction.hash],
+      ]
+    );
+    assert.deepEqual(
+      secondaryRawRows.map((row: EntityRow) => [row.timestamp, row.txHash]),
+      [[secondUserGapTime, secondUserGap.transaction.hash]]
+    );
+    const finalizations = mockDb.entities.UserEpochFinalization.getAll().filter(
+      (row: EntityRow) => row.epochNumber === epochNumber
+    );
+    assert.equal(finalizations.length, 2);
+    assert.deepEqual(firstCertificate, {
+      id: primaryFinalizationId,
+      user_id: ADDRESSES.user,
+      epochNumber,
+      epochEndTime: endTime,
+      settledThrough: endTime,
+      finalizedAt: firstGapTime,
+      blockNumber: BigInt(firstGap.block.number),
+      txHash: firstGap.transaction.hash,
+      settlementEventId: `${firstGap.transaction.hash}-${firstGap.logIndex}`,
+    });
+
+    const nextStart = TestHelpers.EpochManager.EpochStart.createMockEvent({
+      epochNumber: nextEpochNumber,
+      startTime: BigInt(nextStartTime),
+      ...eventData(baseBlock + 12, nextStartTime, ADDRESSES.epochManager),
+    });
+    mockDb = await TestHelpers.EpochManager.EpochStart.processEvent({
+      event: nextStart,
+      mockDb,
+    });
+    for (const [offset, user] of [ADDRESSES.user, ADDRESSES.userTwo].entries()) {
+      const nextTideSettle = TestHelpers.LeaderboardKeeper.UserSettled.createMockEvent({
+        user,
+        timestamp: BigInt(nextStartTime),
+        ...eventData(baseBlock + 13 + offset, nextStartTime, ADDRESSES.leaderboardKeeper),
+      });
+      mockDb = await TestHelpers.LeaderboardKeeper.UserSettled.processEvent({
+        event: nextTideSettle,
+        mockDb,
+      });
+      const nextStats = mockDb.entities.UserEpochStats.get(`${user}:${nextEpochNumber.toString()}`);
+      assert.ok(nextStats);
+      assert.deepEqual(
+        [
+          nextStats.depositPoints,
+          nextStats.borrowPoints,
+          nextStats.lpPoints,
+          nextStats.dailyVPPoints,
+          nextStats.totalPoints,
+          nextStats.totalPointsWithMultiplier,
+        ],
+        [0n, 0n, 0n, 0n, 0n, 0n],
+        `${user} next-Tide stats have zero contamination`
+      );
+    }
+
+    return {
+      primary: {
+        lpPoints: primaryStats.lpPoints,
+        lpPointsWithMultiplier: primaryStats.lpPointsWithMultiplier,
+        depositPoints: primaryStats.depositPoints,
+        depositPointsWithMultiplier: primaryStats.depositPointsWithMultiplier,
+        vpPoints: primaryStats.dailyVPPoints,
+        vpPointsWithMultiplier: primaryStats.vpPointsWithMultiplier,
+        totalPoints: primaryStats.totalPoints,
+        totalPointsWithMultiplier: primaryStats.totalPointsWithMultiplier,
+      },
+      secondary: {
+        lpPoints: secondaryStats.lpPoints,
+        lpPointsWithMultiplier: secondaryStats.lpPointsWithMultiplier,
+        totalPoints: secondaryStats.totalPoints,
+        totalPointsWithMultiplier: secondaryStats.totalPointsWithMultiplier,
+      },
+      finalizationCount: finalizations.length,
+      primaryRawCount: primaryRawRows.length,
+      secondaryRawCount: secondaryRawRows.length,
+    };
+  }
+
+  try {
+    const withoutRedundantSwap = await runCeremony(false);
+    const withRedundantSwap = await runCeremony(true);
+    assert.deepEqual(
+      withRedundantSwap,
+      withoutRedundantSwap,
+      'redundant same-state V3 swap cannot repartition ceremony points or proofs'
+    );
+  } finally {
+    if (previousFinalOnlyFloor === undefined) {
+      delete process.env.ENVIO_KEEPER_FINAL_ONLY_FROM_EPOCH;
+    } else {
+      process.env.ENVIO_KEEPER_FINAL_ONLY_FROM_EPOCH = previousFinalOnlyFloor;
+    }
+  }
 });

@@ -1,14 +1,16 @@
 /**
  * Tokenization Event Handlers
- * AToken, VariableDebtToken, StableDebtToken
+ * AToken, VariableDebtToken
  */
 
+import { AToken, VariableDebtToken } from '../../generated';
 import { rayDiv, rayMul, toDecimal } from '../helpers/math';
 import {
   isGatewayAddress,
   KNOWN_GATEWAYS,
   ZERO_ADDRESS,
   getTokenMetadata,
+  deriveReserveSymbolFromAToken,
   normalizeAddress,
 } from '../helpers/constants';
 import {
@@ -28,7 +30,6 @@ import {
 import { updateReserveUsdValues } from '../helpers/protocolAggregation';
 import { createDefaultReserve, getHistoryEntityId } from '../helpers/entityHelpers';
 
-import { AToken, StableDebtToken, VariableDebtToken } from '../../generated';
 import type { handlerContext } from '../../generated';
 
 async function getOrCreateUserReserveForAllowance(
@@ -51,18 +52,12 @@ async function getOrCreateUserReserveForAllowance(
       reserve_id: normalizedReserveId,
       scaledATokenBalance: 0n,
       currentATokenBalance: 0n,
-      scaledVariableDebt: 0n,
-      currentVariableDebt: 0n,
-      principalStableDebt: 0n,
-      currentStableDebt: 0n,
-      currentTotalDebt: 0n,
-      stableBorrowRate: 0n,
-      oldStableBorrowRate: 0n,
+      scaledDebt: 0n,
+      currentDebt: 0n,
       liquidityRate: 0n,
       variableBorrowIndex: 0n,
       usageAsCollateralEnabledOnUser: false,
       lastUpdateTimestamp: timestamp,
-      stableBorrowLastUpdateTimestamp: 0,
     };
     await addReserveToUserList(context, normalizedUser, normalizedReserveId, timestamp);
     context.UserReserve.set(userReserve);
@@ -120,18 +115,12 @@ AToken.Mint.handler(async ({ event, context }) => {
         reserve_id: reserveId,
         scaledATokenBalance: 0n,
         currentATokenBalance: 0n,
-        scaledVariableDebt: 0n,
-        currentVariableDebt: 0n,
-        principalStableDebt: 0n,
-        currentStableDebt: 0n,
-        currentTotalDebt: 0n,
-        stableBorrowRate: 0n,
-        oldStableBorrowRate: 0n,
+        scaledDebt: 0n,
+        currentDebt: 0n,
         liquidityRate: 0n,
         variableBorrowIndex: 0n,
         usageAsCollateralEnabledOnUser: false,
         lastUpdateTimestamp: Number(event.block.timestamp),
-        stableBorrowLastUpdateTimestamp: 0,
       };
       await addReserveToUserList(context, userAddress, reserveId, Number(event.block.timestamp));
     }
@@ -477,18 +466,12 @@ AToken.BalanceTransfer.handler(async ({ event, context }) => {
       reserve_id: reserveId,
       scaledATokenBalance: 0n,
       currentATokenBalance: 0n,
-      scaledVariableDebt: 0n,
-      currentVariableDebt: 0n,
-      principalStableDebt: 0n,
-      currentStableDebt: 0n,
-      currentTotalDebt: 0n,
-      stableBorrowRate: 0n,
-      oldStableBorrowRate: 0n,
+      scaledDebt: 0n,
+      currentDebt: 0n,
       liquidityRate: 0n,
       variableBorrowIndex: 0n,
       usageAsCollateralEnabledOnUser: false,
       lastUpdateTimestamp: timestamp,
-      stableBorrowLastUpdateTimestamp: 0,
     };
     await addReserveToUserList(context, fromAddress, reserveId, timestamp);
   }
@@ -504,18 +487,12 @@ AToken.BalanceTransfer.handler(async ({ event, context }) => {
       reserve_id: reserveId,
       scaledATokenBalance: 0n,
       currentATokenBalance: 0n,
-      scaledVariableDebt: 0n,
-      currentVariableDebt: 0n,
-      principalStableDebt: 0n,
-      currentStableDebt: 0n,
-      currentTotalDebt: 0n,
-      stableBorrowRate: 0n,
-      oldStableBorrowRate: 0n,
+      scaledDebt: 0n,
+      currentDebt: 0n,
       liquidityRate: 0n,
       variableBorrowIndex: 0n,
       usageAsCollateralEnabledOnUser: false,
       lastUpdateTimestamp: timestamp,
-      stableBorrowLastUpdateTimestamp: 0,
     };
     await addReserveToUserList(context, toAddress, reserveId, timestamp);
   }
@@ -692,52 +669,45 @@ AToken.Initialized.handler(async ({ event, context }) => {
 
   if (reserve) {
     const tokenInfo = getTokenMetadata(underlyingAsset);
-    const isKnownToken = tokenInfo !== null;
 
-    let symbol = '';
-    let name = '';
-    let decimals = Number(event.params.aTokenDecimals);
-
-    /* c8 ignore start */
-    if (isKnownToken) {
-      symbol = tokenInfo.symbol;
-      name = tokenInfo.name;
-      decimals = tokenInfo.decimals;
-    } else {
-      /* c8 ignore end */
-      if (!symbol && !name) {
-        // Extract symbol from aToken symbol by stripping "n" prefix
-        const aTokenSymbol = event.params.aTokenSymbol;
-        if (aTokenSymbol.length > 1 && aTokenSymbol.charAt(0) === 'n') {
-          symbol = aTokenSymbol.substring(1);
-        } else {
-          symbol = aTokenSymbol;
-        }
-
-        // Extract name from aToken name by stripping prefix
-        const aTokenName = event.params.aTokenName;
-        const prefix = 'Neverland Interest Bearing ';
-        if (aTokenName.startsWith(prefix)) {
-          name = aTokenName.substring(prefix.length);
-        } else {
-          name = aTokenName;
-        }
-      }
-    }
-
-    if (!name && symbol) {
-      name = symbol;
-    }
-
-    if (!symbol && name) {
-      symbol = name;
-    }
+    // KNOWN_TOKENS is authoritative and is taken whole -- symbol, name AND decimals. A
+    // curated entry is a deliberate statement about the asset (canonical display casing
+    // the aToken metadata uppercases away: `loAZND`, `XAUt0`, `shMON`), so on-chain
+    // discovery must not silently overwrite it. Correcting a listed reserve means editing
+    // the table, not letting an event win.
+    //
+    // Only an asset MISSING from the table is derived from the event. That is the case
+    // that matters: PoolConfigurator.ReserveInitialized carries no metadata at all, so
+    // config.ts can only seed 'ERC20'/'Token ERC20'/18 placeholders for it, and leaving
+    // an unlisted 6-decimal asset at 18 is how XAUt0 was mispriced in TVL and LP value.
+    // `aTokenName` is just `${prefix} ${symbol}`, so name and symbol coincide there.
+    const derived = deriveReserveSymbolFromAToken(
+      event.params.aTokenName,
+      event.params.aTokenSymbol
+    );
+    const { symbol, name, decimals } = tokenInfo ?? {
+      symbol: derived,
+      name: derived,
+      decimals: Number(event.params.aTokenDecimals),
+    };
 
     context.Reserve.set({
       ...reserve,
       symbol,
       name,
       decimals,
+    });
+
+    // Correct the TokenInfo row config.ts seeded from ReserveInitialized, which had no
+    // decimals available. TokenInfo.decimals is read by LP valuation (lpEntityHelpers,
+    // lp.ts), so a stale 18 here silently misprices the asset everywhere.
+    context.TokenInfo.set({
+      id: underlyingAsset,
+      address: underlyingAsset,
+      decimals,
+      symbol,
+      name,
+      lastUpdate: Number(event.block.timestamp),
     });
   }
 });
@@ -782,30 +752,6 @@ VariableDebtToken.PriceObserved.handler(async ({ event, context }) => {
   );
 });
 
-StableDebtToken.PriceObserved.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const params = event.params as typeof event.params & {
-    baseUnit: bigint;
-    ok: boolean;
-  };
-  await recordPriceObserved(
-    context,
-    params.asset,
-    params.price,
-    params.baseUnit,
-    params.oracle,
-    params.ok,
-    Number(event.block.timestamp),
-    Number(event.block.number),
-    Number(event.logIndex)
-  );
-});
-
 // ============================================
 // VariableDebtToken Handlers
 // ============================================
@@ -840,18 +786,12 @@ VariableDebtToken.Mint.handler(async ({ event, context }) => {
       reserve_id: reserveId,
       scaledATokenBalance: 0n,
       currentATokenBalance: 0n,
-      scaledVariableDebt: 0n,
-      currentVariableDebt: 0n,
-      principalStableDebt: 0n,
-      currentStableDebt: 0n,
-      currentTotalDebt: 0n,
-      stableBorrowRate: 0n,
-      oldStableBorrowRate: 0n,
+      scaledDebt: 0n,
+      currentDebt: 0n,
       liquidityRate: 0n,
       variableBorrowIndex: 0n,
       usageAsCollateralEnabledOnUser: false,
       lastUpdateTimestamp: Number(event.block.timestamp),
-      stableBorrowLastUpdateTimestamp: 0,
     };
     await addReserveToUserList(context, userAddress, reserveId, Number(event.block.timestamp));
   }
@@ -869,31 +809,30 @@ VariableDebtToken.Mint.handler(async ({ event, context }) => {
   const userBalanceChange = event.params.value - event.params.balanceIncrease;
   const calculatedAmount = rayDiv(userBalanceChange, event.params.index);
 
-  const newScaledDebt = userReserve.scaledVariableDebt + calculatedAmount;
+  const newScaledDebt = userReserve.scaledDebt + calculatedAmount;
   const newCurrentDebt = rayMul(newScaledDebt, event.params.index);
 
   context.UserReserve.set({
     ...userReserve,
-    scaledVariableDebt: newScaledDebt,
-    currentVariableDebt: newCurrentDebt,
-    currentTotalDebt: userReserve.currentStableDebt + newCurrentDebt,
+    scaledDebt: newScaledDebt,
+    currentDebt: newCurrentDebt,
     liquidityRate: reserve?.liquidityRate || 0n,
     variableBorrowIndex: reserve?.variableBorrowIndex || event.params.index,
     lastUpdateTimestamp: Number(event.block.timestamp),
   });
 
   if (reserve) {
-    const newReserveScaledDebt = reserve.totalScaledVariableDebt + calculatedAmount;
+    const newReserveScaledDebt = reserve.totalScaledDebt + calculatedAmount;
     const newReserveCurrentDebt = rayMul(newReserveScaledDebt, event.params.index);
-    const newLifetimeScaledDebt = reserve.lifetimeScaledVariableDebt + calculatedAmount;
+    const newLifetimeScaledDebt = reserve.lifetimeScaledDebt + calculatedAmount;
     const newLifetimeCurrentDebt = rayMul(newLifetimeScaledDebt, event.params.index);
 
     context.Reserve.set({
       ...reserve,
-      totalScaledVariableDebt: newReserveScaledDebt,
-      totalCurrentVariableDebt: newReserveCurrentDebt,
-      lifetimeScaledVariableDebt: newLifetimeScaledDebt,
-      lifetimeCurrentVariableDebt: newLifetimeCurrentDebt,
+      totalScaledDebt: newReserveScaledDebt,
+      totalCurrentDebt: newReserveCurrentDebt,
+      lifetimeScaledDebt: newLifetimeScaledDebt,
+      lifetimeCurrentDebt: newLifetimeCurrentDebt,
       lifetimeBorrows: reserve.lifetimeBorrows + userBalanceChange,
       availableLiquidity: reserve.availableLiquidity - userBalanceChange,
     });
@@ -916,7 +855,7 @@ VariableDebtToken.Mint.handler(async ({ event, context }) => {
   }
 
   const user = await context.User.get(userAddress);
-  if (user && userReserve.scaledVariableDebt === 0n && userReserve.principalStableDebt === 0n) {
+  if (user && userReserve.scaledDebt === 0n) {
     context.User.set({
       ...user,
       borrowedReservesCount: user.borrowedReservesCount + 1,
@@ -927,8 +866,8 @@ VariableDebtToken.Mint.handler(async ({ event, context }) => {
   context.VTokenBalanceHistoryItem.set({
     id: historyId,
     userReserve_id: userReserveId,
-    scaledVariableDebt: newScaledDebt,
-    currentVariableDebt: newCurrentDebt,
+    scaledDebt: newScaledDebt,
+    currentDebt: newCurrentDebt,
     timestamp: Number(event.block.timestamp),
     index: event.params.index,
   });
@@ -990,27 +929,26 @@ VariableDebtToken.Burn.handler(async ({ event, context }) => {
   const userBalanceChange = event.params.value + event.params.balanceIncrease;
   const calculatedAmount = rayDiv(userBalanceChange, event.params.index);
 
-  const newScaledDebt = userReserve.scaledVariableDebt - calculatedAmount;
+  const newScaledDebt = userReserve.scaledDebt - calculatedAmount;
   const newCurrentDebt = rayMul(newScaledDebt, event.params.index);
 
   context.UserReserve.set({
     ...userReserve,
-    scaledVariableDebt: newScaledDebt,
-    currentVariableDebt: newCurrentDebt,
-    currentTotalDebt: userReserve.currentStableDebt + newCurrentDebt,
+    scaledDebt: newScaledDebt,
+    currentDebt: newCurrentDebt,
     liquidityRate: reserve?.liquidityRate || userReserve.liquidityRate,
     variableBorrowIndex: reserve?.variableBorrowIndex || event.params.index,
     lastUpdateTimestamp: Number(event.block.timestamp),
   });
 
   if (reserve) {
-    const newReserveScaledDebt = reserve.totalScaledVariableDebt - calculatedAmount;
+    const newReserveScaledDebt = reserve.totalScaledDebt - calculatedAmount;
     const newReserveCurrentDebt = rayMul(newReserveScaledDebt, event.params.index);
 
     context.Reserve.set({
       ...reserve,
-      totalScaledVariableDebt: newReserveScaledDebt,
-      totalCurrentVariableDebt: newReserveCurrentDebt,
+      totalScaledDebt: newReserveScaledDebt,
+      totalCurrentDebt: newReserveCurrentDebt,
       lifetimeRepayments: reserve.lifetimeRepayments + userBalanceChange,
       availableLiquidity: reserve.availableLiquidity + userBalanceChange,
     });
@@ -1036,8 +974,8 @@ VariableDebtToken.Burn.handler(async ({ event, context }) => {
   context.VTokenBalanceHistoryItem.set({
     id: historyId,
     userReserve_id: userReserveId,
-    scaledVariableDebt: newScaledDebt,
-    currentVariableDebt: newCurrentDebt,
+    scaledDebt: newScaledDebt,
+    currentDebt: newCurrentDebt,
     timestamp: Number(event.block.timestamp),
     index: event.params.index,
   });
@@ -1050,7 +988,7 @@ VariableDebtToken.Burn.handler(async ({ event, context }) => {
     BigInt(event.block.number)
   );
 
-  if (newScaledDebt === 0n && userReserve.principalStableDebt === 0n) {
+  if (newScaledDebt === 0n) {
     const user = await context.User.get(userAddress);
     if (user && user.borrowedReservesCount > 0) {
       context.User.set({
@@ -1075,282 +1013,13 @@ VariableDebtToken.Burn.handler(async ({ event, context }) => {
   );
 });
 // ============================================
-// StableDebtToken Handlers
 // ============================================
-
-StableDebtToken.Mint.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-
-  const tokenAddress = normalizeAddress(event.srcAddress);
-  const subToken = await context.SubToken.get(tokenAddress);
-  if (!subToken) return;
-
-  const underlyingAsset = subToken.underlyingAssetAddress;
-  const poolId = subToken.pool_id;
-  const reserveId = `${underlyingAsset}-${poolId}`;
-  const userAddress = normalizeAddress(event.params.onBehalfOf);
-  const userReserveId = `${userAddress}-${reserveId}`;
-
-  await getOrCreateUser(context, userAddress);
-
-  let userReserve = await context.UserReserve.get(userReserveId);
-  if (!userReserve) {
-    userReserve = {
-      id: userReserveId,
-      pool_id: poolId,
-      user_id: userAddress,
-      reserve_id: reserveId,
-      scaledATokenBalance: 0n,
-      currentATokenBalance: 0n,
-      scaledVariableDebt: 0n,
-      currentVariableDebt: 0n,
-      principalStableDebt: 0n,
-      currentStableDebt: 0n,
-      currentTotalDebt: 0n,
-      stableBorrowRate: 0n,
-      oldStableBorrowRate: 0n,
-      liquidityRate: 0n,
-      variableBorrowIndex: 0n,
-      usageAsCollateralEnabledOnUser: false,
-      lastUpdateTimestamp: Number(event.block.timestamp),
-      stableBorrowLastUpdateTimestamp: 0,
-    };
-    await addReserveToUserList(context, userAddress, reserveId, Number(event.block.timestamp));
-  }
-
-  await settlePointsForUser(
-    context,
-    userAddress,
-    reserveId,
-    Number(event.block.timestamp),
-    BigInt(event.block.number),
-    { ignoreCooldown: true }
-  );
-
-  const reserve = await context.Reserve.get(reserveId);
-
-  // Subgraph: borrowedAmount = amount - balanceIncrease (actual new principal)
-  const borrowedAmount = event.params.amount - event.params.balanceIncrease;
-  const balanceChangeIncludingInterest = event.params.amount;
-  const newPrincipalDebt = userReserve.principalStableDebt + balanceChangeIncludingInterest;
-
-  context.UserReserve.set({
-    ...userReserve,
-    principalStableDebt: newPrincipalDebt,
-    currentStableDebt: newPrincipalDebt,
-    currentTotalDebt: userReserve.currentVariableDebt + newPrincipalDebt,
-    oldStableBorrowRate: userReserve.stableBorrowRate,
-    stableBorrowRate: event.params.newRate,
-    liquidityRate: reserve?.liquidityRate || 0n,
-    variableBorrowIndex: reserve?.variableBorrowIndex || 0n,
-    stableBorrowLastUpdateTimestamp: Number(event.block.timestamp),
-    lastUpdateTimestamp: Number(event.block.timestamp),
-  });
-
-  if (reserve) {
-    context.Reserve.set({
-      ...reserve,
-      totalPrincipalStableDebt: event.params.newTotalSupply,
-      averageStableRate: event.params.avgStableRate,
-      stableDebtLastUpdateTimestamp: Number(event.block.timestamp),
-      lifetimePrincipalStableDebt:
-        reserve.lifetimePrincipalStableDebt + balanceChangeIncludingInterest,
-      lifetimeBorrows: reserve.lifetimeBorrows + borrowedAmount,
-      availableLiquidity: reserve.availableLiquidity - borrowedAmount,
-      totalLiquidity: reserve.totalLiquidity + event.params.balanceIncrease,
-    });
-
-    // Update USD aggregates
-    await updateReserveUsdValues(
-      context,
-      reserveId,
-      underlyingAsset,
-      Number(event.block.timestamp)
-    );
-
-    await recordReserveParamsHistory(
-      context,
-      reserveId,
-      Number(event.block.timestamp),
-      event.transaction.hash,
-      Number(event.logIndex)
-    );
-  }
-
-  const user = await context.User.get(userAddress);
-  if (user && userReserve.scaledVariableDebt === 0n && userReserve.principalStableDebt === 0n) {
-    context.User.set({
-      ...user,
-      borrowedReservesCount: user.borrowedReservesCount + 1,
-    });
-  }
-
-  const historyId = `${event.transaction.hash}-${event.logIndex}`;
-  context.STokenBalanceHistoryItem.set({
-    id: historyId,
-    userReserve_id: userReserveId,
-    principalStableDebt: newPrincipalDebt,
-    currentStableDebt: newPrincipalDebt,
-    timestamp: Number(event.block.timestamp),
-    avgStableBorrowRate: event.params.avgStableRate,
-  });
-});
-
-StableDebtToken.Burn.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-
-  const tokenAddress = normalizeAddress(event.srcAddress);
-  const subToken = await context.SubToken.get(tokenAddress);
-  if (!subToken) return;
-
-  const underlyingAsset = subToken.underlyingAssetAddress;
-  const poolId = subToken.pool_id;
-  const reserveId = `${underlyingAsset}-${poolId}`;
-  const userAddress = normalizeAddress(event.params.from);
-  const userReserveId = `${userAddress}-${reserveId}`;
-
-  let userReserve = await context.UserReserve.get(userReserveId);
-  if (!userReserve) return;
-
-  const reserve = await context.Reserve.get(reserveId);
-
-  // Subgraph uses amount directly for stable debt
-  const amount = event.params.amount;
-  const balanceIncrease = event.params.balanceIncrease;
-  const newPrincipalDebt = userReserve.principalStableDebt - amount;
-
-  context.UserReserve.set({
-    ...userReserve,
-    principalStableDebt: newPrincipalDebt,
-    currentStableDebt: newPrincipalDebt,
-    currentTotalDebt: userReserve.currentVariableDebt + newPrincipalDebt,
-    liquidityRate: reserve?.liquidityRate || userReserve.liquidityRate,
-    variableBorrowIndex: reserve?.variableBorrowIndex || userReserve.variableBorrowIndex,
-    stableBorrowLastUpdateTimestamp: Number(event.block.timestamp),
-    lastUpdateTimestamp: Number(event.block.timestamp),
-  });
-
-  if (userReserve.scaledVariableDebt === 0n && newPrincipalDebt === 0n) {
-    const user = await context.User.get(userAddress);
-    if (user && user.borrowedReservesCount > 0) {
-      context.User.set({
-        ...user,
-        borrowedReservesCount: user.borrowedReservesCount - 1,
-      });
-    }
-  }
-
-  if (reserve) {
-    // Subgraph: availableLiquidity increases by amount + balanceIncrease
-    const totalRepaid = amount + balanceIncrease;
-
-    context.Reserve.set({
-      ...reserve,
-      totalPrincipalStableDebt: event.params.newTotalSupply,
-      availableLiquidity: reserve.availableLiquidity + totalRepaid,
-      totalLiquidity: reserve.totalLiquidity + balanceIncrease,
-      totalATokenSupply: reserve.totalATokenSupply + balanceIncrease,
-      lifetimeRepayments: reserve.lifetimeRepayments + amount,
-      averageStableRate: event.params.avgStableRate,
-      stableDebtLastUpdateTimestamp: Number(event.block.timestamp),
-    });
-
-    // Update USD aggregates
-    await updateReserveUsdValues(
-      context,
-      reserveId,
-      underlyingAsset,
-      Number(event.block.timestamp)
-    );
-
-    await recordReserveParamsHistory(
-      context,
-      reserveId,
-      Number(event.block.timestamp),
-      event.transaction.hash,
-      Number(event.logIndex)
-    );
-  }
-
-  await settlePointsForUser(
-    context,
-    userAddress,
-    reserveId,
-    Number(event.block.timestamp),
-    BigInt(event.block.number),
-    { ignoreCooldown: true }
-  );
-
-  const historyId = `${event.transaction.hash}-${event.logIndex}`;
-  context.STokenBalanceHistoryItem.set({
-    id: historyId,
-    userReserve_id: userReserveId,
-    principalStableDebt: newPrincipalDebt,
-    currentStableDebt: newPrincipalDebt,
-    timestamp: Number(event.block.timestamp),
-    avgStableBorrowRate: event.params.avgStableRate,
-  });
-
-  await awardDailyRepayPoints(
-    context,
-    userAddress,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-});
-
-StableDebtToken.BorrowAllowanceDelegated.handler(async ({ event, context }) => {
-  const fromUser = normalizeAddress(event.params.fromUser);
-  const toUser = normalizeAddress(event.params.toUser);
-  const asset = normalizeAddress(event.params.asset);
-  const id = `${fromUser}-${toUser}-${asset}-stable`;
-
-  await getOrCreateUser(context, fromUser);
-
-  context.BorrowAllowance.set({
-    id,
-    fromUser,
-    toUser,
-    asset,
-    amount: event.params.amount,
-    lastUpdate: Number(event.block.timestamp),
-  });
-
-  const subToken = await context.SubToken.get(normalizeAddress(event.srcAddress));
-  if (!subToken) return;
-  const reserveId = `${subToken.underlyingAssetAddress}-${subToken.pool_id}`;
-  const userReserveId = await getOrCreateUserReserveForAllowance(
-    context,
-    fromUser,
-    reserveId,
-    subToken.pool_id,
-    Number(event.block.timestamp)
-  );
-  const delegatedId = `stable${fromUser}${toUser}${asset}`;
-  context.StableTokenDelegatedAllowance.set({
-    id: delegatedId,
-    fromUser_id: fromUser,
-    toUser_id: toUser,
-    amountAllowed: event.params.amount,
-    userReserve_id: userReserveId,
-  });
-});
 
 VariableDebtToken.BorrowAllowanceDelegated.handler(async ({ event, context }) => {
   const fromUser = normalizeAddress(event.params.fromUser);
   const toUser = normalizeAddress(event.params.toUser);
   const asset = normalizeAddress(event.params.asset);
-  const id = `${fromUser}-${toUser}-${asset}-variable`;
+  const id = `${fromUser}-${toUser}-${asset}`;
 
   await getOrCreateUser(context, fromUser);
 
@@ -1373,41 +1042,14 @@ VariableDebtToken.BorrowAllowanceDelegated.handler(async ({ event, context }) =>
     subToken.pool_id,
     Number(event.block.timestamp)
   );
-  const delegatedId = `variable${fromUser}${toUser}${asset}`;
-  context.VariableTokenDelegatedAllowance.set({
+  const delegatedId = `${fromUser}${toUser}${asset}`;
+  context.DelegatedAllowance.set({
     id: delegatedId,
     fromUser_id: fromUser,
     toUser_id: toUser,
     amountAllowed: event.params.amount,
     userReserve_id: userReserveId,
   });
-});
-
-StableDebtToken.Initialized.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const tokenId = normalizeAddress(event.srcAddress);
-  const subToken = await context.SubToken.get(tokenId);
-  if (subToken) {
-    context.SubToken.set({
-      ...subToken,
-      underlyingAssetAddress: normalizeAddress(event.params.underlyingAsset),
-      underlyingAssetDecimals: Number(event.params.debtTokenDecimals),
-    });
-  }
-
-  const mapping = await context.ContractToPoolMapping.get(normalizeAddress(event.params.pool));
-  if (mapping) {
-    context.MapAssetPool.set({
-      id: tokenId,
-      pool: mapping.pool_id,
-      underlyingAsset: normalizeAddress(event.params.underlyingAsset),
-    });
-  }
 });
 
 VariableDebtToken.Initialized.handler(async ({ event, context }) => {
@@ -1445,6 +1087,10 @@ async function recordReserveParamsHistory(
   logIndex: number
 ): Promise<void> {
   const reserve = await context.Reserve.get(reserveId);
+  // Defensive only: all eight call sites are already inside an `if (reserve)` block, so this
+  // never fires today. Kept so the helper stays safe if it is ever called from an unguarded
+  // path, and excluded from coverage because no test can reach it without dead-code callers.
+  /* c8 ignore next */
   if (!reserve) return;
 
   const id = getHistoryEntityId(txHash, logIndex);
@@ -1454,8 +1100,6 @@ async function recordReserveParamsHistory(
     variableBorrowRate: reserve.variableBorrowRate,
     variableBorrowIndex: reserve.variableBorrowIndex,
     utilizationRate: reserve.utilizationRate,
-    stableBorrowRate: reserve.stableBorrowRate,
-    averageStableBorrowRate: reserve.averageStableRate,
     liquidityIndex: reserve.liquidityIndex,
     liquidityRate: reserve.liquidityRate,
     totalLiquidity: reserve.totalLiquidity,
@@ -1466,12 +1110,10 @@ async function recordReserveParamsHistory(
     priceInUsd: reserve.priceInUsd,
     timestamp,
     accruedToTreasury: reserve.accruedToTreasury,
-    totalScaledVariableDebt: reserve.totalScaledVariableDebt,
-    totalCurrentVariableDebt: reserve.totalCurrentVariableDebt,
-    totalPrincipalStableDebt: reserve.totalPrincipalStableDebt,
-    lifetimePrincipalStableDebt: reserve.lifetimePrincipalStableDebt,
-    lifetimeScaledVariableDebt: reserve.lifetimeScaledVariableDebt,
-    lifetimeCurrentVariableDebt: reserve.lifetimeCurrentVariableDebt,
+    totalScaledDebt: reserve.totalScaledDebt,
+    totalCurrentDebt: reserve.totalCurrentDebt,
+    lifetimeScaledDebt: reserve.lifetimeScaledDebt,
+    lifetimeCurrentDebt: reserve.lifetimeCurrentDebt,
     lifetimeLiquidity: reserve.lifetimeLiquidity,
     lifetimeRepayments: reserve.lifetimeRepayments,
     lifetimeWithdrawals: reserve.lifetimeWithdrawals,

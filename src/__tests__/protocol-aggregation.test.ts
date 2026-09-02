@@ -250,8 +250,7 @@ test('aggregation helpers return early when data is missing', async () => {
         totalLiquidity: 0n,
         availableLiquidity: 0n,
         totalATokenSupply: 0n,
-        totalCurrentVariableDebt: 0n,
-        totalPrincipalStableDebt: 0n,
+        totalCurrentDebt: 0n,
         lifetimeSuppliersInterestEarned: 0n,
         lifetimeReserveFactorAccrued: 0n,
       }),
@@ -425,7 +424,7 @@ test('an OTC return supplied onBehalfOf the treasury is a deposit, not revenue',
   // Returning OTC funds is supply(onBehalfOf = treasury) sent by someone else,
   // so the aTokens land on the treasury while the caller is the supplier. That
   // is real liquidity being returned to the protocol, NOT premium being
-  // recognised - recipient-based detection would have swallowed it as revenue
+  // recognized - recipient-based detection would have swallowed it as revenue
   // and lost the treasury's position.
   const otcReturn = TestHelpers.AToken.Mint.createMockEvent({
     caller: ADDRESSES.user,
@@ -475,7 +474,7 @@ test('a deposit made BY the treasury address is a deposit, not revenue', async (
 
   // Same recipient, but the treasury supplied it itself, so the caller is the
   // treasury rather than the Pool. This is an ordinary deposit and must be
-  // booked as one - liquidity moves, no revenue is recognised.
+  // booked as one - liquidity moves, no revenue is recognized.
   const deposit = TestHelpers.AToken.Mint.createMockEvent({
     caller: treasury,
     onBehalfOf: treasury,

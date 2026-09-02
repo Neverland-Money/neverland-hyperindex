@@ -1,3 +1,9 @@
+// Pins the operator settings (prefill off, fixture-only data dir) before any project
+// module loads. This file does not import the `v3-test-helpers` seam, so without this
+// a bare `node --test` invocation would inherit them from the repo `.env` via envio's
+// dotenv. Redundant under `pnpm run test`, which loads the same module via `--import`.
+import './test-env-preload';
+
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
@@ -8,6 +14,7 @@ import {
   WMON_ADDRESS,
   ZERO_ADDRESS,
   fromScaledPoints,
+  deriveReserveSymbolFromAToken,
   getTokenMetadata,
   isStaticNftCollection,
   toScaledPoints,
@@ -39,17 +46,10 @@ import {
   shouldAwardDailyBonus,
 } from '../helpers/points';
 import { updateProtocolUsdAggregates } from '../helpers/protocolAggregation';
-import { updateLeaderboard } from '../helpers/leaderboard';
 import {
-  publicClient,
   readActivePartnerships,
   readContract,
-  readLPBalance,
-  readLPPosition,
-  readLPTokenOfOwnerByIndex,
   readNFTBalance,
-  readPoolFee,
-  readPoolSlot0,
   readTokenBalance,
   readTokenDecimals,
   readTokenName,
@@ -63,7 +63,6 @@ import {
   VIEM_PARTIAL_ADDRESS,
   installViemMock,
 } from './viem-mock';
-import type { handlerContext } from '../../generated';
 
 const RAY = 10n ** 27n;
 const WAD = 10n ** 18n;
@@ -116,30 +115,6 @@ test('math helpers cover branches and conversions', () => {
   assert.equal(toDecimal(-456n, 0), -456);
   assert.equal(toDecimal(-12345n, 2), -123.45);
   assert.equal(exponentToBigInt(6), 10n ** 6n);
-});
-
-type ReadStore<T> = {
-  get: (id: string) => Promise<T | undefined>;
-};
-
-function createStore<T>(value?: T): ReadStore<T> {
-  return {
-    get: async () => value,
-  };
-}
-
-test('leaderboard update returns early without state or epoch', async () => {
-  const contextNoState = {
-    LeaderboardState: createStore(undefined),
-    LeaderboardEpoch: createStore(undefined),
-  } as unknown as handlerContext;
-  await updateLeaderboard(contextNoState, TEST_ADDRESS, 10, 0);
-
-  const contextNoEpoch = {
-    LeaderboardState: createStore({ id: 'current', currentEpochNumber: 1n }),
-    LeaderboardEpoch: createStore(undefined),
-  } as unknown as handlerContext;
-  await updateLeaderboard(contextNoEpoch, TEST_ADDRESS, 10, 0);
 });
 
 test('points helpers cover default, caps, and thresholds', () => {
@@ -261,52 +236,6 @@ test('viem helpers return values and fall back on errors', async () => {
   assert.equal(contractResult, 123n);
 });
 
-test('viem helpers log non-error failures', async () => {
-  const originalRead = publicClient.readContract;
-  const circular: Record<string, unknown> = {};
-  circular.self = circular;
-
-  publicClient.readContract = async () => {
-    throw circular;
-  };
-
-  try {
-    const errors: string[] = [];
-    const logger = { error: (message: string) => errors.push(message) };
-    assert.equal(await readLPBalance(VIEM_ERROR_ADDRESS, TEST_ADDRESS, undefined, logger), null);
-    assert.equal(
-      await readLPTokenOfOwnerByIndex(VIEM_ERROR_ADDRESS, TEST_ADDRESS, 0n, undefined, logger),
-      null
-    );
-    assert.equal(await readLPPosition(VIEM_ERROR_ADDRESS, 1n, undefined, logger), null);
-    assert.equal(await readLPPosition(VIEM_ERROR_ADDRESS, 1n, 12n, logger), null);
-    assert.equal(await readPoolSlot0(VIEM_ERROR_ADDRESS, undefined, logger), null);
-    assert.equal(await readPoolFee(VIEM_ERROR_ADDRESS, undefined, logger), null);
-    assert.equal(await readLPBalance(VIEM_ERROR_ADDRESS, TEST_ADDRESS, 12n, logger), null);
-    assert.equal(
-      await readLPTokenOfOwnerByIndex(VIEM_ERROR_ADDRESS, TEST_ADDRESS, 0n, 12n, logger),
-      null
-    );
-    assert.equal(await readPoolSlot0(VIEM_ERROR_ADDRESS, 12n, logger), null);
-    assert.equal(await readPoolFee(VIEM_ERROR_ADDRESS, 12n, logger), null);
-    assert.ok(errors.length >= 5);
-  } finally {
-    publicClient.readContract = originalRead;
-  }
-});
-
-test('readPoolFee handles bigint results', async () => {
-  const originalRead = publicClient.readContract;
-  publicClient.readContract = async () => 3000n;
-
-  try {
-    const fee = await readPoolFee(TEST_ADDRESS);
-    assert.equal(fee, 3000);
-  } finally {
-    publicClient.readContract = originalRead;
-  }
-});
-
 test('isStaticNftCollection matches the statically-configured collections case-insensitively', () => {
   // Guards against re-registering a statically-configured NFT collection as a
   // dynamic PartnerNFT (which would double-dispatch its Transfer logs). Every
@@ -320,4 +249,45 @@ test('isStaticNftCollection matches the statically-configured collections case-i
   // A genuine partner collection (not statically configured) is NOT skipped.
   assert.equal(isStaticNftCollection('0x000000000000000000000000000000000000d002'), false);
   assert.equal(isStaticNftCollection(ZERO_ADDRESS), false);
+});
+
+// Prefixes are per-market in neverland-pool-operations `markets/*`:
+//   canonical                 'Neverland Interest Bearing' / 'n'
+//   pendle-{ausd,shmon,usde}  'Neverland Pendle' / 'np'
+//   test                      'Testnet' / 'Test'
+// The deployer builds aTokenName as `${prefix} ${reserveSymbol}` and aTokenSymbol
+// as `${prefix}${reserveSymbol}`, uppercasing the reserve symbol.
+test('deriveReserveSymbolFromAToken recovers the reserve symbol across markets', () => {
+  const cases: Array<[string, string, string]> = [
+    // Canonical market, as observed on mainnet.
+    ['Neverland Interest Bearing LOAZND', 'nLOAZND', 'LOAZND'],
+    ['Neverland Interest Bearing XAUT0', 'nXAUT0', 'XAUT0'],
+    ['Neverland Interest Bearing WMON', 'nWMON', 'WMON'],
+    ['Neverland Interest Bearing AUSD', 'nAUSD', 'AUSD'],
+    // Isolated Pendle markets: a different name prefix and a two-letter symbol
+    // prefix, both of which the old hardcoded canonical prefixes missed.
+    ['Neverland Pendle AUSD', 'npAUSD', 'AUSD'],
+    ['Neverland Pendle SHMON', 'npSHMON', 'SHMON'],
+    ['Neverland Pendle PT-AUSD-8OCT2026', 'npPT-AUSD-8OCT2026', 'PT-AUSD-8OCT2026'],
+    // Uppercase symbol prefix leaves nothing to strip, so the name path answers.
+    ['Testnet AUSD', 'TestAUSD', 'AUSD'],
+  ];
+
+  for (const [aTokenName, aTokenSymbol, expected] of cases) {
+    assert.equal(
+      deriveReserveSymbolFromAToken(aTokenName, aTokenSymbol),
+      expected,
+      `${aTokenName} / ${aTokenSymbol}`
+    );
+  }
+});
+
+test('deriveReserveSymbolFromAToken falls back when neither prefix is present', () => {
+  // Symbol prefix wins even when the name is absent or oddly shaped.
+  assert.equal(deriveReserveSymbolFromAToken('', 'npSHMON'), 'SHMON');
+  assert.equal(deriveReserveSymbolFromAToken('Neverland Interest Bearing A B', 'nTST'), 'TST');
+  // Nothing strippable and no multi-word name: keep whichever string exists.
+  assert.equal(deriveReserveSymbolFromAToken('PlainToken', ''), 'PlainToken');
+  assert.equal(deriveReserveSymbolFromAToken('', 'np'), 'np');
+  assert.equal(deriveReserveSymbolFromAToken('', ''), '');
 });

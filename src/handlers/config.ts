@@ -1,9 +1,15 @@
 /**
  * Configuration Event Handlers
- * PoolAddressesProviderRegistry, PoolAddressesProvider, PoolConfigurator, UserVaultFactory, UserVault
+ * PoolAddressesProviderRegistry, PoolAddressesProvider, PoolConfigurator, UserVaultFactory
  */
 
-import { recordProtocolTransaction, getOrCreateUser, getOrCreateProtocolStats } from './shared';
+import {
+  PoolAddressesProvider,
+  PoolAddressesProviderRegistry,
+  PoolConfigurator,
+  UserVaultFactory,
+} from '../../generated';
+import { recordProtocolTransaction, getOrCreateUser } from './shared';
 import { adjustPoolReserveCount } from '../helpers/protocolAggregation';
 import { getHistoryEntityId } from '../helpers/entityHelpers';
 import {
@@ -11,18 +17,10 @@ import {
   POOL_CONFIGURATOR_ID,
   POOL_ADMIN_ID,
   EMERGENCY_ADMIN_ID,
-  ZERO_ADDRESS,
   getTokenMetadata,
   normalizeAddress,
 } from '../helpers/constants';
 
-import {
-  PoolAddressesProvider,
-  PoolAddressesProviderRegistry,
-  PoolConfigurator,
-  UserVault,
-  UserVaultFactory,
-} from '../../generated';
 import type { handlerContext } from '../../generated';
 
 function recordReserveConfigurationHistory(
@@ -31,7 +29,6 @@ function recordReserveConfigurationHistory(
     id: string;
     usageAsCollateralEnabled: boolean;
     borrowingEnabled: boolean;
-    stableBorrowRateEnabled: boolean;
     isActive: boolean;
     isFrozen: boolean;
     reserveInterestRateStrategy: string;
@@ -48,7 +45,6 @@ function recordReserveConfigurationHistory(
     reserve_id: reserve.id,
     usageAsCollateralEnabled: reserve.usageAsCollateralEnabled,
     borrowingEnabled: reserve.borrowingEnabled,
-    stableBorrowRateEnabled: reserve.stableBorrowRateEnabled,
     isActive: reserve.isActive,
     isFrozen: reserve.isFrozen,
     reserveInterestRateStrategy: reserve.reserveInterestRateStrategy,
@@ -136,24 +132,6 @@ async function getOrCreatePool(context: handlerContext, providerId: string, time
   }
 
   return pool;
-}
-
-async function tryReadATokenMetadata(
-  aTokenAddress: string,
-  blockNumber?: bigint
-): Promise<{ symbol?: string; name?: string; decimals?: number } | null> {
-  void aTokenAddress;
-  void blockNumber;
-  return null;
-}
-
-async function tryReadUnderlyingMetadata(
-  assetAddress: string,
-  blockNumber?: bigint
-): Promise<{ symbol?: string; name?: string; decimals?: number } | null> {
-  void assetAddress;
-  void blockNumber;
-  return null;
 }
 
 // ============================================
@@ -512,9 +490,6 @@ PoolAddressesProvider.PriceOracleSentinelUpdated.handler(async ({ event, context
 PoolConfigurator.ReserveInitialized.contractRegister(async ({ event, context }) => {
   context.addAToken(normalizeAddress(event.params.aToken));
   context.addVariableDebtToken(normalizeAddress(event.params.variableDebtToken));
-  if (normalizeAddress(event.params.stableDebtToken) !== ZERO_ADDRESS) {
-    context.addStableDebtToken(normalizeAddress(event.params.stableDebtToken));
-  }
 });
 
 PoolConfigurator.ReserveInitialized.handler(async ({ event, context }) => {
@@ -530,44 +505,26 @@ PoolConfigurator.ReserveInitialized.handler(async ({ event, context }) => {
   const asset = normalizeAddress(event.params.asset);
   const reserveId = `${asset}-${actualPoolId}`;
   const tokenInfo = getTokenMetadata(asset);
-  const isKnownToken = tokenInfo !== null;
   const timestamp = Number(event.block.timestamp);
   const tokenAddress = asset;
   const aToken = normalizeAddress(event.params.aToken);
   const vToken = normalizeAddress(event.params.variableDebtToken);
-  const sToken = normalizeAddress(event.params.stableDebtToken);
   const interestRateStrategy = normalizeAddress(event.params.interestRateStrategyAddress);
 
-  let symbol = tokenInfo?.symbol ?? 'ERC20';
-  let name = tokenInfo?.name ?? 'Token ERC20';
-  let decimals = tokenInfo?.decimals ?? 18;
-
-  if (!isKnownToken) {
-    const blockNumber = BigInt(event.block.number);
-    const underlyingMetadata = await tryReadUnderlyingMetadata(asset, blockNumber);
-    if (underlyingMetadata) {
-      if (underlyingMetadata.symbol) symbol = underlyingMetadata.symbol;
-      if (underlyingMetadata.name) name = underlyingMetadata.name;
-      if (underlyingMetadata.decimals !== undefined) decimals = underlyingMetadata.decimals;
-    } else {
-      const aTokenMetadata = await tryReadATokenMetadata(aToken, blockNumber);
-      if (aTokenMetadata) {
-        if (aTokenMetadata.symbol) symbol = aTokenMetadata.symbol;
-        if (aTokenMetadata.name) name = aTokenMetadata.name;
-        if (aTokenMetadata.decimals !== undefined) decimals = aTokenMetadata.decimals;
-      }
-    }
-
-    /* c8 ignore start */
-    if (!name && symbol) {
-      name = symbol;
-    }
-
-    if (!symbol && name) {
-      symbol = name;
-    }
-    /* c8 ignore end */
-  }
+  // KNOWN_TOKENS is authoritative when it has the asset: it carries the curated
+  // display casing and decimals, and nothing on chain should override it.
+  //
+  // Otherwise fall back to whatever is already recorded. ReserveInitialized carries
+  // no metadata at all, so 'ERC20'/'Token ERC20'/18 are pure placeholders -- but
+  // PoolConfigurator.initReserves initializes the aToken proxy BEFORE emitting this
+  // event, so AToken.Initialized has already run and derived the real symbol and
+  // decimals from `aTokenSymbol`/`aTokenName`/`aTokenDecimals`. Writing the
+  // placeholders unconditionally clobbered that, which is how an unlisted 6-decimal
+  // asset ended up valued as 18 decimals in TVL and LP pricing.
+  const previousTokenInfo = await context.TokenInfo.get(tokenAddress);
+  const symbol = tokenInfo?.symbol ?? previousTokenInfo?.symbol ?? 'ERC20';
+  const name = tokenInfo?.name ?? previousTokenInfo?.name ?? 'Token ERC20';
+  const decimals = tokenInfo?.decimals ?? previousTokenInfo?.decimals ?? 18;
 
   context.TokenInfo.set({
     id: tokenAddress,
@@ -587,7 +544,6 @@ PoolConfigurator.ReserveInitialized.handler(async ({ event, context }) => {
     decimals,
     usageAsCollateralEnabled: false,
     borrowingEnabled: false,
-    stableBorrowRateEnabled: false,
     isActive: true,
     isFrozen: false,
     isPaused: false,
@@ -601,26 +557,20 @@ PoolConfigurator.ReserveInitialized.handler(async ({ event, context }) => {
     baseVariableBorrowRate: 0n,
     variableRateSlope1: 0n,
     variableRateSlope2: 0n,
-    stableRateSlope1: 0n,
-    stableRateSlope2: 0n,
     utilizationRate: 0,
     totalLiquidity: 0n,
     availableLiquidity: 0n,
     totalATokenSupply: 0n,
     totalLiquidityAsCollateral: 0n,
     totalSupplies: 0n,
-    totalCurrentVariableDebt: 0n,
-    totalScaledVariableDebt: 0n,
-    totalPrincipalStableDebt: 0n,
+    totalCurrentDebt: 0n,
+    totalScaledDebt: 0n,
     liquidityRate: 0n,
     variableBorrowRate: 0n,
-    stableBorrowRate: 0n,
-    averageStableRate: 0n,
     liquidityIndex: 0n,
     variableBorrowIndex: 0n,
     aToken_id: aToken,
     vToken_id: vToken,
-    sToken_id: sToken,
     lifetimeFlashLoans: 0n,
     lifetimeFlashLoanPremium: 0n,
     lifetimeFlashLoanLPPremium: 0n,
@@ -633,12 +583,10 @@ PoolConfigurator.ReserveInitialized.handler(async ({ event, context }) => {
     lifetimeBorrows: 0n,
     lifetimeRepayments: 0n,
     lifetimeLiquidated: 0n,
-    lifetimeScaledVariableDebt: 0n,
-    lifetimeCurrentVariableDebt: 0n,
-    lifetimePrincipalStableDebt: 0n,
+    lifetimeScaledDebt: 0n,
+    lifetimeCurrentDebt: 0n,
     lifetimeWithdrawals: 0n,
     isDropped: false,
-    stableDebtLastUpdateTimestamp: 0,
     lastUpdateTimestamp: timestamp,
     price: asset,
     priceInUsd: 0,
@@ -689,15 +637,6 @@ PoolConfigurator.ReserveInitialized.handler(async ({ event, context }) => {
     underlyingAssetAddress: asset,
     underlyingAssetDecimals: decimals,
   });
-  if (sToken !== ZERO_ADDRESS) {
-    context.SubToken.set({
-      id: sToken,
-      pool_id: actualPoolId,
-      tokenContractImpl: undefined,
-      underlyingAssetAddress: asset,
-      underlyingAssetDecimals: decimals,
-    });
-  }
 });
 
 PoolConfigurator.ReserveBorrowing.handler(async ({ event, context }) => {
@@ -746,34 +685,6 @@ PoolConfigurator.CollateralConfigurationChanged.handler(async ({ event, context 
       reserveLiquidationThreshold: event.params.liquidationThreshold,
       reserveLiquidationBonus: event.params.liquidationBonus,
       usageAsCollateralEnabled: event.params.ltv > 0n,
-      lastUpdateTimestamp: Number(event.block.timestamp),
-    };
-    context.Reserve.set(updated);
-    recordReserveConfigurationHistory(
-      context,
-      updated,
-      Number(event.block.timestamp),
-      event.transaction.hash,
-      Number(event.logIndex)
-    );
-  }
-});
-
-PoolConfigurator.ReserveStableRateBorrowing.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const poolId = await resolvePoolId(context, event.srcAddress);
-  const asset = normalizeAddress(event.params.asset);
-  const reserveId = `${asset}-${poolId}`;
-  const reserve = await context.Reserve.get(reserveId);
-  if (reserve) {
-    const updated = {
-      ...reserve,
-      stableBorrowRateEnabled: event.params.enabled,
       lastUpdateTimestamp: Number(event.block.timestamp),
     };
     context.Reserve.set(updated);
@@ -1003,22 +914,6 @@ PoolConfigurator.EModeCategoryAdded.handler(async ({ event, context }) => {
 });
 
 PoolConfigurator.ATokenUpgraded.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const subToken = await context.SubToken.get(normalizeAddress(event.params.proxy));
-  if (subToken) {
-    context.SubToken.set({
-      ...subToken,
-      tokenContractImpl: normalizeAddress(event.params.implementation),
-    });
-  }
-});
-
-PoolConfigurator.StableDebtTokenUpgraded.handler(async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -1305,10 +1200,6 @@ PoolConfigurator.BridgeProtocolFeeUpdated.handler(async ({ event, context }) => 
 // UserVaultFactory Handlers
 // ============================================
 
-UserVaultFactory.UserVaultCreated.contractRegister(async ({ event, context }) => {
-  context.addUserVault(normalizeAddress(event.params.vault));
-});
-
 UserVaultFactory.UserVaultCreated.handler(async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
@@ -1351,81 +1242,5 @@ UserVaultFactory.UserVaultCreated.handler(async ({ event, context }) => {
     totalRepayVolume: 0n,
     repayCount: 0n,
     lastRepayAt: 0,
-  });
-});
-
-// ============================================
-// UserVault Handlers
-// ============================================
-
-UserVault.LoanSelfRepaid.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const historyId = `${event.transaction.hash}-${event.logIndex}`;
-  const vaultAddress = normalizeAddress(event.srcAddress);
-  const userAddress = normalizeAddress(event.params.user);
-  const timestamp = Number(event.block.timestamp);
-  // ABI names poolAddressesProvider/debtToken but config uses debtAsset/collateralAsset.
-  const poolAddressesProvider = normalizeAddress(event.params.debtAsset);
-  const debtToken = normalizeAddress(event.params.collateralAsset);
-  const debtTokenMeta = await context.SubToken.get(debtToken);
-  const debtAsset = debtTokenMeta?.underlyingAssetAddress ?? debtToken;
-
-  context.LoanSelfRepayment.set({
-    id: historyId,
-    vault: vaultAddress,
-    user: userAddress,
-    poolAddressesProvider,
-    debtAsset,
-    amount: event.params.amount,
-    timestamp,
-    txHash: event.transaction.hash,
-  });
-
-  let vaultSummary = await context.UserVault.get(vaultAddress);
-  if (!vaultSummary) {
-    vaultSummary = {
-      id: vaultAddress,
-      user: userAddress,
-      createdAt: timestamp,
-      totalRepayVolume: 0n,
-      repayCount: 0n,
-      lastRepayAt: 0,
-    };
-  }
-  context.UserVault.set({
-    ...vaultSummary,
-    totalRepayVolume: vaultSummary.totalRepayVolume + event.params.amount,
-    repayCount: vaultSummary.repayCount + 1n,
-    lastRepayAt: timestamp,
-  });
-
-  const vault = await context.UserVaultEntity.get(vaultAddress);
-  if (vault) {
-    context.UserVaultEntity.set({
-      ...vault,
-      totalSelfRepayVolume: vault.totalSelfRepayVolume + event.params.amount,
-      totalSelfRepayCount: vault.totalSelfRepayCount + 1n,
-      lastUpdate: timestamp,
-    });
-  }
-
-  const user = await context.User.get(userAddress);
-  if (user) {
-    context.User.set({
-      ...user,
-      totalSelfRepaymentsReceived: user.totalSelfRepaymentsReceived + event.params.amount,
-    });
-  }
-
-  const ps = await getOrCreateProtocolStats(context, Number(event.block.timestamp));
-  context.ProtocolStats.set({
-    ...ps,
-    totalSelfRepayVolume: ps.totalSelfRepayVolume + event.params.amount,
-    totalSelfRepayCount: ps.totalSelfRepayCount + 1n,
   });
 });

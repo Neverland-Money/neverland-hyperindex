@@ -1,9 +1,24 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { TestHelpers } from './v3-test-helpers';
+import { TestHelpers, getRegisteredEventHandler, entityStores } from './v3-test-helpers';
 
+import {
+  BALANCER_AUTORANGE_V3_POOL_ADDRESS,
+  BOOTSTRAP_CONFIG,
+  BOOTSTRAP_LP_POOL_CONFIGS,
+  LEADERBOARD_START_BLOCK,
+  LP_BALANCER_AUTORANGE_CUTOVER_BLOCK,
+  LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP,
+  LP_V2_CUTOVER_BLOCK,
+  LP_V2_CUTOVER_TIMESTAMP,
+  LP_V2_RESUME_CUTOVER_BLOCK,
+  LP_V2_RESUME_CUTOVER_TIMESTAMP,
+  USDC_ADDRESS,
+} from '../helpers/constants';
 import { installViemMock } from './viem-mock';
+
+import type { MockDb } from './v3-test-helpers';
 
 process.env.ENVIO_ENABLE_EXTERNAL_CALLS = 'false';
 process.env.ENVIO_ENABLE_ETH_CALLS = 'false';
@@ -19,6 +34,344 @@ const ADDRESSES = {
   token0: '0x000000000000000000000000000000000000c007',
   token1: '0x000000000000000000000000000000000000c008',
 };
+
+const TASK6_TOKEN0 = '0x000000000000000000000000000000000000e001';
+const TASK6_TOKEN1 = '0x000000000000000000000000000000000000e002';
+const TASK6_V2_POOL = '0x86dbf00485871c901c5129bd525348db96c2eb2d';
+const TASK6_LEGACY_POOL = BOOTSTRAP_LP_POOL_CONFIGS[0].pool.toLowerCase();
+const TASK6_BALANCER_POOL = BALANCER_AUTORANGE_V3_POOL_ADDRESS.toLowerCase();
+const TASK6_Q128 = 1n << 128n;
+const TASK6_PRICE_E8 = 100_000_000n;
+const TASK6_POINTS_SCALE = 10n ** 18n;
+
+const TASK6_STATIC_TRANSITIONS = [
+  {
+    id: 'legacy-v3-to-v2',
+    outgoingPool: TASK6_LEGACY_POOL,
+    incomingPool: TASK6_V2_POOL,
+    blockNumber: BigInt(LP_V2_CUTOVER_BLOCK),
+    timestamp: LP_V2_CUTOVER_TIMESTAMP,
+  },
+  {
+    id: 'v2-to-balancer-autorange',
+    outgoingPool: TASK6_V2_POOL,
+    incomingPool: TASK6_BALANCER_POOL,
+    blockNumber: BigInt(LP_BALANCER_AUTORANGE_CUTOVER_BLOCK),
+    timestamp: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP,
+  },
+  {
+    id: 'balancer-to-v2-resume',
+    outgoingPool: TASK6_BALANCER_POOL,
+    incomingPool: TASK6_V2_POOL,
+    blockNumber: BigInt(LP_V2_RESUME_CUTOVER_BLOCK),
+    timestamp: LP_V2_RESUME_CUTOVER_TIMESTAMP,
+  },
+] as const;
+
+function referenceTask6FungibleGrowth(rateBps: bigint, seconds: number): bigint {
+  const poolValueE8 = 2_000n * TASK6_PRICE_E8;
+  const totalSupply = 1_000n * 10n ** 6n;
+  return ((poolValueE8 * TASK6_Q128) / totalSupply) * rateBps * BigInt(seconds);
+}
+
+function referenceTask6FungiblePoints(liquidity: bigint, growthX128: bigint): bigint {
+  return (
+    (liquidity * growthX128 * TASK6_POINTS_SCALE) /
+    (TASK6_Q128 * TASK6_PRICE_E8 * 10_000n * 86_400n)
+  );
+}
+
+function seedTask6FungiblePool(
+  mockDb: MockDb,
+  input: {
+    pool: string;
+    user: string;
+    rateBps: bigint;
+    startTimestamp?: number;
+    active?: boolean;
+    fakePositionCount?: number;
+  }
+): MockDb {
+  const startTimestamp = input.startTimestamp ?? 100;
+  const active = input.active ?? true;
+  const positionId = `v2:${input.pool}:${input.user}`;
+  let next = mockDb;
+  next = next.entities.LeaderboardState.set({
+    id: 'current',
+    currentEpochNumber: 1n,
+    isActive: true,
+  });
+  next = next.entities.LeaderboardEpoch.set({
+    id: '1',
+    epochNumber: 1n,
+    startBlock: 1n,
+    startTime: startTimestamp,
+    endBlock: undefined,
+    endTime: undefined,
+    isActive: true,
+    duration: undefined,
+    scheduledStartTime: startTimestamp,
+    scheduledEndTime: 0,
+  });
+  const registry = next.entities.LPPoolRegistry.get('global');
+  const poolIds = registry?.poolIds.includes(input.pool)
+    ? registry.poolIds
+    : [...(registry?.poolIds ?? []), input.pool];
+  next = next.entities.LPPoolRegistry.set({
+    id: 'global',
+    poolIds,
+    lastUpdate: startTimestamp,
+  });
+  next = next.entities.LPPoolConfig.set({
+    id: input.pool,
+    pool: input.pool,
+    positionManager: input.pool,
+    token0: TASK6_TOKEN0,
+    token1: TASK6_TOKEN1,
+    fee: 3000,
+    lpRateBps: input.rateBps,
+    isActive: active,
+    enabledAtEpoch: 1n,
+    enabledAtTimestamp: startTimestamp,
+    disabledAtEpoch: active ? undefined : 1n,
+    disabledAtTimestamp: active ? undefined : startTimestamp,
+    lastUpdate: startTimestamp,
+  });
+  for (const token of [TASK6_TOKEN0, TASK6_TOKEN1]) {
+    next = next.entities.TokenInfo.set({
+      id: token,
+      address: token,
+      decimals: 6,
+      symbol: 'LP',
+      name: 'LP token',
+      lastUpdate: startTimestamp,
+    });
+  }
+  next = next.entities.LPPoolState.set({
+    id: input.pool,
+    pool: input.pool,
+    currentTick: 0,
+    sqrtPriceX96: 0n,
+    token0Price: TASK6_PRICE_E8,
+    token1Price: TASK6_PRICE_E8,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
+    lastUpdate: startTimestamp,
+  });
+  next = next.entities.LPPoolV2State.set({
+    id: input.pool,
+    pool: input.pool,
+    reserve0: 1_000n * 10n ** 6n,
+    reserve1: 1_000n * 10n ** 6n,
+    lpTotalSupply: 1_000n * 10n ** 6n,
+    lastUpdate: startTimestamp,
+  });
+  next = next.entities.LPPoolEpochGrowth.set({
+    id: `${input.pool}:1`,
+    pool: input.pool,
+    epochNumber: 1n,
+    startTimestamp,
+    lastTimestamp: startTimestamp,
+    scalarGrowthX128: 0n,
+    isFrozen: false,
+    frozenAt: undefined,
+    lastUpdate: startTimestamp,
+  });
+  next = next.entities.UserLPPosition.set({
+    id: positionId,
+    tokenId: BigInt(input.user),
+    user_id: input.user,
+    pool: input.pool,
+    positionManager: input.pool,
+    tickLower: -887272,
+    tickUpper: 887272,
+    liquidity: 100n * 10n ** 6n,
+    amount0: 100n * 10n ** 6n,
+    amount1: 100n * 10n ** 6n,
+    isInRange: true,
+    valueUsd: 200n * TASK6_PRICE_E8,
+    lastInRangeTimestamp: startTimestamp,
+    accumulatedInRangeSeconds: 0n,
+    lastSettledAt: startTimestamp,
+    settledLpPoints: 0n,
+    createdAt: startTimestamp,
+    lastUpdate: startTimestamp,
+  });
+  next = next.entities.UserLPPositionIndex.set({
+    id: input.user,
+    user_id: input.user,
+    positionIds: [positionId],
+    lastUpdate: startTimestamp,
+  });
+  const fakeIds = Array.from(
+    { length: input.fakePositionCount ?? 0 },
+    (_, index) => `fake:${input.pool}:${index}`
+  );
+  next = next.entities.LPPoolPositionIndex.set({
+    id: input.pool,
+    pool: input.pool,
+    positionIds: [positionId, ...fakeIds],
+    lastUpdate: startTimestamp,
+  });
+  return next;
+}
+
+function seedTask6RetiredLegacyConfig(mockDb: MockDb, timestamp: number): MockDb {
+  const legacy = BOOTSTRAP_LP_POOL_CONFIGS[0];
+  const registry = mockDb.entities.LPPoolRegistry.get('global');
+  let next = mockDb.entities.LPPoolRegistry.set({
+    id: 'global',
+    poolIds: registry?.poolIds.includes(TASK6_LEGACY_POOL)
+      ? registry.poolIds
+      : [TASK6_LEGACY_POOL, ...(registry?.poolIds ?? [])],
+    lastUpdate: timestamp,
+  });
+  next = next.entities.LPPoolConfig.set({
+    id: TASK6_LEGACY_POOL,
+    pool: TASK6_LEGACY_POOL,
+    positionManager: legacy.positionManager.toLowerCase(),
+    token0: legacy.token0.toLowerCase(),
+    token1: legacy.token1.toLowerCase(),
+    fee: legacy.fee,
+    lpRateBps: legacy.lpRateBps,
+    isActive: false,
+    enabledAtEpoch: 1n,
+    enabledAtTimestamp: LP_V2_CUTOVER_TIMESTAMP - 1_000,
+    disabledAtEpoch: 1n,
+    disabledAtTimestamp: LP_V2_CUTOVER_TIMESTAMP,
+    lastUpdate: timestamp,
+  });
+  return next;
+}
+
+function seedTask6RetiredBalancerConfig(mockDb: MockDb, timestamp: number): MockDb {
+  const pool = BALANCER_AUTORANGE_V3_POOL_ADDRESS.toLowerCase();
+  const registry = mockDb.entities.LPPoolRegistry.get('global');
+  let next = mockDb.entities.LPPoolRegistry.set({
+    id: 'global',
+    poolIds: registry?.poolIds.includes(pool)
+      ? registry.poolIds
+      : [...(registry?.poolIds ?? []), pool],
+    lastUpdate: timestamp,
+  });
+  next = next.entities.LPPoolConfig.set({
+    id: pool,
+    pool,
+    positionManager: pool,
+    token0: TASK6_TOKEN0,
+    token1: TASK6_TOKEN1,
+    fee: 10_000,
+    lpRateBps: 2_000n,
+    isActive: false,
+    enabledAtEpoch: 1n,
+    enabledAtTimestamp: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP,
+    disabledAtEpoch: 1n,
+    disabledAtTimestamp: LP_V2_RESUME_CUTOVER_TIMESTAMP,
+    lastUpdate: timestamp,
+  });
+  return next;
+}
+
+function seedTask6PausedV2Config(mockDb: MockDb, timestamp: number): MockDb {
+  const registry = mockDb.entities.LPPoolRegistry.get('global');
+  let next = mockDb.entities.LPPoolRegistry.set({
+    id: 'global',
+    poolIds: registry?.poolIds.includes(TASK6_V2_POOL)
+      ? registry.poolIds
+      : [...(registry?.poolIds ?? []), TASK6_V2_POOL],
+    lastUpdate: timestamp,
+  });
+  next = next.entities.LPPoolConfig.set({
+    id: TASK6_V2_POOL,
+    pool: TASK6_V2_POOL,
+    positionManager: TASK6_V2_POOL,
+    token0: TASK6_TOKEN0,
+    token1: TASK6_TOKEN1,
+    fee: 3_000,
+    lpRateBps: 2_000n,
+    isActive: false,
+    enabledAtEpoch: 1n,
+    enabledAtTimestamp: LP_V2_CUTOVER_TIMESTAMP,
+    disabledAtEpoch: 1n,
+    disabledAtTimestamp: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP,
+    lastUpdate: timestamp,
+  });
+  return next;
+}
+
+function createTask6InstrumentedContext(mockDb: MockDb, isPreload: boolean) {
+  const rows = new Map(
+    Array.from(entityStores(mockDb), ([entityName, storeRows]) => [entityName, new Map(storeRows)])
+  );
+  const getCounts = new Map<string, number>();
+  const setCounts = new Map<string, number>();
+  const operations: string[] = [];
+  const stores = new Map<
+    string,
+    {
+      get: (id: string) => Promise<unknown>;
+      getWhere: () => Promise<unknown[]>;
+      set: (row: { id: string }) => void;
+      deleteUnsafe: (id: string) => void;
+    }
+  >();
+  const storeFor = (entityName: string) => ({
+    async get(id: string) {
+      getCounts.set(entityName, (getCounts.get(entityName) ?? 0) + 1);
+      return rows.get(entityName)?.get(id);
+    },
+    async getWhere() {
+      getCounts.set(entityName, (getCounts.get(entityName) ?? 0) + 1);
+      return Array.from(rows.get(entityName)?.values() ?? []);
+    },
+    set(row: { id: string }) {
+      setCounts.set(entityName, (setCounts.get(entityName) ?? 0) + 1);
+      operations.push(`set:${entityName}:${row.id}`);
+      if (isPreload) return;
+      let entityRows = rows.get(entityName);
+      if (!entityRows) {
+        entityRows = new Map();
+        rows.set(entityName, entityRows);
+      }
+      entityRows.set(row.id, row);
+    },
+    deleteUnsafe(id: string) {
+      if (!isPreload) rows.get(entityName)?.delete(id);
+    },
+  });
+  const context = new Proxy({ isPreload, log: { debug() {} } } as Record<string, unknown>, {
+    get(target, property: string) {
+      if (property in target) return target[property];
+      let store = stores.get(property);
+      if (!store) {
+        store = storeFor(property);
+        stores.set(property, store);
+      }
+      return store;
+    },
+  });
+  return { context, rows, getCounts, setCounts, operations };
+}
+
+function countRecord(counts: Map<string, number>): Record<string, number> {
+  return Object.fromEntries(
+    [...counts.entries()].sort(([left], [right]) => left.localeCompare(right))
+  );
+}
+
+async function runTask6RegisteredHandler(
+  contractName: string,
+  eventName: string,
+  event: Parameters<Awaited<ReturnType<typeof getRegisteredEventHandler>>>[0]['event'],
+  mockDb: MockDb
+) {
+  const handler = await getRegisteredEventHandler(contractName, eventName);
+  const preload = createTask6InstrumentedContext(mockDb, true);
+  await handler({ event, context: preload.context });
+  const ordered = createTask6InstrumentedContext(mockDb, false);
+  await handler({ event, context: ordered.context });
+  return { preload, ordered };
+}
 
 function loadTestHelpers() {
   return TestHelpers;
@@ -38,6 +391,46 @@ function createEventDataFactory() {
     return { mockEventData };
   };
 }
+
+test('a first config event initializes from the bootstrap rates when bootstrap is enabled', async () => {
+  // This file pins bootstrap OFF at module load; the initializer's bootstrap arm reads the
+  // switch at call time, so flip it for exactly this case.
+  const previous = process.env.ENVIO_DISABLE_BOOTSTRAP;
+  process.env.ENVIO_DISABLE_BOOTSTRAP = 'false';
+  try {
+    const TestHelpers = loadTestHelpers();
+    const eventData = createEventDataFactory();
+    const depositRate = TestHelpers.LeaderboardConfig.DepositRateUpdated.createMockEvent({
+      oldRate: 0n,
+      newRate: 500n,
+      timestamp: 210n,
+      ...eventData(3, 210, ADDRESSES.config),
+    });
+    const mockDb = await TestHelpers.LeaderboardConfig.DepositRateUpdated.processEvent({
+      event: depositRate,
+      mockDb: TestHelpers.MockDb.createMockDb(),
+    });
+
+    const config = mockDb.entities.LeaderboardConfig.get('global');
+    assert.ok(config);
+    // The event's own field is applied over the bootstrap image; every other field is the
+    // bootstrap value rather than the zero a disabled bootstrap would leave.
+    assert.equal(config?.depositRateBps, 500n);
+    assert.equal(config?.borrowRateBps, BOOTSTRAP_CONFIG.borrowRateBps);
+    assert.equal(config?.vpRateBps, BOOTSTRAP_CONFIG.vpRateBps);
+    assert.equal(config?.lpRateBps, BOOTSTRAP_CONFIG.lpRateBps);
+    assert.equal(config?.supplyDailyBonus, BOOTSTRAP_CONFIG.supplyDailyBonus);
+    assert.equal(config?.borrowDailyBonus, BOOTSTRAP_CONFIG.borrowDailyBonus);
+    assert.equal(config?.repayDailyBonus, BOOTSTRAP_CONFIG.repayDailyBonus);
+    assert.equal(config?.withdrawDailyBonus, BOOTSTRAP_CONFIG.withdrawDailyBonus);
+    assert.equal(config?.cooldownSeconds, BOOTSTRAP_CONFIG.cooldownSeconds);
+    assert.equal(config?.minDailyBonusUsd, BOOTSTRAP_CONFIG.minDailyBonusUsd);
+    assert.equal(config?.lastUpdate, 210);
+  } finally {
+    if (previous === undefined) delete process.env.ENVIO_DISABLE_BOOTSTRAP;
+    else process.env.ENVIO_DISABLE_BOOTSTRAP = previous;
+  }
+});
 
 test('epochs and config updates apply leaderboard changes', async () => {
   const TestHelpers = loadTestHelpers();
@@ -269,6 +662,129 @@ test('epoch end initializes missing epoch state', async () => {
   assert.equal(epoch?.epochNumber, 5n);
 });
 
+test('Tide end freezes growth with position-count-invariant growth work, sweeping holders once', async () => {
+  const poolA = '0x000000000000000000000000000000000000e020';
+  const poolB = '0x000000000000000000000000000000000000e021';
+
+  const run = async (positionCount: number) => {
+    let mockDb = TestHelpers.MockDb.createMockDb();
+    mockDb = seedTask6FungiblePool(mockDb, {
+      pool: poolA,
+      user: ADDRESSES.user,
+      rateBps: 2000n,
+      fakePositionCount: positionCount - 1,
+    });
+    mockDb = seedTask6FungiblePool(mockDb, {
+      pool: poolB,
+      user: ADDRESSES.userTwo,
+      rateBps: 2000n,
+    });
+    mockDb = mockDb.entities.LeaderboardEpoch.set({
+      ...mockDb.entities.LeaderboardEpoch.get('1')!,
+      scheduledEndTime: 200,
+    });
+    mockDb = mockDb.entities.LeaderboardConfig.set({
+      id: 'global',
+      depositRateBps: 0n,
+      borrowRateBps: 0n,
+      vpRateBps: 0n,
+      lpRateBps: 777n,
+      supplyDailyBonus: 0,
+      borrowDailyBonus: 0,
+      repayDailyBonus: 0,
+      withdrawDailyBonus: 0,
+      cooldownSeconds: 0,
+      minDailyBonusUsd: 0,
+      lastUpdate: 100,
+    });
+    mockDb = mockDb.entities.LPPoolConfig.set({
+      ...mockDb.entities.LPPoolConfig.get(poolB)!,
+      token0: USDC_ADDRESS,
+      token1: TASK6_TOKEN1,
+    });
+    mockDb = mockDb.entities.TokenInfo.set({
+      id: USDC_ADDRESS,
+      address: USDC_ADDRESS,
+      decimals: 6,
+      symbol: 'USDC',
+      name: 'USDC',
+      lastUpdate: 100,
+    });
+    mockDb = mockDb.entities.LPPoolState.set({
+      ...mockDb.entities.LPPoolState.get(poolB)!,
+      currentTick: 0,
+      sqrtPriceX96: 1n << 96n,
+    });
+    const eventData = createEventDataFactory();
+    const event = TestHelpers.LeaderboardConfig.DepositRateUpdated.createMockEvent({
+      oldRate: 0n,
+      newRate: 1n,
+      timestamp: 200n,
+      ...eventData(30, 200, ADDRESSES.config),
+    });
+    return await runTask6RegisteredHandler(
+      'LeaderboardConfig',
+      'DepositRateUpdated',
+      event,
+      mockDb
+    );
+  };
+
+  const one = await run(1);
+  const tenThousand = await run(10_000);
+
+  // The Tide boundary now sweeps LP holders once so a holder no event ever touched still
+  // scores (FINDING 003). That sweep resolves each indexed position id, so UserLPPosition
+  // reads scale with position count BY DESIGN - once per Tide (~29.5 days), never per
+  // market event. Everything else must stay position-count invariant; market-event
+  // handlers remain strictly invariant and are pinned separately.
+  const withoutSweptPositions = (counts: Map<string, number>) => {
+    const filtered = new Map(counts);
+    filtered.delete('UserLPPosition');
+    return countRecord(filtered);
+  };
+  assert.deepEqual(
+    withoutSweptPositions(tenThousand.preload.getCounts),
+    withoutSweptPositions(one.preload.getCounts)
+  );
+  assert.deepEqual(
+    withoutSweptPositions(tenThousand.ordered.getCounts),
+    withoutSweptPositions(one.ordered.getCounts)
+  );
+  assert.deepEqual(
+    withoutSweptPositions(tenThousand.preload.setCounts),
+    withoutSweptPositions(one.preload.setCounts)
+  );
+  assert.deepEqual(
+    withoutSweptPositions(tenThousand.ordered.setCounts),
+    withoutSweptPositions(one.ordered.setCounts)
+  );
+  assert.ok(
+    (tenThousand.ordered.getCounts.get('UserLPPosition') ?? 0) >
+      (one.ordered.getCounts.get('UserLPPosition') ?? 0),
+    'the Tide-close sweep must resolve every indexed position'
+  );
+
+  const orderedRows = tenThousand.ordered.rows;
+  for (const pool of [poolA, poolB]) {
+    const growth = orderedRows.get('LPPoolEpochGrowth')?.get(`${pool}:1`) as
+      | { frozenAt?: number; lastTimestamp: number; isFrozen: boolean }
+      | undefined;
+    assert.equal(growth?.lastTimestamp, 200);
+    assert.equal(growth?.frozenAt, 200);
+    assert.equal(growth?.isFrozen, true);
+  }
+  assert.equal(
+    (orderedRows.get('LeaderboardState')?.get('current') as { isActive: boolean } | undefined)
+      ?.isActive,
+    false
+  );
+  // Tide close now settles every LP holder (FINDING 003), so both seeded holders must have
+  // epoch stats written. Previously this asserted zero, which is exactly the behavior that
+  // left never-touched LP-only holders unscored in closed Tides.
+  assert.equal(orderedRows.get('UserEpochStats')?.size ?? 0, 2);
+});
+
 test('lp pool config handlers register pools and rates', async () => {
   const previousExternal = process.env.ENVIO_ENABLE_EXTERNAL_CALLS;
   const prevEnableEth = process.env.ENVIO_ENABLE_ETH_CALLS;
@@ -304,6 +820,21 @@ test('lp pool config handlers register pools and rates', async () => {
     const manager = '0x000000000000000000000000000000000000c011';
     const token0 = '0x000000000000000000000000000000000000c012';
     const token1 = '0x000000000000000000000000000000000000c013';
+    const globalConfigBefore = {
+      id: 'global',
+      depositRateBps: 1n,
+      borrowRateBps: 2n,
+      vpRateBps: 3n,
+      lpRateBps: 777n,
+      supplyDailyBonus: 4,
+      borrowDailyBonus: 5,
+      repayDailyBonus: 6,
+      withdrawDailyBonus: 7,
+      cooldownSeconds: 8,
+      minDailyBonusUsd: 9,
+      lastUpdate: 99,
+    } as const;
+    mockDb = mockDb.entities.LeaderboardConfig.set(globalConfigBefore);
 
     const configured = TestHelpers.LeaderboardConfig.LPPoolConfigured.createMockEvent({
       pool,
@@ -419,11 +950,11 @@ test('lp pool config handlers register pools and rates', async () => {
     });
 
     const settledPosition = mockDb.entities.UserLPPosition.get('1');
-    assert.equal(settledPosition?.lastSettledAt, 210);
-    assert.equal(settledPosition?.settledLpPoints, 254_629_629_629_629n);
+    assert.equal(settledPosition?.lastSettledAt, 100);
+    assert.equal(settledPosition?.settledLpPoints, 0n);
     assert.equal(mockDb.entities.LPPoolConfig.get(pool.toLowerCase())?.lpRateBps, 1500n);
     assert.equal(mockDb.entities.LPPoolConfig.get(unrelatedPool)?.lpRateBps, 900n);
-    assert.equal(mockDb.entities.LeaderboardConfig.get('global')?.lpRateBps, 2000n);
+    assert.deepEqual(mockDb.entities.LeaderboardConfig.get('global'), globalConfigBefore);
     const unrelatedPosition = mockDb.entities.UserLPPosition.get('2');
     assert.equal(unrelatedPosition?.lastSettledAt, 101);
     assert.equal(unrelatedPosition?.accumulatedInRangeSeconds, 7n);
@@ -478,6 +1009,472 @@ test('lp pool config contract register supports v2 pools', async () => {
   assert.ok(poolConfig);
   assert.equal(poolConfig?.pool, v2Pool);
   assert.equal(poolConfig?.positionManager, v2Pool);
+  assert.equal(poolConfig?.isActive, true);
+});
+
+test('registered LPPoolConfigured keeps the known V2 pool inactive before its era', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+  const timestamp = LP_V2_CUTOVER_TIMESTAMP - 100;
+
+  const configured = TestHelpers.LeaderboardConfig.LPPoolConfigured.createMockEvent({
+    pool: TASK6_V2_POOL,
+    positionManager: TASK6_V2_POOL,
+    token0: TASK6_TOKEN0,
+    token1: TASK6_TOKEN1,
+    lpRateBps: 2000n,
+    timestamp: BigInt(timestamp),
+    ...eventData(LP_V2_CUTOVER_BLOCK - 1, timestamp, ADDRESSES.config),
+  });
+  mockDb = await TestHelpers.LeaderboardConfig.LPPoolConfigured.processEvent({
+    event: configured,
+    mockDb,
+  });
+
+  const poolConfig = mockDb.entities.LPPoolConfig.get(TASK6_V2_POOL);
+  assert.equal(poolConfig?.isActive, false);
+  assert.equal(poolConfig?.enabledAtTimestamp, LP_V2_CUTOVER_TIMESTAMP);
+  assert.equal(poolConfig?.disabledAtTimestamp, undefined);
+});
+
+test('registered LPPoolConfigured keeps the known Balancer pool inactive before its era', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+  const timestamp = LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP - 100;
+
+  const configured = TestHelpers.LeaderboardConfig.LPPoolConfigured.createMockEvent({
+    pool: BALANCER_AUTORANGE_V3_POOL_ADDRESS,
+    positionManager: BALANCER_AUTORANGE_V3_POOL_ADDRESS,
+    token0: TASK6_TOKEN0,
+    token1: TASK6_TOKEN1,
+    lpRateBps: 2000n,
+    timestamp: BigInt(timestamp),
+    ...eventData(LP_BALANCER_AUTORANGE_CUTOVER_BLOCK - 1, timestamp, ADDRESSES.config),
+  });
+  mockDb = await TestHelpers.LeaderboardConfig.LPPoolConfigured.processEvent({
+    event: configured,
+    mockDb,
+  });
+
+  const poolConfig = mockDb.entities.LPPoolConfig.get(BALANCER_AUTORANGE_V3_POOL_ADDRESS);
+  assert.equal(poolConfig?.isActive, false);
+  assert.equal(poolConfig?.enabledAtTimestamp, LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP);
+  assert.equal(poolConfig?.disabledAtTimestamp, undefined);
+});
+
+test('registered LPPoolConfigured follows every static era and preserves arbitrary pools', async () => {
+  const cases = [
+    {
+      name: 'legacy active era',
+      pool: TASK6_LEGACY_POOL,
+      timestamp: LP_V2_CUTOVER_TIMESTAMP - 1,
+      block: LP_V2_CUTOVER_BLOCK - 1,
+      active: true,
+      enabledAt: LP_V2_CUTOVER_TIMESTAMP - 1,
+      disabledAt: undefined,
+    },
+    {
+      name: 'legacy retired era',
+      pool: TASK6_LEGACY_POOL,
+      timestamp: LP_V2_CUTOVER_TIMESTAMP,
+      block: LP_V2_CUTOVER_BLOCK,
+      active: false,
+      enabledAt: LP_V2_CUTOVER_TIMESTAMP,
+      disabledAt: LP_V2_CUTOVER_TIMESTAMP,
+    },
+    {
+      name: 'V2 original era',
+      pool: TASK6_V2_POOL,
+      timestamp: LP_V2_CUTOVER_TIMESTAMP,
+      block: LP_V2_CUTOVER_BLOCK,
+      active: true,
+      enabledAt: LP_V2_CUTOVER_TIMESTAMP,
+      disabledAt: undefined,
+    },
+    {
+      name: 'V2 pause',
+      pool: TASK6_V2_POOL,
+      timestamp: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP + 1,
+      block: LP_BALANCER_AUTORANGE_CUTOVER_BLOCK + 1,
+      active: false,
+      enabledAt: LP_V2_CUTOVER_TIMESTAMP,
+      disabledAt: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP,
+    },
+    {
+      name: 'Balancer era',
+      pool: BALANCER_AUTORANGE_V3_POOL_ADDRESS,
+      timestamp: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP,
+      block: LP_BALANCER_AUTORANGE_CUTOVER_BLOCK,
+      active: true,
+      enabledAt: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP,
+      disabledAt: undefined,
+    },
+    {
+      name: 'Balancer after resume',
+      pool: BALANCER_AUTORANGE_V3_POOL_ADDRESS,
+      timestamp: LP_V2_RESUME_CUTOVER_TIMESTAMP + 1,
+      block: LP_V2_RESUME_CUTOVER_BLOCK + 1,
+      active: false,
+      enabledAt: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP,
+      disabledAt: LP_V2_RESUME_CUTOVER_TIMESTAMP,
+    },
+    {
+      name: 'V2 resumed era',
+      pool: TASK6_V2_POOL,
+      timestamp: LP_V2_RESUME_CUTOVER_TIMESTAMP,
+      block: LP_V2_RESUME_CUTOVER_BLOCK,
+      active: true,
+      enabledAt: LP_V2_RESUME_CUTOVER_TIMESTAMP,
+      disabledAt: undefined,
+    },
+    {
+      name: 'arbitrary dynamic pool',
+      pool: '0x000000000000000000000000000000000000e099',
+      timestamp: LP_V2_RESUME_CUTOVER_TIMESTAMP + 1,
+      block: LP_V2_RESUME_CUTOVER_BLOCK + 1,
+      active: true,
+      enabledAt: LP_V2_RESUME_CUTOVER_TIMESTAMP + 1,
+      disabledAt: undefined,
+    },
+  ] as const;
+
+  for (const entry of cases) {
+    const TestHelpers = loadTestHelpers();
+    let mockDb = TestHelpers.MockDb.createMockDb();
+    const eventData = createEventDataFactory();
+    const configured = TestHelpers.LeaderboardConfig.LPPoolConfigured.createMockEvent({
+      pool: entry.pool,
+      positionManager: entry.pool,
+      token0: TASK6_TOKEN0,
+      token1: TASK6_TOKEN1,
+      lpRateBps: 2000n,
+      timestamp: BigInt(entry.timestamp),
+      ...eventData(entry.block, entry.timestamp, ADDRESSES.config),
+    });
+    mockDb = await TestHelpers.LeaderboardConfig.LPPoolConfigured.processEvent({
+      event: configured,
+      mockDb,
+    });
+
+    const poolConfig = mockDb.entities.LPPoolConfig.get(entry.pool);
+    assert.equal(poolConfig?.isActive, entry.active, entry.name);
+    assert.equal(poolConfig?.enabledAtTimestamp, entry.enabledAt, entry.name);
+    assert.equal(poolConfig?.disabledAtTimestamp, entry.disabledAt, entry.name);
+  }
+});
+
+test('registered inactive static-era rate updates are activity-neutral across the authority matrix', async () => {
+  const balancerPool = BALANCER_AUTORANGE_V3_POOL_ADDRESS.toLowerCase();
+  const cases = [
+    {
+      name: 'V2 before first entry',
+      pool: TASK6_V2_POOL,
+      block: LP_V2_CUTOVER_BLOCK - 1,
+      timestamp: LP_V2_CUTOVER_TIMESTAMP - 100,
+      seed(TestHelpers: ReturnType<typeof loadTestHelpers>) {
+        let mockDb = seedTask6FungiblePool(TestHelpers.MockDb.createMockDb(), {
+          pool: TASK6_V2_POOL,
+          user: ADDRESSES.user,
+          rateBps: 2_000n,
+          startTimestamp: LP_V2_CUTOVER_TIMESTAMP - 1_000,
+          active: false,
+        });
+        return mockDb.entities.LPPoolConfig.set({
+          ...mockDb.entities.LPPoolConfig.get(TASK6_V2_POOL)!,
+          enabledAtTimestamp: LP_V2_CUTOVER_TIMESTAMP,
+          disabledAtEpoch: undefined,
+          disabledAtTimestamp: undefined,
+        });
+      },
+    },
+    {
+      name: 'V2 Balancer pause',
+      pool: TASK6_V2_POOL,
+      block: LP_BALANCER_AUTORANGE_CUTOVER_BLOCK + 1,
+      timestamp: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP + 100,
+      seed(TestHelpers: ReturnType<typeof loadTestHelpers>) {
+        let mockDb = seedTask6FungiblePool(TestHelpers.MockDb.createMockDb(), {
+          pool: TASK6_V2_POOL,
+          user: ADDRESSES.user,
+          rateBps: 2_000n,
+          startTimestamp: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP,
+          active: false,
+        });
+        mockDb = seedTask6FungiblePool(mockDb, {
+          pool: balancerPool,
+          user: ADDRESSES.userTwo,
+          rateBps: 2_000n,
+          startTimestamp: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP,
+        });
+        mockDb = seedTask6RetiredLegacyConfig(mockDb, LP_V2_CUTOVER_TIMESTAMP);
+        return seedTask6PausedV2Config(mockDb, LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP);
+      },
+    },
+    {
+      name: 'Balancer before entry',
+      pool: balancerPool,
+      block: LP_V2_CUTOVER_BLOCK + 20,
+      timestamp: LP_V2_CUTOVER_TIMESTAMP + 300,
+      seed(TestHelpers: ReturnType<typeof loadTestHelpers>) {
+        let mockDb = seedTask6FungiblePool(TestHelpers.MockDb.createMockDb(), {
+          pool: TASK6_V2_POOL,
+          user: ADDRESSES.user,
+          rateBps: 2_000n,
+          startTimestamp: LP_V2_CUTOVER_TIMESTAMP,
+        });
+        mockDb = seedTask6FungiblePool(mockDb, {
+          pool: balancerPool,
+          user: ADDRESSES.userTwo,
+          rateBps: 2_000n,
+          startTimestamp: LP_V2_CUTOVER_TIMESTAMP,
+          active: false,
+        });
+        mockDb = mockDb.entities.LPPoolConfig.set({
+          ...mockDb.entities.LPPoolConfig.get(balancerPool)!,
+          enabledAtTimestamp: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP,
+          disabledAtEpoch: undefined,
+          disabledAtTimestamp: undefined,
+        });
+        return seedTask6RetiredLegacyConfig(mockDb, LP_V2_CUTOVER_TIMESTAMP);
+      },
+    },
+    {
+      name: 'Balancer retired',
+      pool: balancerPool,
+      block: LP_V2_RESUME_CUTOVER_BLOCK + 1,
+      timestamp: LP_V2_RESUME_CUTOVER_TIMESTAMP + 100,
+      seed(TestHelpers: ReturnType<typeof loadTestHelpers>) {
+        let mockDb = seedTask6FungiblePool(TestHelpers.MockDb.createMockDb(), {
+          pool: balancerPool,
+          user: ADDRESSES.userTwo,
+          rateBps: 2_000n,
+          startTimestamp: LP_V2_RESUME_CUTOVER_TIMESTAMP,
+          active: false,
+        });
+        mockDb = seedTask6FungiblePool(mockDb, {
+          pool: TASK6_V2_POOL,
+          user: ADDRESSES.user,
+          rateBps: 2_000n,
+          startTimestamp: LP_V2_RESUME_CUTOVER_TIMESTAMP,
+        });
+        mockDb = seedTask6RetiredLegacyConfig(mockDb, LP_V2_CUTOVER_TIMESTAMP);
+        return seedTask6RetiredBalancerConfig(mockDb, LP_V2_RESUME_CUTOVER_TIMESTAMP);
+      },
+    },
+    {
+      name: 'legacy retired',
+      pool: TASK6_LEGACY_POOL,
+      block: LP_V2_CUTOVER_BLOCK + 20,
+      timestamp: LP_V2_CUTOVER_TIMESTAMP + 300,
+      seed(TestHelpers: ReturnType<typeof loadTestHelpers>) {
+        let mockDb = seedTask6FungiblePool(TestHelpers.MockDb.createMockDb(), {
+          pool: TASK6_V2_POOL,
+          user: ADDRESSES.user,
+          rateBps: 2_000n,
+          startTimestamp: LP_V2_CUTOVER_TIMESTAMP,
+        });
+        return seedTask6RetiredLegacyConfig(mockDb, LP_V2_CUTOVER_TIMESTAMP);
+      },
+    },
+  ] as const;
+
+  for (const entry of cases) {
+    const TestHelpers = loadTestHelpers();
+    const eventData = createEventDataFactory();
+    let mockDb = entry.seed(TestHelpers);
+    const configBefore = mockDb.entities.LPPoolConfig.get(entry.pool);
+    const growthBefore = mockDb.entities.LPPoolEpochGrowth.get(`${entry.pool}:1`);
+    const positionsBefore = mockDb.entities.UserLPPosition.getAll();
+    assert.equal(configBefore?.isActive, false, entry.name);
+
+    const rateUpdated = TestHelpers.LeaderboardConfig.LPRateUpdated.createMockEvent({
+      pool: entry.pool,
+      oldRate: 2_000n,
+      newRate: 1_500n,
+      timestamp: BigInt(entry.timestamp),
+      ...eventData(entry.block, entry.timestamp, ADDRESSES.config),
+    });
+    mockDb = await TestHelpers.LeaderboardConfig.LPRateUpdated.processEvent({
+      event: rateUpdated,
+      mockDb,
+    });
+
+    const configAfter = mockDb.entities.LPPoolConfig.get(entry.pool);
+    assert.equal(configAfter?.isActive, false, entry.name);
+    assert.equal(configAfter?.disabledAtTimestamp, configBefore?.disabledAtTimestamp, entry.name);
+    assert.equal(configAfter?.lpRateBps, 1_500n, entry.name);
+    assert.deepEqual(mockDb.entities.LPPoolEpochGrowth.get(`${entry.pool}:1`), growthBefore);
+    assert.deepEqual(mockDb.entities.UserLPPosition.getAll(), positionsBefore);
+
+    mockDb = await TestHelpers.LeaderboardConfig.LPRateUpdated.processEvent({
+      event: rateUpdated,
+      mockDb,
+    });
+    assert.deepEqual(mockDb.entities.LPPoolConfig.get(entry.pool), configAfter, entry.name);
+    assert.deepEqual(mockDb.entities.LPPoolEpochGrowth.get(`${entry.pool}:1`), growthBefore);
+  }
+});
+
+test('LPRateUpdated splits lazy fungible growth at the old pool-local rate', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+  const pool = '0x000000000000000000000000000000000000e010';
+  const unrelatedPool = '0x000000000000000000000000000000000000e011';
+  const liquidity = 100n * 10n ** 6n;
+  mockDb = seedTask6FungiblePool(mockDb, {
+    pool,
+    user: ADDRESSES.user,
+    rateBps: 2000n,
+  });
+  mockDb = seedTask6FungiblePool(mockDb, {
+    pool: unrelatedPool,
+    user: ADDRESSES.userTwo,
+    rateBps: 900n,
+  });
+  const globalConfigBefore = {
+    id: 'global',
+    depositRateBps: 1n,
+    borrowRateBps: 2n,
+    vpRateBps: 0n,
+    lpRateBps: 777n,
+    supplyDailyBonus: 0,
+    borrowDailyBonus: 0,
+    repayDailyBonus: 0,
+    withdrawDailyBonus: 0,
+    cooldownSeconds: 0,
+    minDailyBonusUsd: 0,
+    lastUpdate: 100,
+  } as const;
+  mockDb = mockDb.entities.LeaderboardConfig.set(globalConfigBefore);
+  const unrelatedConfigBefore = mockDb.entities.LPPoolConfig.get(unrelatedPool);
+  const unrelatedGrowthBefore = mockDb.entities.LPPoolEpochGrowth.get(`${unrelatedPool}:1`);
+  const targetPositionId = `v2:${pool}:${ADDRESSES.user}`;
+  const targetPositionBefore = mockDb.entities.UserLPPosition.get(targetPositionId);
+
+  const rateUpdated = TestHelpers.LeaderboardConfig.LPRateUpdated.createMockEvent({
+    pool,
+    oldRate: 2000n,
+    newRate: 1500n,
+    timestamp: 200n,
+    ...eventData(30, 200, ADDRESSES.config),
+  });
+  mockDb = await TestHelpers.LeaderboardConfig.LPRateUpdated.processEvent({
+    event: rateUpdated,
+    mockDb,
+  });
+
+  const firstSegmentGrowth = referenceTask6FungibleGrowth(2000n, 100);
+  assert.equal(
+    mockDb.entities.LPPoolEpochGrowth.get(`${pool}:1`)?.scalarGrowthX128,
+    firstSegmentGrowth
+  );
+  assert.deepEqual(mockDb.entities.UserLPPosition.get(targetPositionId), targetPositionBefore);
+  assert.equal(mockDb.entities.UserEpochStats.get(`${ADDRESSES.user}:1`), undefined);
+  assert.deepEqual(mockDb.entities.LPPoolConfig.get(unrelatedPool), unrelatedConfigBefore);
+  assert.deepEqual(
+    mockDb.entities.LPPoolEpochGrowth.get(`${unrelatedPool}:1`),
+    unrelatedGrowthBefore
+  );
+  assert.deepEqual(mockDb.entities.LeaderboardConfig.get('global'), globalConfigBefore);
+
+  const sync = TestHelpers.UniswapV2Pair.Sync.createMockEvent({
+    reserve0: 1_000n * 10n ** 6n,
+    reserve1: 1_000n * 10n ** 6n,
+    ...eventData(31, 300, pool),
+  });
+  mockDb = await TestHelpers.UniswapV2Pair.Sync.processEvent({ event: sync, mockDb });
+
+  const settle = TestHelpers.LeaderboardKeeper.UserSettled.createMockEvent({
+    user: ADDRESSES.user,
+    timestamp: 300n,
+    ...eventData(LEADERBOARD_START_BLOCK + 1, 300, ADDRESSES.config),
+  });
+  mockDb = await TestHelpers.LeaderboardKeeper.UserSettled.processEvent({
+    event: settle,
+    mockDb,
+  });
+
+  const totalGrowth = firstSegmentGrowth + referenceTask6FungibleGrowth(1500n, 100);
+  assert.equal(mockDb.entities.LPPoolEpochGrowth.get(`${pool}:1`)?.scalarGrowthX128, totalGrowth);
+  assert.equal(
+    mockDb.entities.UserEpochStats.get(`${ADDRESSES.user}:1`)?.lpPoints,
+    referenceTask6FungiblePoints(liquidity, totalGrowth)
+  );
+  assert.deepEqual(mockDb.entities.LPPoolConfig.get(unrelatedPool), unrelatedConfigBefore);
+  assert.deepEqual(
+    mockDb.entities.LPPoolEpochGrowth.get(`${unrelatedPool}:1`),
+    unrelatedGrowthBefore
+  );
+  assert.deepEqual(mockDb.entities.LeaderboardConfig.get('global'), globalConfigBefore);
+});
+
+test('rate and disable handlers have position-cardinality-invariant store work', async () => {
+  const pool = '0x000000000000000000000000000000000000e012';
+  const run = async (eventName: 'LPRateUpdated' | 'LPPoolDisabled', positionCount: number) => {
+    let mockDb = TestHelpers.MockDb.createMockDb();
+    mockDb = seedTask6FungiblePool(mockDb, {
+      pool,
+      user: ADDRESSES.user,
+      rateBps: 2000n,
+      fakePositionCount: positionCount - 1,
+    });
+    const eventData = createEventDataFactory();
+    const event =
+      eventName === 'LPRateUpdated'
+        ? TestHelpers.LeaderboardConfig.LPRateUpdated.createMockEvent({
+            pool,
+            oldRate: 2000n,
+            newRate: 1500n,
+            timestamp: 200n,
+            ...eventData(30, 200, ADDRESSES.config),
+          })
+        : TestHelpers.LeaderboardConfig.LPPoolDisabled.createMockEvent({
+            pool,
+            timestamp: 200n,
+            ...eventData(30, 200, ADDRESSES.config),
+          });
+    return await runTask6RegisteredHandler('LeaderboardConfig', eventName, event, mockDb);
+  };
+
+  for (const eventName of ['LPRateUpdated', 'LPPoolDisabled'] as const) {
+    const one = await run(eventName, 1);
+    const tenThousand = await run(eventName, 10_000);
+    assert.deepEqual(
+      countRecord(tenThousand.preload.getCounts),
+      countRecord(one.preload.getCounts),
+      `${eventName} preload gets`
+    );
+    assert.deepEqual(
+      countRecord(tenThousand.ordered.getCounts),
+      countRecord(one.ordered.getCounts),
+      `${eventName} ordered gets`
+    );
+    assert.deepEqual(
+      countRecord(tenThousand.preload.setCounts),
+      countRecord(one.preload.setCounts),
+      `${eventName} preload sets`
+    );
+    assert.deepEqual(
+      countRecord(tenThousand.ordered.setCounts),
+      countRecord(one.ordered.setCounts),
+      `${eventName} ordered sets`
+    );
+    for (const phase of [tenThousand.preload, tenThousand.ordered]) {
+      for (const entity of [
+        'LPPoolPositionIndex',
+        'UserLPPositionIndex',
+        'UserLPPosition',
+        'UserLPStats',
+        'UserEpochStats',
+      ]) {
+        assert.equal(phase.getCounts.get(entity) ?? 0, 0, `${eventName} ${entity} reads`);
+        assert.equal(phase.setCounts.get(entity) ?? 0, 0, `${eventName} ${entity} writes`);
+      }
+    }
+  }
 });
 
 test('lp pool config keeps previous fee when eth calls are disabled', async () => {
@@ -556,6 +1553,15 @@ test('config updates initialize missing leaderboard config', async () => {
   const config = mockDb.entities.LeaderboardConfig.get('global');
   assert.ok(config);
   assert.equal(config?.depositRateBps, 750n);
+  assert.equal(config?.borrowRateBps, 0n);
+  assert.equal(config?.vpRateBps, 0n);
+  assert.equal(config?.lpRateBps, 0n);
+  assert.equal(config?.supplyDailyBonus, 0);
+  assert.equal(config?.borrowDailyBonus, 0);
+  assert.equal(config?.repayDailyBonus, 0);
+  assert.equal(config?.withdrawDailyBonus, 0);
+  assert.equal(config?.cooldownSeconds, 0);
+  assert.equal(config?.minDailyBonusUsd, 0);
 });
 
 test('epoch end handles missing start time', async () => {
@@ -698,6 +1704,14 @@ test('zero points update clears leaderboard buckets and totals', async () => {
     bucketIndex: 1,
     updatedAt: 90,
   });
+  mockDb = mockDb.entities.UserIndex.set({
+    id: ADDRESSES.user,
+    user: ADDRESSES.user,
+    epochNumber: 1n,
+    points: 10,
+    bucketIndex: 1,
+    updatedAt: 90,
+  });
   mockDb = mockDb.entities.ScoreBucket.set({
     id: 'epoch:1:b:1',
     epochNumber: 1n,
@@ -707,8 +1721,23 @@ test('zero points update clears leaderboard buckets and totals', async () => {
     count: 1,
     updatedAt: 90,
   });
+  mockDb = mockDb.entities.ScoreBucket.set({
+    id: 'b:1',
+    epochNumber: 1n,
+    index: 1,
+    lower: 0.1,
+    upper: 0.5,
+    count: 1,
+    updatedAt: 90,
+  });
   mockDb = mockDb.entities.LeaderboardTotals.set({
     id: 'epoch:1',
+    epochNumber: 1n,
+    totalUsers: 1,
+    updatedAt: 90,
+  });
+  mockDb = mockDb.entities.LeaderboardTotals.set({
+    id: 'global',
     epochNumber: 1n,
     totalUsers: 1,
     updatedAt: 90,
@@ -766,6 +1795,9 @@ test('zero points update clears leaderboard buckets and totals', async () => {
   const updatedIndex = mockDb.entities.UserIndex.get(`${ADDRESSES.user}:1`);
   assert.equal(updatedIndex?.bucketIndex, -1);
   assert.equal(updatedIndex?.points, 0);
+  assert.equal(mockDb.entities.UserIndex.get(ADDRESSES.user), undefined);
+  assert.equal(mockDb.entities.ScoreBucket.get('b:1')?.count, 0);
+  assert.equal(mockDb.entities.LeaderboardTotals.get('global')?.totalUsers, 0);
   assert.equal(mockDb.entities.UserLeaderboardState.get(ADDRESSES.user)?.lastUpdate, 600);
 });
 
@@ -823,6 +1855,19 @@ test('voting power tier events update tiers', async () => {
     event: tierAdded,
     mockDb,
   });
+
+  const duplicateTierAdded = TestHelpers.VotingPowerMultiplier.TierAdded.createMockEvent({
+    tierIndex: 1n,
+    minVotingPower: 100n,
+    multiplierBps: 15000n,
+    ...eventData(20, 405, ADDRESSES.vpMultiplier),
+  });
+  mockDb = await TestHelpers.VotingPowerMultiplier.TierAdded.processEvent({
+    event: duplicateTierAdded,
+    mockDb,
+  });
+  assert.deepEqual(mockDb.entities.VotingPowerTierIndex.get('current')?.activeTierIds, ['1']);
+  assert.equal(mockDb.entities.VotingPowerTierIndex.get('current')?.lastUpdate, 405);
 
   const tierUpdated = TestHelpers.VotingPowerMultiplier.TierUpdated.createMockEvent({
     tierIndex: 1n,
@@ -989,6 +2034,69 @@ test('epoch start preserves existing start block and skips future start', async 
 
   const epoch = mockDb.entities.LeaderboardEpoch.get('3');
   assert.equal(epoch?.startBlock, 77n);
+  assert.equal(epoch?.scheduledStartTime, 200);
+});
+
+test('epoch start replaces a stale schedule on an inactive ordinary epoch', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  mockDb = mockDb.entities.LeaderboardEpoch.set({
+    id: '3',
+    epochNumber: 3n,
+    startBlock: 0n,
+    startTime: 0,
+    endBlock: undefined,
+    endTime: undefined,
+    isActive: false,
+    duration: undefined,
+    scheduledStartTime: 50,
+    scheduledEndTime: 0,
+  });
+
+  const epochStart = TestHelpers.EpochManager.EpochStart.createMockEvent({
+    epochNumber: 3n,
+    startTime: 200n,
+    ...eventData(20, 100, ADDRESSES.epochManager),
+  });
+  mockDb = await TestHelpers.EpochManager.EpochStart.processEvent({
+    event: epochStart,
+    mockDb,
+  });
+
+  assert.equal(mockDb.entities.LeaderboardEpoch.get('3')?.scheduledStartTime, 200);
+});
+
+test('epoch start preserves the schedule of an active ordinary epoch', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  mockDb = mockDb.entities.LeaderboardEpoch.set({
+    id: '3',
+    epochNumber: 3n,
+    startBlock: 10n,
+    startTime: 50,
+    endBlock: undefined,
+    endTime: undefined,
+    isActive: true,
+    duration: undefined,
+    scheduledStartTime: 50,
+    scheduledEndTime: 0,
+  });
+
+  const epochStart = TestHelpers.EpochManager.EpochStart.createMockEvent({
+    epochNumber: 3n,
+    startTime: 200n,
+    ...eventData(20, 200, ADDRESSES.epochManager),
+  });
+  mockDb = await TestHelpers.EpochManager.EpochStart.processEvent({
+    event: epochStart,
+    mockDb,
+  });
+
+  assert.equal(mockDb.entities.LeaderboardEpoch.get('3')?.scheduledStartTime, 50);
 });
 
 test('epoch start sets zero when scheduled start is in the future', async () => {
@@ -1111,7 +2219,10 @@ test('lp pool config uses default epoch and skips registry update when already r
   const pool = '0x000000000000000000000000000000000000d001';
   mockDb = mockDb.entities.LPPoolRegistry.set({
     id: 'global',
-    poolIds: [pool],
+    // LeaderboardConfig starts after the legacy LP pool. Reflect the registry
+    // state that exists at this real chain height so the assertion isolates
+    // the already-registered `pool` branch.
+    poolIds: [BOOTSTRAP_LP_POOL_CONFIGS[0].pool.toLowerCase(), pool],
     lastUpdate: 5,
   });
 
@@ -1170,6 +2281,1060 @@ test('lp pool disabled defaults to epoch 1 when leaderboard state missing', asyn
 
   const poolConfig = mockDb.entities.LPPoolConfig.get(pool.toLowerCase());
   assert.equal(poolConfig?.disabledAtEpoch, 1n);
+});
+
+test('LPPoolDisabled advances only pool growth and leaves indexed holders untouched', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+  const pool = '0x000000000000000000000000000000000000d011';
+  const token0 = '0x000000000000000000000000000000000000d012';
+  const token1 = '0x000000000000000000000000000000000000d013';
+  const positionId = `v2:${pool}:${ADDRESSES.user}`;
+
+  mockDb = mockDb.entities.LeaderboardState.set({
+    id: 'current',
+    currentEpochNumber: 1n,
+    isActive: true,
+  });
+  mockDb = mockDb.entities.LeaderboardEpoch.set({
+    id: '1',
+    epochNumber: 1n,
+    startBlock: 1n,
+    startTime: 100,
+    endBlock: undefined,
+    endTime: undefined,
+    isActive: true,
+    duration: undefined,
+    scheduledStartTime: 100,
+    scheduledEndTime: 0,
+  });
+  mockDb = mockDb.entities.LPPoolRegistry.set({
+    id: 'global',
+    poolIds: [pool],
+    lastUpdate: 100,
+  });
+  mockDb = mockDb.entities.LPPoolConfig.set({
+    id: pool,
+    pool,
+    positionManager: pool,
+    token0,
+    token1,
+    fee: 3000,
+    lpRateBps: 2000n,
+    isActive: true,
+    enabledAtEpoch: 1n,
+    enabledAtTimestamp: 100,
+    disabledAtEpoch: undefined,
+    disabledAtTimestamp: undefined,
+    lastUpdate: 100,
+  });
+  for (const token of [token0, token1]) {
+    mockDb = mockDb.entities.TokenInfo.set({
+      id: token,
+      address: token,
+      decimals: 6,
+      symbol: 'LP',
+      name: 'LP token',
+      lastUpdate: 100,
+    });
+  }
+  mockDb = mockDb.entities.LPPoolState.set({
+    id: pool,
+    pool,
+    currentTick: 0,
+    sqrtPriceX96: 0n,
+    token0Price: 100_000_000n,
+    token1Price: 100_000_000n,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
+    lastUpdate: 100,
+  });
+  mockDb = mockDb.entities.LPPoolV2State.set({
+    id: pool,
+    pool,
+    reserve0: 1_000n * 10n ** 6n,
+    reserve1: 1_000n * 10n ** 6n,
+    lpTotalSupply: 1_000n * 10n ** 6n,
+    lastUpdate: 100,
+  });
+  mockDb = mockDb.entities.LPPoolEpochGrowth.set({
+    id: `${pool}:1`,
+    pool,
+    epochNumber: 1n,
+    startTimestamp: 100,
+    lastTimestamp: 100,
+    scalarGrowthX128: 0n,
+    isFrozen: false,
+    frozenAt: undefined,
+    lastUpdate: 100,
+  });
+  mockDb = mockDb.entities.UserLPPosition.set({
+    id: positionId,
+    tokenId: 1n,
+    user_id: ADDRESSES.user,
+    pool,
+    positionManager: pool,
+    tickLower: -887272,
+    tickUpper: 887272,
+    liquidity: 100n * 10n ** 6n,
+    amount0: 100n * 10n ** 6n,
+    amount1: 100n * 10n ** 6n,
+    isInRange: true,
+    valueUsd: 200n * 100_000_000n,
+    lastInRangeTimestamp: 100,
+    accumulatedInRangeSeconds: 0n,
+    lastSettledAt: 100,
+    settledLpPoints: 0n,
+    createdAt: 100,
+    lastUpdate: 100,
+  });
+  mockDb = mockDb.entities.LPPoolPositionIndex.set({
+    id: pool,
+    pool,
+    positionIds: [positionId],
+    lastUpdate: 100,
+  });
+  mockDb = mockDb.entities.UserLPPositionIndex.set({
+    id: ADDRESSES.user,
+    user_id: ADDRESSES.user,
+    positionIds: [positionId],
+    lastUpdate: 100,
+  });
+  const positionBefore = mockDb.entities.UserLPPosition.get(positionId);
+
+  const disabled = TestHelpers.LeaderboardConfig.LPPoolDisabled.createMockEvent({
+    pool,
+    timestamp: 200n,
+    ...eventData(26, 200, ADDRESSES.config),
+  });
+  mockDb = await TestHelpers.LeaderboardConfig.LPPoolDisabled.processEvent({
+    event: disabled,
+    mockDb,
+  });
+
+  const growth = mockDb.entities.LPPoolEpochGrowth.get(`${pool}:1`);
+  assert.equal(growth?.lastTimestamp, 200);
+  assert.ok((growth?.scalarGrowthX128 ?? 0n) > 0n);
+  assert.deepEqual(mockDb.entities.UserLPPosition.get(positionId), positionBefore);
+  assert.equal(mockDb.entities.UserEpochStats.get(`${ADDRESSES.user}:1`), undefined);
+
+  const settle = TestHelpers.LeaderboardKeeper.UserSettled.createMockEvent({
+    user: ADDRESSES.user,
+    timestamp: 300n,
+    ...eventData(LEADERBOARD_START_BLOCK + 2, 300, ADDRESSES.config),
+  });
+  mockDb = await TestHelpers.LeaderboardKeeper.UserSettled.processEvent({ event: settle, mockDb });
+  const expectedGrowth = referenceTask6FungibleGrowth(2000n, 100);
+  const expectedPoints = referenceTask6FungiblePoints(100n * 10n ** 6n, expectedGrowth);
+  assert.equal(mockDb.entities.UserEpochStats.get(`${ADDRESSES.user}:1`)?.lpPoints, expectedPoints);
+  assert.equal(mockDb.entities.LPPoolEpochGrowth.get(`${pool}:1`)?.lastTimestamp, 200);
+
+  const repeat = TestHelpers.LeaderboardKeeper.UserSettled.createMockEvent({
+    user: ADDRESSES.user,
+    timestamp: 400n,
+    ...eventData(LEADERBOARD_START_BLOCK + 3, 400, ADDRESSES.config),
+  });
+  mockDb = await TestHelpers.LeaderboardKeeper.UserSettled.processEvent({ event: repeat, mockDb });
+  assert.equal(mockDb.entities.UserEpochStats.get(`${ADDRESSES.user}:1`)?.lpPoints, expectedPoints);
+  assert.equal(mockDb.entities.LPPoolEpochGrowth.get(`${pool}:1`)?.lastTimestamp, 200);
+});
+
+test('registered V2 disable in its original era survives the next ordinary event and remains claimable', async () => {
+  const TestHelpers = loadTestHelpers();
+  const eventData = createEventDataFactory();
+  const disableTimestamp = LP_V2_CUTOVER_TIMESTAMP + 100;
+  const nextTimestamp = LP_V2_CUTOVER_TIMESTAMP + 200;
+  const positionId = `v2:${TASK6_V2_POOL}:${ADDRESSES.user}`;
+  let mockDb = seedTask6FungiblePool(TestHelpers.MockDb.createMockDb(), {
+    pool: TASK6_V2_POOL,
+    user: ADDRESSES.user,
+    rateBps: 2_000n,
+    startTimestamp: LP_V2_CUTOVER_TIMESTAMP,
+  });
+  mockDb = seedTask6RetiredLegacyConfig(mockDb, LP_V2_CUTOVER_TIMESTAMP);
+  const holderBefore = {
+    position: mockDb.entities.UserLPPosition.get(positionId),
+    poolIndex: mockDb.entities.LPPoolPositionIndex.get(TASK6_V2_POOL),
+    userIndex: mockDb.entities.UserLPPositionIndex.get(ADDRESSES.user),
+  };
+
+  const disableData = eventData(LP_V2_CUTOVER_BLOCK + 10, disableTimestamp, ADDRESSES.config);
+  const disabled = TestHelpers.LeaderboardConfig.LPPoolDisabled.createMockEvent({
+    pool: TASK6_V2_POOL,
+    timestamp: BigInt(disableTimestamp),
+    ...disableData,
+  });
+  mockDb = await TestHelpers.LeaderboardConfig.LPPoolDisabled.processEvent({
+    event: disabled,
+    mockDb,
+  });
+
+  const disabledConfig = mockDb.entities.LPPoolConfig.get(TASK6_V2_POOL);
+  const disabledGrowth = mockDb.entities.LPPoolEpochGrowth.get(`${TASK6_V2_POOL}:1`);
+  const protocolAfterDisable = mockDb.entities.ProtocolStats.get('global');
+  const markerAfterDisable = mockDb.entities.LPStaticTransition.get('legacy-v3-to-v2');
+  assert.ok(markerAfterDisable);
+  assert.equal(disabledConfig?.isActive, false);
+  assert.equal(disabledConfig?.disabledAtTimestamp, disableTimestamp);
+  assert.equal(disabledGrowth?.lastTimestamp, disableTimestamp);
+  assert.equal(disabledGrowth?.scalarGrowthX128, referenceTask6FungibleGrowth(2_000n, 100));
+
+  const nextData = eventData(LP_V2_CUTOVER_BLOCK + 11, nextTimestamp, ADDRESSES.config);
+  nextData.mockEventData.transaction.hash = disableData.mockEventData.transaction.hash;
+  const rateUpdated = TestHelpers.LeaderboardConfig.LPRateUpdated.createMockEvent({
+    pool: TASK6_V2_POOL,
+    oldRate: 2_000n,
+    newRate: 1_500n,
+    timestamp: BigInt(nextTimestamp),
+    ...nextData,
+  });
+  mockDb = await TestHelpers.LeaderboardConfig.LPRateUpdated.processEvent({
+    event: rateUpdated,
+    mockDb,
+  });
+
+  const afterNextEvent = mockDb.entities.LPPoolConfig.get(TASK6_V2_POOL);
+  assert.equal(afterNextEvent?.isActive, false);
+  assert.equal(afterNextEvent?.disabledAtTimestamp, disableTimestamp);
+  assert.equal(afterNextEvent?.lpRateBps, 1_500n);
+  assert.deepEqual(mockDb.entities.LPPoolEpochGrowth.get(`${TASK6_V2_POOL}:1`), disabledGrowth);
+  assert.deepEqual(mockDb.entities.ProtocolStats.get('global'), protocolAfterDisable);
+  assert.deepEqual(mockDb.entities.LPStaticTransition.get('legacy-v3-to-v2'), markerAfterDisable);
+  assert.deepEqual(mockDb.entities.UserLPPosition.get(positionId), holderBefore.position);
+  assert.deepEqual(mockDb.entities.LPPoolPositionIndex.get(TASK6_V2_POOL), holderBefore.poolIndex);
+  assert.deepEqual(mockDb.entities.UserLPPositionIndex.get(ADDRESSES.user), holderBefore.userIndex);
+
+  mockDb = await TestHelpers.LeaderboardConfig.LPRateUpdated.processEvent({
+    event: rateUpdated,
+    mockDb,
+  });
+  assert.deepEqual(mockDb.entities.LPPoolConfig.get(TASK6_V2_POOL), afterNextEvent);
+  assert.deepEqual(mockDb.entities.LPPoolEpochGrowth.get(`${TASK6_V2_POOL}:1`), disabledGrowth);
+
+  const settle = TestHelpers.LeaderboardKeeper.UserSettled.createMockEvent({
+    user: ADDRESSES.user,
+    timestamp: BigInt(nextTimestamp + 100),
+    ...eventData(LP_V2_CUTOVER_BLOCK + 12, nextTimestamp + 100, ADDRESSES.config),
+  });
+  mockDb = await TestHelpers.LeaderboardKeeper.UserSettled.processEvent({ event: settle, mockDb });
+  assert.equal(
+    mockDb.entities.UserEpochStats.get(`${ADDRESSES.user}:1`)?.lpPoints,
+    referenceTask6FungiblePoints(100n * 10n ** 6n, referenceTask6FungibleGrowth(2_000n, 100))
+  );
+  assert.equal(
+    mockDb.entities.LPPoolEpochGrowth.get(`${TASK6_V2_POOL}:1`)?.lastTimestamp,
+    disableTimestamp
+  );
+});
+
+test('registered V2 disable after resume survives the next ordinary event and remains claimable', async () => {
+  const TestHelpers = loadTestHelpers();
+  const eventData = createEventDataFactory();
+  const disableTimestamp = LP_V2_RESUME_CUTOVER_TIMESTAMP + 100;
+  const nextTimestamp = LP_V2_RESUME_CUTOVER_TIMESTAMP + 200;
+  const positionId = `v2:${TASK6_V2_POOL}:${ADDRESSES.user}`;
+  let mockDb = seedTask6FungiblePool(TestHelpers.MockDb.createMockDb(), {
+    pool: TASK6_V2_POOL,
+    user: ADDRESSES.user,
+    rateBps: 2_000n,
+    startTimestamp: LP_V2_RESUME_CUTOVER_TIMESTAMP,
+  });
+  mockDb = seedTask6RetiredLegacyConfig(mockDb, LP_V2_CUTOVER_TIMESTAMP);
+  mockDb = seedTask6RetiredBalancerConfig(mockDb, LP_V2_RESUME_CUTOVER_TIMESTAMP);
+  const holderBefore = {
+    position: mockDb.entities.UserLPPosition.get(positionId),
+    poolIndex: mockDb.entities.LPPoolPositionIndex.get(TASK6_V2_POOL),
+    userIndex: mockDb.entities.UserLPPositionIndex.get(ADDRESSES.user),
+  };
+
+  const disableData = eventData(
+    LP_V2_RESUME_CUTOVER_BLOCK + 10,
+    disableTimestamp,
+    ADDRESSES.config
+  );
+  const disabled = TestHelpers.LeaderboardConfig.LPPoolDisabled.createMockEvent({
+    pool: TASK6_V2_POOL,
+    timestamp: BigInt(disableTimestamp),
+    ...disableData,
+  });
+  mockDb = await TestHelpers.LeaderboardConfig.LPPoolDisabled.processEvent({
+    event: disabled,
+    mockDb,
+  });
+
+  const disabledConfig = mockDb.entities.LPPoolConfig.get(TASK6_V2_POOL);
+  const disabledGrowth = mockDb.entities.LPPoolEpochGrowth.get(`${TASK6_V2_POOL}:1`);
+  const protocolAfterDisable = mockDb.entities.ProtocolStats.get('global');
+  const markersAfterDisable = [
+    mockDb.entities.LPStaticTransition.get('legacy-v3-to-v2'),
+    mockDb.entities.LPStaticTransition.get('v2-to-balancer-autorange'),
+    mockDb.entities.LPStaticTransition.get('balancer-to-v2-resume'),
+  ];
+  assert.ok(markersAfterDisable.every(Boolean));
+  assert.equal(disabledConfig?.isActive, false);
+  assert.equal(disabledConfig?.disabledAtTimestamp, disableTimestamp);
+  assert.equal(disabledGrowth?.lastTimestamp, disableTimestamp);
+  assert.equal(disabledGrowth?.scalarGrowthX128, referenceTask6FungibleGrowth(2_000n, 100));
+
+  const nextData = eventData(LP_V2_RESUME_CUTOVER_BLOCK + 11, nextTimestamp, ADDRESSES.config);
+  nextData.mockEventData.transaction.hash = disableData.mockEventData.transaction.hash;
+  const rateUpdated = TestHelpers.LeaderboardConfig.LPRateUpdated.createMockEvent({
+    pool: TASK6_V2_POOL,
+    oldRate: 2_000n,
+    newRate: 1_500n,
+    timestamp: BigInt(nextTimestamp),
+    ...nextData,
+  });
+  mockDb = await TestHelpers.LeaderboardConfig.LPRateUpdated.processEvent({
+    event: rateUpdated,
+    mockDb,
+  });
+
+  const afterNextEvent = mockDb.entities.LPPoolConfig.get(TASK6_V2_POOL);
+  assert.equal(afterNextEvent?.isActive, false);
+  assert.equal(afterNextEvent?.disabledAtTimestamp, disableTimestamp);
+  assert.equal(afterNextEvent?.lpRateBps, 1_500n);
+  assert.deepEqual(mockDb.entities.LPPoolEpochGrowth.get(`${TASK6_V2_POOL}:1`), disabledGrowth);
+  assert.deepEqual(mockDb.entities.ProtocolStats.get('global'), protocolAfterDisable);
+  assert.deepEqual(
+    [
+      mockDb.entities.LPStaticTransition.get('legacy-v3-to-v2'),
+      mockDb.entities.LPStaticTransition.get('v2-to-balancer-autorange'),
+      mockDb.entities.LPStaticTransition.get('balancer-to-v2-resume'),
+    ],
+    markersAfterDisable
+  );
+  assert.deepEqual(mockDb.entities.UserLPPosition.get(positionId), holderBefore.position);
+  assert.deepEqual(mockDb.entities.LPPoolPositionIndex.get(TASK6_V2_POOL), holderBefore.poolIndex);
+  assert.deepEqual(mockDb.entities.UserLPPositionIndex.get(ADDRESSES.user), holderBefore.userIndex);
+
+  mockDb = await TestHelpers.LeaderboardConfig.LPRateUpdated.processEvent({
+    event: rateUpdated,
+    mockDb,
+  });
+  assert.deepEqual(mockDb.entities.LPPoolConfig.get(TASK6_V2_POOL), afterNextEvent);
+  assert.deepEqual(mockDb.entities.LPPoolEpochGrowth.get(`${TASK6_V2_POOL}:1`), disabledGrowth);
+
+  const settle = TestHelpers.LeaderboardKeeper.UserSettled.createMockEvent({
+    user: ADDRESSES.user,
+    timestamp: BigInt(nextTimestamp + 100),
+    ...eventData(LP_V2_RESUME_CUTOVER_BLOCK + 12, nextTimestamp + 100, ADDRESSES.config),
+  });
+  mockDb = await TestHelpers.LeaderboardKeeper.UserSettled.processEvent({ event: settle, mockDb });
+  assert.equal(
+    mockDb.entities.UserEpochStats.get(`${ADDRESSES.user}:1`)?.lpPoints,
+    referenceTask6FungiblePoints(100n * 10n ** 6n, referenceTask6FungibleGrowth(2_000n, 100))
+  );
+  assert.equal(
+    mockDb.entities.LPPoolEpochGrowth.get(`${TASK6_V2_POOL}:1`)?.lastTimestamp,
+    disableTimestamp
+  );
+});
+
+test('registered Balancer disable in its active era survives the next ordinary event and remains claimable', async () => {
+  const TestHelpers = loadTestHelpers();
+  const eventData = createEventDataFactory();
+  const pool = BALANCER_AUTORANGE_V3_POOL_ADDRESS.toLowerCase();
+  const disableTimestamp = LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP + 100;
+  const nextTimestamp = LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP + 200;
+  const positionId = `v2:${pool}:${ADDRESSES.user}`;
+  let mockDb = seedTask6FungiblePool(TestHelpers.MockDb.createMockDb(), {
+    pool,
+    user: ADDRESSES.user,
+    rateBps: 2_000n,
+    startTimestamp: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP,
+  });
+  mockDb = seedTask6RetiredLegacyConfig(mockDb, LP_V2_CUTOVER_TIMESTAMP);
+  mockDb = seedTask6PausedV2Config(mockDb, LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP);
+  const holderBefore = {
+    position: mockDb.entities.UserLPPosition.get(positionId),
+    poolIndex: mockDb.entities.LPPoolPositionIndex.get(pool),
+    userIndex: mockDb.entities.UserLPPositionIndex.get(ADDRESSES.user),
+  };
+
+  const disableData = eventData(
+    LP_BALANCER_AUTORANGE_CUTOVER_BLOCK + 10,
+    disableTimestamp,
+    ADDRESSES.config
+  );
+  const disabled = TestHelpers.LeaderboardConfig.LPPoolDisabled.createMockEvent({
+    pool,
+    timestamp: BigInt(disableTimestamp),
+    ...disableData,
+  });
+  mockDb = await TestHelpers.LeaderboardConfig.LPPoolDisabled.processEvent({
+    event: disabled,
+    mockDb,
+  });
+
+  const disabledConfig = mockDb.entities.LPPoolConfig.get(pool);
+  const disabledGrowth = mockDb.entities.LPPoolEpochGrowth.get(`${pool}:1`);
+  const protocolAfterDisable = mockDb.entities.ProtocolStats.get('global');
+  const markersAfterDisable = [
+    mockDb.entities.LPStaticTransition.get('legacy-v3-to-v2'),
+    mockDb.entities.LPStaticTransition.get('v2-to-balancer-autorange'),
+  ];
+  assert.ok(markersAfterDisable.every(Boolean));
+  assert.equal(disabledConfig?.isActive, false);
+  assert.equal(disabledConfig?.disabledAtTimestamp, disableTimestamp);
+  assert.equal(disabledGrowth?.lastTimestamp, disableTimestamp);
+  assert.equal(disabledGrowth?.scalarGrowthX128, referenceTask6FungibleGrowth(2_000n, 100));
+
+  const nextData = eventData(
+    LP_BALANCER_AUTORANGE_CUTOVER_BLOCK + 11,
+    nextTimestamp,
+    ADDRESSES.config
+  );
+  nextData.mockEventData.transaction.hash = disableData.mockEventData.transaction.hash;
+  const rateUpdated = TestHelpers.LeaderboardConfig.LPRateUpdated.createMockEvent({
+    pool,
+    oldRate: 2_000n,
+    newRate: 1_500n,
+    timestamp: BigInt(nextTimestamp),
+    ...nextData,
+  });
+  mockDb = await TestHelpers.LeaderboardConfig.LPRateUpdated.processEvent({
+    event: rateUpdated,
+    mockDb,
+  });
+
+  const afterNextEvent = mockDb.entities.LPPoolConfig.get(pool);
+  assert.equal(afterNextEvent?.isActive, false);
+  assert.equal(afterNextEvent?.disabledAtTimestamp, disableTimestamp);
+  assert.equal(afterNextEvent?.lpRateBps, 1_500n);
+  assert.deepEqual(mockDb.entities.LPPoolEpochGrowth.get(`${pool}:1`), disabledGrowth);
+  assert.deepEqual(mockDb.entities.ProtocolStats.get('global'), protocolAfterDisable);
+  assert.deepEqual(
+    [
+      mockDb.entities.LPStaticTransition.get('legacy-v3-to-v2'),
+      mockDb.entities.LPStaticTransition.get('v2-to-balancer-autorange'),
+    ],
+    markersAfterDisable
+  );
+  assert.deepEqual(mockDb.entities.UserLPPosition.get(positionId), holderBefore.position);
+  assert.deepEqual(mockDb.entities.LPPoolPositionIndex.get(pool), holderBefore.poolIndex);
+  assert.deepEqual(mockDb.entities.UserLPPositionIndex.get(ADDRESSES.user), holderBefore.userIndex);
+
+  mockDb = await TestHelpers.LeaderboardConfig.LPRateUpdated.processEvent({
+    event: rateUpdated,
+    mockDb,
+  });
+  assert.deepEqual(mockDb.entities.LPPoolConfig.get(pool), afterNextEvent);
+  assert.deepEqual(mockDb.entities.LPPoolEpochGrowth.get(`${pool}:1`), disabledGrowth);
+
+  const settle = TestHelpers.LeaderboardKeeper.UserSettled.createMockEvent({
+    user: ADDRESSES.user,
+    timestamp: BigInt(nextTimestamp + 100),
+    ...eventData(LP_BALANCER_AUTORANGE_CUTOVER_BLOCK + 12, nextTimestamp + 100, ADDRESSES.config),
+  });
+  mockDb = await TestHelpers.LeaderboardKeeper.UserSettled.processEvent({ event: settle, mockDb });
+  assert.equal(
+    mockDb.entities.UserEpochStats.get(`${ADDRESSES.user}:1`)?.lpPoints,
+    referenceTask6FungiblePoints(100n * 10n ** 6n, referenceTask6FungibleGrowth(2_000n, 100))
+  );
+  assert.equal(mockDb.entities.LPPoolEpochGrowth.get(`${pool}:1`)?.lastTimestamp, disableTimestamp);
+});
+
+test('registered retired legacy configuration survives the next ordinary event without reactivation', async () => {
+  const TestHelpers = loadTestHelpers();
+  const eventData = createEventDataFactory();
+  const legacy = BOOTSTRAP_LP_POOL_CONFIGS[0];
+  const configTimestamp = LP_V2_CUTOVER_TIMESTAMP + 100;
+  const nextTimestamp = LP_V2_CUTOVER_TIMESTAMP + 200;
+  const positionId = `v2:${TASK6_V2_POOL}:${ADDRESSES.user}`;
+  let mockDb = seedTask6FungiblePool(TestHelpers.MockDb.createMockDb(), {
+    pool: TASK6_V2_POOL,
+    user: ADDRESSES.user,
+    rateBps: 2_000n,
+    startTimestamp: LP_V2_CUTOVER_TIMESTAMP,
+  });
+  mockDb = seedTask6RetiredLegacyConfig(mockDb, LP_V2_CUTOVER_TIMESTAMP);
+  const seededGrowth = mockDb.entities.LPPoolEpochGrowth.get(`${TASK6_V2_POOL}:1`);
+  assert.ok(seededGrowth);
+  mockDb = mockDb.entities.LPPoolEpochGrowth.set({
+    ...seededGrowth,
+    lastTimestamp: nextTimestamp,
+    scalarGrowthX128: referenceTask6FungibleGrowth(2_000n, 200),
+    lastUpdate: nextTimestamp,
+  });
+  const growthBefore = mockDb.entities.LPPoolEpochGrowth.get(`${TASK6_V2_POOL}:1`);
+  const holderBefore = {
+    position: mockDb.entities.UserLPPosition.get(positionId),
+    poolIndex: mockDb.entities.LPPoolPositionIndex.get(TASK6_V2_POOL),
+    userIndex: mockDb.entities.UserLPPositionIndex.get(ADDRESSES.user),
+  };
+
+  const configuredData = eventData(LP_V2_CUTOVER_BLOCK + 10, configTimestamp, ADDRESSES.config);
+  const configured = TestHelpers.LeaderboardConfig.LPPoolConfigured.createMockEvent({
+    pool: TASK6_LEGACY_POOL,
+    positionManager: legacy.positionManager,
+    token0: legacy.token0,
+    token1: legacy.token1,
+    lpRateBps: legacy.lpRateBps,
+    timestamp: BigInt(configTimestamp),
+    ...configuredData,
+  });
+  mockDb = await TestHelpers.LeaderboardConfig.LPPoolConfigured.processEvent({
+    event: configured,
+    mockDb,
+  });
+  const protocolAfterConfigured = mockDb.entities.ProtocolStats.get('global');
+  const markerAfterConfigured = mockDb.entities.LPStaticTransition.get('legacy-v3-to-v2');
+  assert.ok(markerAfterConfigured);
+
+  const unknownPool = '0x000000000000000000000000000000000000e098';
+  const nextData = eventData(LP_V2_CUTOVER_BLOCK + 11, nextTimestamp, ADDRESSES.config);
+  nextData.mockEventData.transaction.hash = configuredData.mockEventData.transaction.hash;
+  const ordinaryNextEvent = TestHelpers.LeaderboardConfig.LPRateUpdated.createMockEvent({
+    pool: unknownPool,
+    oldRate: 0n,
+    newRate: 1n,
+    timestamp: BigInt(nextTimestamp),
+    ...nextData,
+  });
+  mockDb = await TestHelpers.LeaderboardConfig.LPRateUpdated.processEvent({
+    event: ordinaryNextEvent,
+    mockDb,
+  });
+
+  const retiredConfig = mockDb.entities.LPPoolConfig.get(TASK6_LEGACY_POOL);
+  assert.equal(retiredConfig?.isActive, false);
+  assert.equal(retiredConfig?.disabledAtTimestamp, LP_V2_CUTOVER_TIMESTAMP);
+  assert.deepEqual(mockDb.entities.LPPoolEpochGrowth.get(`${TASK6_V2_POOL}:1`), growthBefore);
+  assert.deepEqual(mockDb.entities.ProtocolStats.get('global'), protocolAfterConfigured);
+  assert.deepEqual(
+    mockDb.entities.LPStaticTransition.get('legacy-v3-to-v2'),
+    markerAfterConfigured
+  );
+  assert.deepEqual(mockDb.entities.UserLPPosition.get(positionId), holderBefore.position);
+  assert.deepEqual(mockDb.entities.LPPoolPositionIndex.get(TASK6_V2_POOL), holderBefore.poolIndex);
+  assert.deepEqual(mockDb.entities.UserLPPositionIndex.get(ADDRESSES.user), holderBefore.userIndex);
+
+  mockDb = await TestHelpers.LeaderboardConfig.LPRateUpdated.processEvent({
+    event: ordinaryNextEvent,
+    mockDb,
+  });
+  assert.deepEqual(mockDb.entities.LPPoolConfig.get(TASK6_LEGACY_POOL), retiredConfig);
+  assert.deepEqual(mockDb.entities.LPPoolEpochGrowth.get(`${TASK6_V2_POOL}:1`), growthBefore);
+
+  const settle = TestHelpers.LeaderboardKeeper.UserSettled.createMockEvent({
+    user: ADDRESSES.user,
+    timestamp: BigInt(nextTimestamp),
+    ...eventData(LP_V2_CUTOVER_BLOCK + 12, nextTimestamp, ADDRESSES.config),
+  });
+  mockDb = await TestHelpers.LeaderboardKeeper.UserSettled.processEvent({ event: settle, mockDb });
+  assert.equal(
+    mockDb.entities.UserEpochStats.get(`${ADDRESSES.user}:1`)?.lpPoints,
+    referenceTask6FungiblePoints(100n * 10n ** 6n, referenceTask6FungibleGrowth(2_000n, 200))
+  );
+  assert.deepEqual(mockDb.entities.LPPoolEpochGrowth.get(`${TASK6_V2_POOL}:1`), growthBefore);
+});
+
+test('registered repeated static-pool disables preserve the original inactive provenance', async () => {
+  const cases = [
+    {
+      name: 'retired legacy',
+      pool: TASK6_LEGACY_POOL,
+      block: LP_V2_CUTOVER_BLOCK + 20,
+      timestamp: LP_V2_CUTOVER_TIMESTAMP + 300,
+      expectedMarker: 'legacy-v3-to-v2',
+      seed(TestHelpers: ReturnType<typeof loadTestHelpers>) {
+        let mockDb = seedTask6FungiblePool(TestHelpers.MockDb.createMockDb(), {
+          pool: TASK6_V2_POOL,
+          user: ADDRESSES.user,
+          rateBps: 2_000n,
+          startTimestamp: LP_V2_CUTOVER_TIMESTAMP,
+        });
+        return seedTask6RetiredLegacyConfig(mockDb, LP_V2_CUTOVER_TIMESTAMP);
+      },
+    },
+    {
+      name: 'paused V2',
+      pool: TASK6_V2_POOL,
+      block: LP_BALANCER_AUTORANGE_CUTOVER_BLOCK + 20,
+      timestamp: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP + 300,
+      expectedMarker: 'v2-to-balancer-autorange',
+      seed(TestHelpers: ReturnType<typeof loadTestHelpers>) {
+        const balancerPool = BALANCER_AUTORANGE_V3_POOL_ADDRESS.toLowerCase();
+        let mockDb = seedTask6FungiblePool(TestHelpers.MockDb.createMockDb(), {
+          pool: balancerPool,
+          user: ADDRESSES.user,
+          rateBps: 2_000n,
+          startTimestamp: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP,
+        });
+        mockDb = seedTask6RetiredLegacyConfig(mockDb, LP_V2_CUTOVER_TIMESTAMP);
+        return seedTask6PausedV2Config(mockDb, LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP);
+      },
+    },
+    {
+      name: 'retired Balancer',
+      pool: BALANCER_AUTORANGE_V3_POOL_ADDRESS.toLowerCase(),
+      block: LP_V2_RESUME_CUTOVER_BLOCK + 20,
+      timestamp: LP_V2_RESUME_CUTOVER_TIMESTAMP + 300,
+      expectedMarker: 'balancer-to-v2-resume',
+      seed(TestHelpers: ReturnType<typeof loadTestHelpers>) {
+        let mockDb = seedTask6FungiblePool(TestHelpers.MockDb.createMockDb(), {
+          pool: TASK6_V2_POOL,
+          user: ADDRESSES.user,
+          rateBps: 2_000n,
+          startTimestamp: LP_V2_RESUME_CUTOVER_TIMESTAMP,
+        });
+        mockDb = seedTask6RetiredLegacyConfig(mockDb, LP_V2_CUTOVER_TIMESTAMP);
+        return seedTask6RetiredBalancerConfig(mockDb, LP_V2_RESUME_CUTOVER_TIMESTAMP);
+      },
+    },
+  ] as const;
+
+  for (const entry of cases) {
+    const TestHelpers = loadTestHelpers();
+    const eventData = createEventDataFactory();
+    let mockDb = entry.seed(TestHelpers);
+    const configBefore = mockDb.entities.LPPoolConfig.get(entry.pool);
+    assert.ok(configBefore, entry.name);
+    const disabled = TestHelpers.LeaderboardConfig.LPPoolDisabled.createMockEvent({
+      pool: entry.pool,
+      timestamp: BigInt(entry.timestamp),
+      ...eventData(entry.block, entry.timestamp, ADDRESSES.config),
+    });
+    mockDb = await TestHelpers.LeaderboardConfig.LPPoolDisabled.processEvent({
+      event: disabled,
+      mockDb,
+    });
+
+    assert.deepEqual(mockDb.entities.LPPoolConfig.get(entry.pool), configBefore, entry.name);
+    assert.ok(mockDb.entities.LPStaticTransition.get(entry.expectedMarker), entry.name);
+  }
+});
+
+test('registered static transition markers are preload-safe, ordered after boundary state, and replay-idempotent', async () => {
+  const TestHelpers = loadTestHelpers();
+  const legacy = BOOTSTRAP_LP_POOL_CONFIGS[0];
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  mockDb = mockDb.entities.LPPoolRegistry.set({
+    id: 'global',
+    poolIds: [TASK6_LEGACY_POOL],
+    lastUpdate: LP_V2_CUTOVER_TIMESTAMP - 100,
+  });
+  mockDb = mockDb.entities.LPPoolConfig.set({
+    id: TASK6_LEGACY_POOL,
+    pool: TASK6_LEGACY_POOL,
+    positionManager: legacy.positionManager.toLowerCase(),
+    token0: legacy.token0.toLowerCase(),
+    token1: legacy.token1.toLowerCase(),
+    fee: legacy.fee,
+    lpRateBps: legacy.lpRateBps,
+    isActive: true,
+    enabledAtEpoch: 1n,
+    enabledAtTimestamp: LP_V2_CUTOVER_TIMESTAMP - 100,
+    disabledAtEpoch: undefined,
+    disabledAtTimestamp: undefined,
+    lastUpdate: LP_V2_CUTOVER_TIMESTAMP - 100,
+  });
+  mockDb = mockDb.entities.LPPoolState.set({
+    id: TASK6_LEGACY_POOL,
+    pool: TASK6_LEGACY_POOL,
+    currentTick: 0,
+    sqrtPriceX96: 0n,
+    token0Price: 0n,
+    token1Price: 0n,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
+    lastUpdate: LP_V2_CUTOVER_TIMESTAMP - 100,
+  });
+
+  const eventData = createEventDataFactory();
+  const event = TestHelpers.LeaderboardConfig.LPRateUpdated.createMockEvent({
+    pool: '0x000000000000000000000000000000000000e097',
+    oldRate: 0n,
+    newRate: 1n,
+    timestamp: BigInt(LP_V2_CUTOVER_TIMESTAMP),
+    ...eventData(LP_V2_CUTOVER_BLOCK, LP_V2_CUTOVER_TIMESTAMP, ADDRESSES.config),
+  });
+  const handler = await getRegisteredEventHandler('LeaderboardConfig', 'LPRateUpdated');
+  const preload = createTask6InstrumentedContext(mockDb, true);
+  await handler({ event, context: preload.context });
+  assert.equal(preload.rows.get('LPStaticTransition')?.get('legacy-v3-to-v2'), undefined);
+
+  const ordered = createTask6InstrumentedContext(mockDb, false);
+  await handler({ event, context: ordered.context });
+  assert.deepEqual(ordered.rows.get('LPStaticTransition')?.get('legacy-v3-to-v2'), {
+    id: 'legacy-v3-to-v2',
+    outgoingPool: TASK6_LEGACY_POOL,
+    incomingPool: TASK6_V2_POOL,
+    blockNumber: BigInt(LP_V2_CUTOVER_BLOCK),
+    timestamp: LP_V2_CUTOVER_TIMESTAMP,
+  });
+  const outgoingWrite = ordered.operations.findIndex(
+    operation => operation === `set:LPPoolConfig:${TASK6_LEGACY_POOL}`
+  );
+  const incomingWrite = ordered.operations.findIndex(
+    operation => operation === `set:LPPoolConfig:${TASK6_V2_POOL}`
+  );
+  const markerWrite = ordered.operations.findIndex(
+    operation => operation === 'set:LPStaticTransition:legacy-v3-to-v2'
+  );
+  assert.ok(outgoingWrite >= 0);
+  assert.ok(incomingWrite > outgoingWrite);
+  assert.ok(markerWrite > incomingWrite);
+
+  const boundaryStateAfterFirst = {
+    legacy: ordered.rows.get('LPPoolConfig')?.get(TASK6_LEGACY_POOL),
+    v2: ordered.rows.get('LPPoolConfig')?.get(TASK6_V2_POOL),
+    marker: ordered.rows.get('LPStaticTransition')?.get('legacy-v3-to-v2'),
+  };
+  const markerWriteCount = ordered.operations.filter(
+    operation => operation === 'set:LPStaticTransition:legacy-v3-to-v2'
+  ).length;
+  await handler({ event, context: ordered.context });
+  assert.deepEqual(
+    {
+      legacy: ordered.rows.get('LPPoolConfig')?.get(TASK6_LEGACY_POOL),
+      v2: ordered.rows.get('LPPoolConfig')?.get(TASK6_V2_POOL),
+      marker: ordered.rows.get('LPStaticTransition')?.get('legacy-v3-to-v2'),
+    },
+    boundaryStateAfterFirst
+  );
+  assert.equal(
+    ordered.operations.filter(operation => operation === 'set:LPStaticTransition:legacy-v3-to-v2')
+      .length,
+    markerWriteCount
+  );
+});
+
+test('registered chronology rejects every malformed static transition marker before preload or ordered writes', async t => {
+  const corruptions = [
+    {
+      field: 'outgoingPool',
+      mutate: (row: (typeof TASK6_STATIC_TRANSITIONS)[number]) => ({
+        ...row,
+        outgoingPool: '0x000000000000000000000000000000000000dead',
+      }),
+    },
+    {
+      field: 'incomingPool',
+      mutate: (row: (typeof TASK6_STATIC_TRANSITIONS)[number]) => ({
+        ...row,
+        incomingPool: '0x000000000000000000000000000000000000beef',
+      }),
+    },
+    {
+      field: 'blockNumber',
+      mutate: (row: (typeof TASK6_STATIC_TRANSITIONS)[number]) => ({
+        ...row,
+        blockNumber: row.blockNumber + 1n,
+      }),
+    },
+    {
+      field: 'timestamp',
+      mutate: (row: (typeof TASK6_STATIC_TRANSITIONS)[number]) => ({
+        ...row,
+        timestamp: row.timestamp + 1,
+      }),
+    },
+  ] as const;
+  const handler = await getRegisteredEventHandler('LeaderboardConfig', 'LPRateUpdated');
+
+  for (const transition of TASK6_STATIC_TRANSITIONS) {
+    for (const corruption of corruptions) {
+      for (const isPreload of [true, false]) {
+        await t.test(
+          `${transition.id} ${corruption.field} ${isPreload ? 'preload' : 'ordered'}`,
+          async () => {
+            const TestHelpers = loadTestHelpers();
+            let mockDb = TestHelpers.MockDb.createMockDb();
+            mockDb = mockDb.entities.LPStaticTransition.set(corruption.mutate(transition));
+            const eventData = createEventDataFactory();
+            const event = TestHelpers.LeaderboardConfig.LPRateUpdated.createMockEvent({
+              pool: '0x000000000000000000000000000000000000e099',
+              oldRate: 0n,
+              newRate: 1n,
+              timestamp: BigInt(LP_V2_RESUME_CUTOVER_TIMESTAMP + 100),
+              ...eventData(
+                LP_V2_RESUME_CUTOVER_BLOCK + 1,
+                LP_V2_RESUME_CUTOVER_TIMESTAMP + 100,
+                ADDRESSES.config
+              ),
+            });
+            const run = createTask6InstrumentedContext(mockDb, isPreload);
+            const rowsBefore = new Map(
+              Array.from(run.rows, ([entityName, rows]) => [entityName, new Map(rows)])
+            );
+
+            await assert.rejects(
+              handler({ event, context: run.context }),
+              new RegExp(`invalid LP static transition marker.*${transition.id}`)
+            );
+            assert.deepEqual(run.rows, rowsBefore);
+            assert.deepEqual(countRecord(run.setCounts), {});
+            assert.deepEqual(run.operations, []);
+          }
+        );
+      }
+    }
+  }
+});
+
+test('registered chronology backfills canonical transition rows once and replays them idempotently', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = seedTask6FungiblePool(TestHelpers.MockDb.createMockDb(), {
+    pool: TASK6_V2_POOL,
+    user: ADDRESSES.user,
+    rateBps: 2_000n,
+    startTimestamp: LP_V2_RESUME_CUTOVER_TIMESTAMP,
+  });
+  mockDb = seedTask6RetiredLegacyConfig(mockDb, LP_V2_CUTOVER_TIMESTAMP);
+  mockDb = seedTask6RetiredBalancerConfig(mockDb, LP_V2_RESUME_CUTOVER_TIMESTAMP);
+  const handler = await getRegisteredEventHandler('LeaderboardConfig', 'LPRateUpdated');
+  const eventData = createEventDataFactory();
+  const event = TestHelpers.LeaderboardConfig.LPRateUpdated.createMockEvent({
+    pool: '0x000000000000000000000000000000000000e099',
+    oldRate: 0n,
+    newRate: 1n,
+    timestamp: BigInt(LP_V2_RESUME_CUTOVER_TIMESTAMP + 100),
+    ...eventData(
+      LP_V2_RESUME_CUTOVER_BLOCK + 1,
+      LP_V2_RESUME_CUTOVER_TIMESTAMP + 100,
+      ADDRESSES.config
+    ),
+  });
+  const ordered = createTask6InstrumentedContext(mockDb, false);
+  const configsBefore = new Map(ordered.rows.get('LPPoolConfig'));
+
+  await handler({ event, context: ordered.context });
+
+  assert.deepEqual(ordered.rows.get('LPPoolConfig'), configsBefore);
+  for (const transition of TASK6_STATIC_TRANSITIONS) {
+    assert.deepEqual(ordered.rows.get('LPStaticTransition')?.get(transition.id), transition);
+  }
+  const markerOperations = () =>
+    ordered.operations.filter(operation => operation.startsWith('set:LPStaticTransition:'));
+  assert.deepEqual(
+    markerOperations(),
+    TASK6_STATIC_TRANSITIONS.map(transition => `set:LPStaticTransition:${transition.id}`)
+  );
+
+  const rowsAfterBackfill = new Map(ordered.rows.get('LPStaticTransition'));
+  await handler({ event, context: ordered.context });
+  assert.deepEqual(ordered.rows.get('LPStaticTransition'), rowsAfterBackfill);
+  assert.equal(markerOperations().length, TASK6_STATIC_TRANSITIONS.length);
+  assert.deepEqual(ordered.rows.get('LPPoolConfig'), configsBefore);
+});
+
+test('registered chronology treats marker address casing as normalized identity without rewriting rows', async t => {
+  const mixedCaseAddress = (address: string) => `0x${address.slice(2).toUpperCase()}`;
+
+  for (const isPreload of [true, false]) {
+    await t.test(isPreload ? 'preload' : 'ordered', async () => {
+      const TestHelpers = loadTestHelpers();
+      let mockDb = seedTask6FungiblePool(TestHelpers.MockDb.createMockDb(), {
+        pool: TASK6_V2_POOL,
+        user: ADDRESSES.user,
+        rateBps: 2_000n,
+        startTimestamp: LP_V2_RESUME_CUTOVER_TIMESTAMP,
+      });
+      mockDb = seedTask6RetiredLegacyConfig(mockDb, LP_V2_CUTOVER_TIMESTAMP);
+      mockDb = seedTask6RetiredBalancerConfig(mockDb, LP_V2_RESUME_CUTOVER_TIMESTAMP);
+      for (const transition of TASK6_STATIC_TRANSITIONS) {
+        mockDb = mockDb.entities.LPStaticTransition.set({
+          ...transition,
+          outgoingPool: mixedCaseAddress(transition.outgoingPool),
+          incomingPool: mixedCaseAddress(transition.incomingPool),
+        });
+      }
+      const eventData = createEventDataFactory();
+      const event = TestHelpers.LeaderboardConfig.LPRateUpdated.createMockEvent({
+        pool: '0x000000000000000000000000000000000000e099',
+        oldRate: 0n,
+        newRate: 1n,
+        timestamp: BigInt(LP_V2_RESUME_CUTOVER_TIMESTAMP + 100),
+        ...eventData(
+          LP_V2_RESUME_CUTOVER_BLOCK + 1,
+          LP_V2_RESUME_CUTOVER_TIMESTAMP + 100,
+          ADDRESSES.config
+        ),
+      });
+      const handler = await getRegisteredEventHandler('LeaderboardConfig', 'LPRateUpdated');
+      const run = createTask6InstrumentedContext(mockDb, isPreload);
+      const markersBefore = new Map(run.rows.get('LPStaticTransition'));
+      const configsBefore = new Map(run.rows.get('LPPoolConfig'));
+
+      await handler({ event, context: run.context });
+
+      assert.deepEqual(run.rows.get('LPStaticTransition'), markersBefore);
+      assert.deepEqual(run.rows.get('LPPoolConfig'), configsBefore);
+      assert.equal(run.setCounts.get('LPStaticTransition') ?? 0, 0);
+    });
+  }
+});
+
+test('a canonical later transition row cannot authorize an absent prerequisite boundary', async () => {
+  const TestHelpers = loadTestHelpers();
+  const legacy = BOOTSTRAP_LP_POOL_CONFIGS[0];
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  mockDb = mockDb.entities.LPPoolRegistry.set({
+    id: 'global',
+    poolIds: [TASK6_LEGACY_POOL],
+    lastUpdate: LP_V2_CUTOVER_TIMESTAMP - 100,
+  });
+  mockDb = mockDb.entities.LPPoolConfig.set({
+    id: TASK6_LEGACY_POOL,
+    pool: TASK6_LEGACY_POOL,
+    positionManager: legacy.positionManager.toLowerCase(),
+    token0: legacy.token0.toLowerCase(),
+    token1: legacy.token1.toLowerCase(),
+    fee: legacy.fee,
+    lpRateBps: legacy.lpRateBps,
+    isActive: true,
+    enabledAtEpoch: 1n,
+    enabledAtTimestamp: LP_V2_CUTOVER_TIMESTAMP - 100,
+    disabledAtEpoch: undefined,
+    disabledAtTimestamp: undefined,
+    lastUpdate: LP_V2_CUTOVER_TIMESTAMP - 100,
+  });
+  mockDb = mockDb.entities.LPPoolState.set({
+    id: TASK6_LEGACY_POOL,
+    pool: TASK6_LEGACY_POOL,
+    currentTick: 0,
+    sqrtPriceX96: 0n,
+    token0Price: 0n,
+    token1Price: 0n,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
+    lastUpdate: LP_V2_CUTOVER_TIMESTAMP - 100,
+  });
+  mockDb = mockDb.entities.LPStaticTransition.set(TASK6_STATIC_TRANSITIONS[1]);
+  const eventData = createEventDataFactory();
+  const event = TestHelpers.LeaderboardConfig.LPRateUpdated.createMockEvent({
+    pool: '0x000000000000000000000000000000000000e099',
+    oldRate: 0n,
+    newRate: 1n,
+    timestamp: BigInt(LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP + 100),
+    ...eventData(
+      LP_BALANCER_AUTORANGE_CUTOVER_BLOCK + 1,
+      LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP + 100,
+      ADDRESSES.config
+    ),
+  });
+
+  mockDb = await TestHelpers.LeaderboardConfig.LPRateUpdated.processEvent({ event, mockDb });
+
+  assert.deepEqual(
+    mockDb.entities.LPStaticTransition.get(TASK6_STATIC_TRANSITIONS[0].id),
+    TASK6_STATIC_TRANSITIONS[0]
+  );
+  assert.deepEqual(
+    mockDb.entities.LPStaticTransition.get(TASK6_STATIC_TRANSITIONS[1].id),
+    TASK6_STATIC_TRANSITIONS[1]
+  );
+  assert.equal(mockDb.entities.LPPoolConfig.get(TASK6_LEGACY_POOL)?.isActive, false);
+  assert.equal(mockDb.entities.LPPoolConfig.get(TASK6_V2_POOL)?.isActive, false);
+  assert.equal(mockDb.entities.LPPoolConfig.get(TASK6_BALANCER_POOL)?.isActive, true);
+
+  const boundaryState = {
+    legacy: mockDb.entities.LPPoolConfig.get(TASK6_LEGACY_POOL),
+    v2: mockDb.entities.LPPoolConfig.get(TASK6_V2_POOL),
+    balancer: mockDb.entities.LPPoolConfig.get(TASK6_BALANCER_POOL),
+    markers: TASK6_STATIC_TRANSITIONS.map(transition =>
+      mockDb.entities.LPStaticTransition.get(transition.id)
+    ),
+  };
+  mockDb = await TestHelpers.LeaderboardConfig.LPRateUpdated.processEvent({ event, mockDb });
+  assert.deepEqual(
+    {
+      legacy: mockDb.entities.LPPoolConfig.get(TASK6_LEGACY_POOL),
+      v2: mockDb.entities.LPPoolConfig.get(TASK6_V2_POOL),
+      balancer: mockDb.entities.LPPoolConfig.get(TASK6_BALANCER_POOL),
+      markers: TASK6_STATIC_TRANSITIONS.map(transition =>
+        mockDb.entities.LPStaticTransition.get(transition.id)
+      ),
+    },
+    boundaryState
+  );
+});
+
+test('unknown LP pool events are ignored and inactive rate updates do not settle', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+  const unknownPool = '0x000000000000000000000000000000000000d020';
+
+  const disabled = TestHelpers.LeaderboardConfig.LPPoolDisabled.createMockEvent({
+    pool: unknownPool,
+    timestamp: 700n,
+    ...eventData(27, 700, ADDRESSES.config),
+  });
+  mockDb = await TestHelpers.LeaderboardConfig.LPPoolDisabled.processEvent({
+    event: disabled,
+    mockDb,
+  });
+  assert.equal(mockDb.entities.LPPoolConfig.get(unknownPool), undefined);
+
+  const missingRate = TestHelpers.LeaderboardConfig.LPRateUpdated.createMockEvent({
+    pool: unknownPool,
+    oldRate: 100n,
+    newRate: 200n,
+    timestamp: 710n,
+    ...eventData(28, 710, ADDRESSES.config),
+  });
+  mockDb = await TestHelpers.LeaderboardConfig.LPRateUpdated.processEvent({
+    event: missingRate,
+    mockDb,
+  });
+  assert.equal(mockDb.entities.LPPoolConfig.get(unknownPool), undefined);
+
+  const inactivePool = '0x000000000000000000000000000000000000d021';
+  mockDb = mockDb.entities.LPPoolConfig.set({
+    id: inactivePool,
+    pool: inactivePool,
+    positionManager: ADDRESSES.positionManager,
+    token0: ADDRESSES.token0,
+    token1: ADDRESSES.token1,
+    fee: 3000,
+    lpRateBps: 100n,
+    isActive: false,
+    enabledAtEpoch: 1n,
+    enabledAtTimestamp: 0,
+    disabledAtEpoch: 1n,
+    disabledAtTimestamp: 600,
+    lastUpdate: 600,
+  });
+  mockDb = mockDb.entities.UserLPPosition.set({
+    id: 'inactive-position',
+    tokenId: 99n,
+    user_id: ADDRESSES.user,
+    pool: inactivePool,
+    positionManager: ADDRESSES.positionManager,
+    tickLower: -100,
+    tickUpper: 100,
+    liquidity: 100n,
+    amount0: 1n,
+    amount1: 1n,
+    isInRange: true,
+    valueUsd: 100_000_000n,
+    lastInRangeTimestamp: 600,
+    accumulatedInRangeSeconds: 7n,
+    lastSettledAt: 600,
+    settledLpPoints: 11n,
+    createdAt: 600,
+    lastUpdate: 600,
+  });
+
+  const inactiveRate = TestHelpers.LeaderboardConfig.LPRateUpdated.createMockEvent({
+    pool: inactivePool,
+    oldRate: 100n,
+    newRate: 300n,
+    timestamp: 720n,
+    ...eventData(29, 720, ADDRESSES.config),
+  });
+  mockDb = await TestHelpers.LeaderboardConfig.LPRateUpdated.processEvent({
+    event: inactiveRate,
+    mockDb,
+  });
+
+  assert.equal(mockDb.entities.LPPoolConfig.get(inactivePool)?.lpRateBps, 300n);
+  assert.equal(mockDb.entities.UserLPPosition.get('inactive-position')?.lastSettledAt, 600);
+  assert.equal(mockDb.entities.UserLPPosition.get('inactive-position')?.settledLpPoints, 11n);
 });
 
 test('epoch dates override replaces the on-chain start and seeds the end', async () => {

@@ -20,6 +20,8 @@ const ADDRESSES = {
   liquidator: '0x0000000000000000000000000000000000003005',
   flashTarget: '0x0000000000000000000000000000000000003006',
   collateralAlt: '0x0000000000000000000000000000000000003007',
+  vault: '0x0000000000000000000000000000000000003008',
+  vaultFactory: '0x0000000000000000000000000000000000003009',
 };
 
 type TestHelpersApi = typeof TestHelpers;
@@ -47,8 +49,7 @@ function seedPool(
   mockDb: MockDb,
   pool: string,
   timestamp: number,
-  flashloanPremiumToProtocol: bigint | undefined,
-  bridgeProtocolFee?: bigint
+  flashloanPremiumToProtocol: bigint | undefined
 ) {
   return mockDb.entities.Pool.set({
     id: pool,
@@ -61,7 +62,7 @@ function seedPool(
     poolDataProviderImpl: undefined,
     poolImpl: undefined,
     proxyPriceProvider: undefined,
-    bridgeProtocolFee,
+    bridgeProtocolFee: undefined,
     flashloanPremiumToProtocol,
     flashloanPremiumTotal: undefined,
     active: true,
@@ -367,18 +368,12 @@ test('supply, borrow, and repay record prices and referrers', async () => {
     reserve_id: reserveId,
     scaledATokenBalance: 0n,
     currentATokenBalance: 0n,
-    scaledVariableDebt: 22n,
-    currentVariableDebt: 0n,
-    principalStableDebt: 11n,
-    currentStableDebt: 0n,
-    currentTotalDebt: 0n,
-    stableBorrowRate: 0n,
-    oldStableBorrowRate: 0n,
+    scaledDebt: 22n,
+    currentDebt: 0n,
     liquidityRate: 0n,
     variableBorrowIndex: 0n,
     usageAsCollateralEnabledOnUser: false,
     lastUpdateTimestamp: 3000,
-    stableBorrowLastUpdateTimestamp: 0,
   });
 
   const supplyEvent = TestHelpers.Pool.Supply.createMockEvent({
@@ -407,8 +402,11 @@ test('supply, borrow, and repay record prices and referrers', async () => {
   assert.equal(supplyFeedRow?.counterparty, ADDRESSES.liquidator);
   assert.equal(supplyFeedRow?.onBehalfOf, ADDRESSES.user);
   assert.equal(supplyFeedRow?.amount, 100n * UNIT);
+  // v2's native mock passes the event's block through unshifted, so the feed row carries
+  // exactly the block the event was built with.
   assert.equal(supplyFeedRow?.blockNumber, 14);
   assert.equal(supplyFeedRow?.logIndex, supplyEvent.logIndex);
+  assert.equal(mockDb.entities.AutoDeposit.get(supplyId), undefined);
 
   const borrowEvent = TestHelpers.Pool.Borrow.createMockEvent({
     reserve: ADDRESSES.collateral,
@@ -425,8 +423,7 @@ test('supply, borrow, and repay record prices and referrers', async () => {
   const borrowId = `${borrowEvent.transaction.hash}-${borrowEvent.logIndex}`;
   const borrow = mockDb.entities.Borrow.get(borrowId);
   assert.ok(borrow);
-  assert.equal(borrow?.stableTokenDebt, 11n);
-  assert.equal(borrow?.variableTokenDebt, 22n);
+  assert.equal(borrow?.scaledDebt, 22n);
   assert.equal(borrow?.borrowRate, 9n);
   assert.equal(borrow?.borrowRateMode, 2);
   assert.equal(borrow?.assetPriceUSD, 2.5);
@@ -463,6 +460,261 @@ test('supply, borrow, and repay record prices and referrers', async () => {
   assert.equal(repayFeedRow?.amount, 20n * UNIT);
 
   assert.ok(mockDb.entities.Referrer.get('123'));
+});
+
+test('pool supply by a registered user vault records an auto-deposit', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb: MockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  mockDb = mockDb.entities.Protocol.set({ id: '1' });
+  mockDb = seedPool(mockDb, ADDRESSES.pool, 3500, undefined);
+  mockDb = seedReserve(mockDb, ADDRESSES.collateral, ADDRESSES.pool, 3500);
+  mockDb = setAssetPrice(mockDb, ADDRESSES.collateral, 2.5, 3500);
+
+  const vaultCreated = TestHelpers.UserVaultFactory.UserVaultCreated.createMockEvent({
+    user: ADDRESSES.user,
+    vault: ADDRESSES.vault,
+    ...eventData(17, 3510, ADDRESSES.vaultFactory),
+  });
+  mockDb = await TestHelpers.UserVaultFactory.UserVaultCreated.processEvent({
+    event: vaultCreated,
+    mockDb,
+  });
+
+  const supply = TestHelpers.Pool.Supply.createMockEvent({
+    reserve: ADDRESSES.collateral,
+    user: ADDRESSES.vault,
+    onBehalfOf: ADDRESSES.user,
+    amount: 25n * UNIT,
+    referralCode: 0n,
+    ...eventData(18, 3520, ADDRESSES.pool),
+  });
+  mockDb = await TestHelpers.Pool.Supply.processEvent({ event: supply, mockDb });
+
+  const depositId = `${supply.transaction.hash}-${supply.logIndex}`;
+  const autoDeposit = mockDb.entities.AutoDeposit.get(depositId);
+  assert.ok(autoDeposit);
+  assert.equal(autoDeposit.id, depositId);
+  assert.equal(autoDeposit.vault, ADDRESSES.vault);
+  assert.equal(autoDeposit.user, ADDRESSES.user);
+  assert.equal(autoDeposit.poolAddressesProvider, ADDRESSES.pool);
+  assert.equal(autoDeposit.asset, ADDRESSES.collateral);
+  assert.equal(autoDeposit.reserve_id, `${ADDRESSES.collateral}-${ADDRESSES.pool}`);
+  assert.equal(autoDeposit.amount, 25n * UNIT);
+  assert.equal(autoDeposit.assetPriceUSD, 2.5);
+  assert.equal(autoDeposit.timestamp, 3520);
+  assert.equal(autoDeposit.txHash, supply.transaction.hash);
+});
+
+test('registered vault supply for a different user is not an auto-deposit', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb: MockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  mockDb = mockDb.entities.Protocol.set({ id: '1' });
+  mockDb = seedPool(mockDb, ADDRESSES.pool, 3600, undefined);
+  mockDb = seedReserve(mockDb, ADDRESSES.collateral, ADDRESSES.pool, 3600);
+
+  const vaultCreated = TestHelpers.UserVaultFactory.UserVaultCreated.createMockEvent({
+    user: ADDRESSES.user,
+    vault: ADDRESSES.vault,
+    ...eventData(19, 3610, ADDRESSES.vaultFactory),
+  });
+  mockDb = await TestHelpers.UserVaultFactory.UserVaultCreated.processEvent({
+    event: vaultCreated,
+    mockDb,
+  });
+
+  const supply = TestHelpers.Pool.Supply.createMockEvent({
+    reserve: ADDRESSES.collateral,
+    user: ADDRESSES.vault,
+    onBehalfOf: ADDRESSES.liquidator,
+    amount: 25n * UNIT,
+    referralCode: 0n,
+    ...eventData(20, 3620, ADDRESSES.pool),
+  });
+  mockDb = await TestHelpers.Pool.Supply.processEvent({ event: supply, mockDb });
+
+  const depositId = `${supply.transaction.hash}-${supply.logIndex}`;
+  assert.equal(mockDb.entities.AutoDeposit.get(depositId), undefined);
+});
+
+test('direct user supply is not an auto-deposit', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb: MockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  mockDb = mockDb.entities.Protocol.set({ id: '1' });
+  mockDb = seedPool(mockDb, ADDRESSES.pool, 3700, undefined);
+  mockDb = seedReserve(mockDb, ADDRESSES.collateral, ADDRESSES.pool, 3700);
+
+  const supply = TestHelpers.Pool.Supply.createMockEvent({
+    reserve: ADDRESSES.collateral,
+    user: ADDRESSES.user,
+    onBehalfOf: ADDRESSES.user,
+    amount: 25n * UNIT,
+    referralCode: 0n,
+    ...eventData(21, 3710, ADDRESSES.pool),
+  });
+  mockDb = await TestHelpers.Pool.Supply.processEvent({ event: supply, mockDb });
+
+  const depositId = `${supply.transaction.hash}-${supply.logIndex}`;
+  assert.equal(mockDb.entities.AutoDeposit.get(depositId), undefined);
+});
+
+test('pool repayment by a registered user vault records self-repayment totals', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb: MockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  mockDb = mockDb.entities.Protocol.set({ id: '1' });
+  mockDb = seedPool(mockDb, ADDRESSES.pool, 4000, undefined);
+  mockDb = seedReserve(mockDb, ADDRESSES.debt, ADDRESSES.pool, 4000);
+
+  const vaultCreated = TestHelpers.UserVaultFactory.UserVaultCreated.createMockEvent({
+    user: ADDRESSES.user,
+    vault: ADDRESSES.vault,
+    ...eventData(20, 4010, ADDRESSES.vaultFactory),
+  });
+  mockDb = await TestHelpers.UserVaultFactory.UserVaultCreated.processEvent({
+    event: vaultCreated,
+    mockDb,
+  });
+
+  const repay = TestHelpers.Pool.Repay.createMockEvent({
+    reserve: ADDRESSES.debt,
+    user: ADDRESSES.user,
+    repayer: ADDRESSES.vault,
+    amount: 30n * UNIT,
+    useATokens: false,
+    ...eventData(21, 4020, ADDRESSES.pool),
+  });
+  mockDb = await TestHelpers.Pool.Repay.processEvent({ event: repay, mockDb });
+
+  const repaymentId = `${repay.transaction.hash}-${repay.logIndex}`;
+  const selfRepayment = mockDb.entities.LoanSelfRepayment.get(repaymentId);
+  assert.ok(selfRepayment);
+  assert.equal(selfRepayment.vault, ADDRESSES.vault);
+  assert.equal(selfRepayment.user, ADDRESSES.user);
+  assert.equal(selfRepayment.poolAddressesProvider, ADDRESSES.pool);
+  assert.equal(selfRepayment.debtAsset, ADDRESSES.debt);
+  assert.equal(selfRepayment.reserve_id, `${ADDRESSES.debt}-${ADDRESSES.pool}`);
+  assert.equal(selfRepayment.amount, 30n * UNIT);
+  assert.equal(selfRepayment.assetPriceUSD, 1);
+
+  const vault = mockDb.entities.UserVault.get(ADDRESSES.vault);
+  assert.equal(vault?.totalRepayVolume, 30n * UNIT);
+  assert.equal(vault?.repayCount, 1n);
+  assert.equal(vault?.lastRepayAt, 4020);
+
+  const vaultEntity = mockDb.entities.UserVaultEntity.get(ADDRESSES.vault);
+  assert.equal(vaultEntity?.totalSelfRepayVolume, 30n * UNIT);
+  assert.equal(vaultEntity?.totalSelfRepayCount, 1n);
+  assert.equal(vaultEntity?.lastUpdate, 4020);
+
+  const user = mockDb.entities.User.get(ADDRESSES.user);
+  assert.equal(user?.totalSelfRepaymentsReceived, 30n * UNIT);
+
+  const stats = mockDb.entities.ProtocolStats.get('1');
+  assert.equal(stats?.totalSelfRepayVolume, 30n * UNIT);
+  assert.equal(stats?.totalSelfRepayCount, 1n);
+});
+
+test('pool repayment by an ordinary address is not a self-repayment', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb: MockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  mockDb = mockDb.entities.Protocol.set({ id: '1' });
+  mockDb = seedPool(mockDb, ADDRESSES.pool, 5000, undefined);
+  mockDb = seedReserve(mockDb, ADDRESSES.debt, ADDRESSES.pool, 5000);
+
+  const repay = TestHelpers.Pool.Repay.createMockEvent({
+    reserve: ADDRESSES.debt,
+    user: ADDRESSES.user,
+    repayer: ADDRESSES.liquidator,
+    amount: 40n * UNIT,
+    useATokens: false,
+    ...eventData(22, 5010, ADDRESSES.pool),
+  });
+  mockDb = await TestHelpers.Pool.Repay.processEvent({ event: repay, mockDb });
+
+  const repaymentId = `${repay.transaction.hash}-${repay.logIndex}`;
+  assert.equal(mockDb.entities.LoanSelfRepayment.get(repaymentId), undefined);
+  assert.equal(mockDb.entities.UserVault.get(ADDRESSES.liquidator), undefined);
+
+  const user = mockDb.entities.User.get(ADDRESSES.user);
+  assert.equal(user?.totalSelfRepaymentsReceived, 0n);
+
+  const stats = mockDb.entities.ProtocolStats.get('1');
+  assert.equal(stats?.totalSelfRepayVolume, 0n);
+  assert.equal(stats?.totalSelfRepayCount, 0n);
+});
+
+test('direct user repayment is not a self-repayment', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb: MockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  mockDb = mockDb.entities.Protocol.set({ id: '1' });
+  mockDb = seedPool(mockDb, ADDRESSES.pool, 5500, undefined);
+  mockDb = seedReserve(mockDb, ADDRESSES.debt, ADDRESSES.pool, 5500);
+
+  const repay = TestHelpers.Pool.Repay.createMockEvent({
+    reserve: ADDRESSES.debt,
+    user: ADDRESSES.user,
+    repayer: ADDRESSES.user,
+    amount: 40n * UNIT,
+    useATokens: false,
+    ...eventData(23, 5510, ADDRESSES.pool),
+  });
+  mockDb = await TestHelpers.Pool.Repay.processEvent({ event: repay, mockDb });
+
+  const repaymentId = `${repay.transaction.hash}-${repay.logIndex}`;
+  assert.equal(mockDb.entities.LoanSelfRepayment.get(repaymentId), undefined);
+  assert.ok(mockDb.entities.Repay.get(repaymentId));
+});
+
+test('registered vault repayment for a different user is not a self-repayment', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb: MockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  mockDb = mockDb.entities.Protocol.set({ id: '1' });
+  mockDb = seedPool(mockDb, ADDRESSES.pool, 6000, undefined);
+  mockDb = seedReserve(mockDb, ADDRESSES.debt, ADDRESSES.pool, 6000);
+
+  const vaultCreated = TestHelpers.UserVaultFactory.UserVaultCreated.createMockEvent({
+    user: ADDRESSES.user,
+    vault: ADDRESSES.vault,
+    ...eventData(23, 6010, ADDRESSES.vaultFactory),
+  });
+  mockDb = await TestHelpers.UserVaultFactory.UserVaultCreated.processEvent({
+    event: vaultCreated,
+    mockDb,
+  });
+
+  const repay = TestHelpers.Pool.Repay.createMockEvent({
+    reserve: ADDRESSES.debt,
+    user: ADDRESSES.liquidator,
+    repayer: ADDRESSES.vault,
+    amount: 50n * UNIT,
+    useATokens: false,
+    ...eventData(24, 6020, ADDRESSES.pool),
+  });
+  mockDb = await TestHelpers.Pool.Repay.processEvent({ event: repay, mockDb });
+
+  const repaymentId = `${repay.transaction.hash}-${repay.logIndex}`;
+  assert.equal(mockDb.entities.LoanSelfRepayment.get(repaymentId), undefined);
+
+  const vault = mockDb.entities.UserVault.get(ADDRESSES.vault);
+  assert.equal(vault?.totalRepayVolume, 0n);
+  assert.equal(vault?.repayCount, 0n);
+
+  const stats = mockDb.entities.ProtocolStats.get('1');
+  assert.equal(stats?.totalSelfRepayVolume, 0n);
+  assert.equal(stats?.totalSelfRepayCount, 0n);
 });
 
 test('reserve data updates upsert hourly rate snapshots', async () => {
@@ -510,8 +762,7 @@ test('reserve data updates upsert hourly rate snapshots', async () => {
   assert.equal(bucket?.reserve, reserveId);
   assert.equal(bucket?.hourStart, 7200);
   assert.equal(bucket?.liquidityAPRRay, 6n);
-  assert.equal(bucket?.variableBorrowAPRRay, 8n);
-  assert.equal(bucket?.stableBorrowAPRRay, 1n);
+  assert.equal(bucket?.borrowAPRRay, 8n);
   assert.equal(bucket?.lastUpdateTs, 7400);
 
   // An update in the next hour opens a new bucket and leaves the old one alone.
@@ -695,8 +946,6 @@ test('reserve data updates skip epoch-end snapshots when gated', async () => {
     variableBorrowRate: reserve?.variableBorrowRate || 0n,
     variableBorrowIndex: reserve?.variableBorrowIndex || 0n,
     utilizationRate: reserve?.utilizationRate || 0,
-    stableBorrowRate: reserve?.stableBorrowRate || 0n,
-    averageStableBorrowRate: reserve?.averageStableRate || 0n,
     liquidityIndex: reserve?.liquidityIndex || 0n,
     liquidityRate: reserve?.liquidityRate || 0n,
     totalLiquidity: reserve?.totalLiquidity || 0n,
@@ -707,12 +956,10 @@ test('reserve data updates skip epoch-end snapshots when gated', async () => {
     priceInUsd: reserve?.priceInUsd || 0,
     timestamp: 1200,
     accruedToTreasury: reserve?.accruedToTreasury || 0n,
-    totalScaledVariableDebt: reserve?.totalScaledVariableDebt || 0n,
-    totalCurrentVariableDebt: reserve?.totalCurrentVariableDebt || 0n,
-    totalPrincipalStableDebt: reserve?.totalPrincipalStableDebt || 0n,
-    lifetimePrincipalStableDebt: reserve?.lifetimePrincipalStableDebt || 0n,
-    lifetimeScaledVariableDebt: reserve?.lifetimeScaledVariableDebt || 0n,
-    lifetimeCurrentVariableDebt: reserve?.lifetimeCurrentVariableDebt || 0n,
+    totalScaledDebt: reserve?.totalScaledDebt || 0n,
+    totalCurrentDebt: reserve?.totalCurrentDebt || 0n,
+    lifetimeScaledDebt: reserve?.lifetimeScaledDebt || 0n,
+    lifetimeCurrentDebt: reserve?.lifetimeCurrentDebt || 0n,
     lifetimeLiquidity: reserve?.lifetimeLiquidity || 0n,
     lifetimeRepayments: reserve?.lifetimeRepayments || 0n,
     lifetimeWithdrawals: reserve?.lifetimeWithdrawals || 0n,
@@ -754,18 +1001,12 @@ test('usage as collateral toggles and records history', async () => {
     reserve_id: reserveId,
     scaledATokenBalance: 0n,
     currentATokenBalance: 0n,
-    scaledVariableDebt: 0n,
-    currentVariableDebt: 0n,
-    principalStableDebt: 0n,
-    currentStableDebt: 0n,
-    currentTotalDebt: 0n,
-    stableBorrowRate: 0n,
-    oldStableBorrowRate: 0n,
+    scaledDebt: 0n,
+    currentDebt: 0n,
     liquidityRate: 0n,
     variableBorrowIndex: 0n,
     usageAsCollateralEnabledOnUser: false,
     lastUpdateTimestamp: 3000,
-    stableBorrowLastUpdateTimestamp: 0,
   });
 
   const enable = TestHelpers.Pool.ReserveUsedAsCollateralEnabled.createMockEvent({
@@ -805,6 +1046,69 @@ test('usage as collateral toggles and records history', async () => {
   assert.ok(disableRecord);
   assert.equal(disableRecord?.fromState, true);
   assert.equal(disableRecord?.toState, false);
+});
+
+test('collateral disable saturates the reserve aggregate at zero', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  mockDb = mockDb.entities.Protocol.set({ id: '1' });
+  mockDb = seedPool(mockDb, ADDRESSES.pool, 3000, undefined);
+  mockDb = seedReserve(mockDb, ADDRESSES.collateral, ADDRESSES.pool, 3000);
+
+  const reserveId = `${ADDRESSES.collateral}-${ADDRESSES.pool}`;
+  const reserve = mockDb.entities.Reserve.get(reserveId);
+  mockDb = mockDb.entities.Reserve.set({
+    ...reserve!,
+    totalLiquidityAsCollateral: 15n,
+  });
+  const userReserveId = `${ADDRESSES.user}-${reserveId}`;
+  mockDb = mockDb.entities.UserReserve.set({
+    id: userReserveId,
+    pool_id: ADDRESSES.pool,
+    user_id: ADDRESSES.user,
+    reserve_id: reserveId,
+    scaledATokenBalance: 10n,
+    currentATokenBalance: 10n,
+    scaledDebt: 0n,
+    currentDebt: 0n,
+    liquidityRate: 0n,
+    variableBorrowIndex: 0n,
+    usageAsCollateralEnabledOnUser: true,
+    lastUpdateTimestamp: 3000,
+  });
+
+  const disable = TestHelpers.Pool.ReserveUsedAsCollateralDisabled.createMockEvent({
+    reserve: ADDRESSES.collateral,
+    user: ADDRESSES.user,
+    ...eventData(4, 3020, ADDRESSES.pool),
+  });
+  mockDb = await TestHelpers.Pool.ReserveUsedAsCollateralDisabled.processEvent({
+    event: disable,
+    mockDb,
+  });
+
+  assert.equal(mockDb.entities.Reserve.get(reserveId)?.totalLiquidityAsCollateral, 5n);
+
+  mockDb = mockDb.entities.Reserve.set({
+    ...mockDb.entities.Reserve.get(reserveId)!,
+    totalLiquidityAsCollateral: 5n,
+  });
+  mockDb = mockDb.entities.UserReserve.set({
+    ...mockDb.entities.UserReserve.get(userReserveId)!,
+    usageAsCollateralEnabledOnUser: true,
+  });
+  const staleDisable = TestHelpers.Pool.ReserveUsedAsCollateralDisabled.createMockEvent({
+    reserve: ADDRESSES.collateral,
+    user: ADDRESSES.user,
+    ...eventData(5, 3030, ADDRESSES.pool),
+  });
+  mockDb = await TestHelpers.Pool.ReserveUsedAsCollateralDisabled.processEvent({
+    event: staleDisable,
+    mockDb,
+  });
+  assert.equal(mockDb.entities.Reserve.get(reserveId)?.totalLiquidityAsCollateral, 0n);
 });
 
 test('collateral toggle before the user reserve exists creates it with the flag', async () => {
@@ -937,63 +1241,6 @@ test('minted to treasury creates reserve aggregate when missing', async () => {
   assert.equal(aggregate?.lastProtocolAccruedToken, 10n * UNIT);
 });
 
-test('mint/back unbacked adjusts reserve and portal fees', async () => {
-  const TestHelpers = loadTestHelpers();
-  let mockDb = TestHelpers.MockDb.createMockDb();
-  const eventData = createEventDataFactory();
-
-  mockDb = mockDb.entities.Protocol.set({ id: '1' });
-  mockDb = seedPool(mockDb, ADDRESSES.pool, 5000, undefined, 3333n);
-  mockDb = seedReserve(mockDb, ADDRESSES.collateral, ADDRESSES.pool, 5000, {
-    totalATokenSupply: 0n,
-    totalLiquidity: 0n,
-    availableLiquidity: 0n,
-  });
-
-  const mintEvent = TestHelpers.Pool.MintUnbacked.createMockEvent({
-    reserve: ADDRESSES.collateral,
-    user: ADDRESSES.user,
-    onBehalfOf: ADDRESSES.user,
-    amount: 100n,
-    referralCode: 0n,
-    ...eventData(6, 5010, ADDRESSES.pool),
-  });
-  mockDb = await TestHelpers.Pool.MintUnbacked.processEvent({
-    event: mintEvent,
-    mockDb,
-  });
-
-  const reserveId = `${ADDRESSES.collateral}-${ADDRESSES.pool}`;
-  let reserve = mockDb.entities.Reserve.get(reserveId);
-  assert.equal(reserve?.unbacked, 100n);
-
-  const mintId = `${mintEvent.transaction.hash}-${mintEvent.logIndex}`;
-  assert.ok(mockDb.entities.MintUnbacked.get(mintId));
-
-  const backEvent = TestHelpers.Pool.BackUnbacked.createMockEvent({
-    reserve: ADDRESSES.collateral,
-    backer: ADDRESSES.user,
-    amount: 60n,
-    fee: 101n,
-    ...eventData(7, 5020, ADDRESSES.pool),
-  });
-  mockDb = await TestHelpers.Pool.BackUnbacked.processEvent({
-    event: backEvent,
-    mockDb,
-  });
-
-  reserve = mockDb.entities.Reserve.get(reserveId);
-  assert.equal(reserve?.unbacked, 40n);
-  assert.equal(reserve?.lifetimePortalProtocolFee, 34n);
-  assert.equal(reserve?.lifetimePortalLPFee, 67n);
-
-  const backId = `${backEvent.transaction.hash}-${backEvent.logIndex}`;
-  const back = mockDb.entities.BackUnbacked.get(backId);
-  assert.ok(back);
-  assert.equal(back?.protocolFee, 34n);
-  assert.equal(back?.lpFee, 67n);
-});
-
 test('user eMode set updates user and creates history', async () => {
   const TestHelpers = loadTestHelpers();
   let mockDb = TestHelpers.MockDb.createMockDb();
@@ -1041,84 +1288,4 @@ test('isolation mode total debt updates record', async () => {
   const record = mockDb.entities.IsolationModeTotalDebtUpdated.get(historyId);
   assert.ok(record);
   assert.equal(record?.isolatedDebt, 500n);
-});
-
-test('swap borrow rate mode records direction and rates', async () => {
-  const TestHelpers = loadTestHelpers();
-  let mockDb = TestHelpers.MockDb.createMockDb();
-  const eventData = createEventDataFactory();
-
-  mockDb = mockDb.entities.Protocol.set({ id: '1' });
-  mockDb = seedPool(mockDb, ADDRESSES.pool, 8000, undefined);
-  const reserveId = `${ADDRESSES.collateral}-${ADDRESSES.pool}`;
-  mockDb = mockDb.entities.Reserve.set({
-    ...createDefaultReserve(reserveId, ADDRESSES.pool, ADDRESSES.collateral),
-    decimals: DECIMALS,
-    isActive: true,
-    borrowingEnabled: true,
-    stableBorrowRate: 7n,
-    variableBorrowRate: 9n,
-  });
-
-  const event = TestHelpers.Pool.SwapBorrowRateMode.createMockEvent({
-    reserve: ADDRESSES.collateral,
-    user: ADDRESSES.user,
-    interestRateMode: 1n,
-    ...eventData(10, 8010, ADDRESSES.pool),
-  });
-  mockDb = await TestHelpers.Pool.SwapBorrowRateMode.processEvent({ event, mockDb });
-
-  const historyId = `${event.transaction.hash}-${event.logIndex}`;
-  const record = mockDb.entities.SwapBorrowRate.get(historyId);
-  assert.ok(record);
-  assert.equal(record?.borrowRateModeFrom, 1);
-  assert.equal(record?.borrowRateModeTo, 2);
-  assert.equal(record?.stableBorrowRate, 7n);
-  assert.equal(record?.variableBorrowRate, 9n);
-});
-
-test('rebalance stable borrow rate uses user reserve rates', async () => {
-  const TestHelpers = loadTestHelpers();
-  let mockDb = TestHelpers.MockDb.createMockDb();
-  const eventData = createEventDataFactory();
-
-  mockDb = mockDb.entities.Protocol.set({ id: '1' });
-  mockDb = seedPool(mockDb, ADDRESSES.pool, 9000, undefined);
-  const reserveId = `${ADDRESSES.collateral}-${ADDRESSES.pool}`;
-  mockDb = mockDb.entities.UserReserve.set({
-    id: `${ADDRESSES.user}-${reserveId}`,
-    pool_id: ADDRESSES.pool,
-    user_id: ADDRESSES.user,
-    reserve_id: reserveId,
-    scaledATokenBalance: 0n,
-    currentATokenBalance: 0n,
-    scaledVariableDebt: 0n,
-    currentVariableDebt: 0n,
-    principalStableDebt: 0n,
-    currentStableDebt: 0n,
-    currentTotalDebt: 0n,
-    stableBorrowRate: 11n,
-    oldStableBorrowRate: 9n,
-    liquidityRate: 0n,
-    variableBorrowIndex: 0n,
-    usageAsCollateralEnabledOnUser: false,
-    lastUpdateTimestamp: 0,
-    stableBorrowLastUpdateTimestamp: 0,
-  });
-
-  const event = TestHelpers.Pool.RebalanceStableBorrowRate.createMockEvent({
-    reserve: ADDRESSES.collateral,
-    user: ADDRESSES.user,
-    ...eventData(11, 9010, ADDRESSES.pool),
-  });
-  mockDb = await TestHelpers.Pool.RebalanceStableBorrowRate.processEvent({
-    event,
-    mockDb,
-  });
-
-  const historyId = `${event.transaction.hash}-${event.logIndex}`;
-  const record = mockDb.entities.RebalanceStableBorrowRate.get(historyId);
-  assert.ok(record);
-  assert.equal(record?.borrowRateFrom, 9n);
-  assert.equal(record?.borrowRateTo, 11n);
 });

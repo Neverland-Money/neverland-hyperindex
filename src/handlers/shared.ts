@@ -4,12 +4,19 @@
 
 import {
   AUSD_ADDRESS,
+  BASIS_POINTS,
+  isPointAccrualBlacklisted,
   DEFAULT_BORROW_RATE_BPS,
+  DEFAULT_COOLDOWN_SECONDS,
   DEFAULT_DEPOSIT_RATE_BPS,
   DUST_LOCK_START_BLOCK,
   EARNAUSD_ADDRESS,
   LEADERBOARD_START_BLOCK,
+  MAX_COMBINED_MULTIPLIER,
   MAX_MULTIPLIER,
+  MAX_SCHEDULED_TRANSITIONS,
+  MAX_VP_MULTIPLIER,
+  MAX_VP_TIERS,
   POINTS_SCALE,
   SECONDS_PER_DAY,
   USDC_ADDRESS,
@@ -34,6 +41,7 @@ import {
 } from '../helpers/constants';
 import { calculateVotingPower, getCurrentDay } from '../helpers/points';
 import {
+  RAY,
   calculateCompoundedInterest,
   calculateLinearInterest,
   pow10,
@@ -41,19 +49,40 @@ import {
   toDecimal,
 } from '../helpers/math';
 import { createDefaultUser } from '../helpers/entityHelpers';
+import {
+  isPrefilledTimestamp,
+  prefillHistoricEpochsIfNeeded,
+  setUserEpochStats,
+} from '../helpers/prefill';
+import { updateAllTimeLeaderboard, updateLeaderboard } from '../helpers/leaderboard';
 import { getTestnetBonusBps } from '../helpers/testnetTiers';
+import type {
+  LeaderboardEpoch,
+  LeaderboardState,
+  PriceOracleAsset,
+  handlerContext,
+} from '../../generated';
 
-import type { PriceOracleAsset, handlerContext } from '../../generated';
-
-const BASIS_POINTS = 10000n;
 const HOURS_PER_DAY_BI = BigInt(SECONDS_PER_DAY / 3600);
-const MAX_VP_TIERS = 20;
-const MAX_VP_MULTIPLIER = 50000n;
-const MAX_COMBINED_MULTIPLIER = 100000n;
-const DEFAULT_COOLDOWN_SECONDS = 3600;
 const E8_DIVISOR = 1e8;
 const VP_DECIMALS = 1e18;
-const RAY = 10n ** 27n;
+
+let lpModulePromise: Promise<typeof import('./lp')> | undefined;
+let lpGrowthModulePromise: Promise<typeof import('./lpGrowth')> | undefined;
+
+// The lp and lpGrowth modules import from this one, so they are required lazily, inside the
+// call, to break the cycle. An explicit `require` is exactly what `module: commonjs` used to
+// emit for a dynamic `import()` here; under `module: node16` an `import()` in a CommonJS file
+// is preserved as a real ESM import, which ts-node's CommonJS hook never sees.
+function loadLPModule(): Promise<typeof import('./lp')> {
+  lpModulePromise ??= Promise.resolve(require('./lp') as typeof import('./lp'));
+  return lpModulePromise;
+}
+
+function loadLPGrowthModule(): Promise<typeof import('./lpGrowth')> {
+  lpGrowthModulePromise ??= Promise.resolve(require('./lpGrowth') as typeof import('./lpGrowth'));
+  return lpGrowthModulePromise;
+}
 
 // ============================================
 // Block-scoped read cache for global singletons
@@ -174,18 +203,6 @@ function cacheActive(): boolean {
 // see stale data. So in preload we delegate to context.X.get/set so Envio's
 // batcher can do its thing, and only memoize in the sequential processing
 // phase.
-// `./lp` is imported dynamically to break a circular dependency. The compiled
-// form is `Promise.resolve().then(() => require('./lp'))`, so every call site
-// allocated a promise and forced a microtask - on essentially every event, in
-// both the preload and the processing pass. Memoize the promise: the module
-// registry already returns the same object, so this changes nothing but the
-// allocation. Still lazy, so the cycle stays broken.
-let lpModulePromise: Promise<typeof import('./lp')> | undefined;
-function loadLpModule(): Promise<typeof import('./lp')> {
-  lpModulePromise ??= import('./lp');
-  return lpModulePromise;
-}
-
 function isPreload(context: handlerContext): boolean {
   return context.isPreload === true;
 }
@@ -296,7 +313,7 @@ async function getCachedVotingPowerTiers(context: handlerContext): Promise<Cache
       isActive: tier.isActive,
     });
   }
-  tiers.sort((a, b) => (a.tierIndex < b.tierIndex ? -1 : a.tierIndex > b.tierIndex ? 1 : 0));
+  tiers.sort((a, b) => Number(a.tierIndex - b.tierIndex));
   if (!preload && cacheActive()) globalCache.vpTiers = tiers;
   return tiers;
 }
@@ -356,6 +373,13 @@ type NFTRegistryStateInput = Parameters<handlerContext['NFTPartnershipRegistrySt
 type NFTMultiplierConfigInput = Parameters<handlerContext['NFTMultiplierConfig']['set']>[0];
 type NFTPartnershipInput = Parameters<handlerContext['NFTPartnership']['set']>[0];
 
+export type ScheduledEpochTransitionProjection = {
+  state: LeaderboardState | undefined;
+  epoch: LeaderboardEpoch | undefined;
+  closedEpochNumbers: readonly bigint[];
+  transitioned: boolean;
+};
+
 export function writeLeaderboardConfig(
   context: handlerContext,
   config: LeaderboardConfigInput
@@ -405,14 +429,6 @@ export function shouldUseEthCalls(): boolean {
   // Monad production indexing is event-only: full nodes cannot serve archive-style
   // historic reads, so handler paths must never depend on external chain state.
   return false;
-}
-
-function shouldSyncNFTOwnershipFromChain(): boolean {
-  return shouldUseEthCalls() && process.env.ENVIO_ENABLE_NFT_CHAIN_SYNC === 'true';
-}
-
-function shouldSyncLPPositionsFromChain(): boolean {
-  return shouldUseEthCalls() && process.env.ENVIO_ENABLE_LP_CHAIN_SYNC === 'true';
 }
 
 // ============================================
@@ -479,8 +495,7 @@ export async function getOrCreateProtocolStats(context: handlerContext, timestam
 // Bootstrap leaderboard state on first event when epoch 1 override is set
 export async function bootstrapLeaderboardIfNeeded(
   context: handlerContext,
-  timestamp: number,
-  blockNumber: bigint
+  timestamp: number
 ): Promise<void> {
   // Skip bootstrap if override is 0 or if disabled via env var (for testing)
   if (EPOCH_1_START_TIME_OVERRIDE <= 0 || process.env.ENVIO_DISABLE_BOOTSTRAP === 'true') return;
@@ -490,9 +505,7 @@ export async function bootstrapLeaderboardIfNeeded(
   if (existingState && existingState.currentEpochNumber > 0n) return;
 
   // Bootstrap LeaderboardEpoch 1
-  // Use deterministic startBlock if set, otherwise use current block
-  const startBlock =
-    EPOCH_1_START_BLOCK_OVERRIDE > 0 ? BigInt(EPOCH_1_START_BLOCK_OVERRIDE) : blockNumber;
+  const startBlock = BigInt(EPOCH_1_START_BLOCK_OVERRIDE);
   const epoch1 = await context.LeaderboardEpoch.get('1');
   if (!epoch1) {
     writeLeaderboardEpoch(context, {
@@ -614,19 +627,18 @@ export async function bootstrapLeaderboardIfNeeded(
   }
 
   // Bootstrap LeaderboardConfig
-  const useBootstrap = EPOCH_1_START_TIME_OVERRIDE > 0;
   writeLeaderboardConfig(context, {
     id: 'global',
-    depositRateBps: useBootstrap ? BOOTSTRAP_CONFIG.depositRateBps : 0n,
-    borrowRateBps: useBootstrap ? BOOTSTRAP_CONFIG.borrowRateBps : 0n,
-    vpRateBps: useBootstrap ? BOOTSTRAP_CONFIG.vpRateBps : 0n,
-    lpRateBps: useBootstrap ? BOOTSTRAP_CONFIG.lpRateBps : 0n,
-    supplyDailyBonus: useBootstrap ? BOOTSTRAP_CONFIG.supplyDailyBonus : 0,
-    borrowDailyBonus: useBootstrap ? BOOTSTRAP_CONFIG.borrowDailyBonus : 0,
-    repayDailyBonus: useBootstrap ? BOOTSTRAP_CONFIG.repayDailyBonus : 0,
-    withdrawDailyBonus: useBootstrap ? BOOTSTRAP_CONFIG.withdrawDailyBonus : 0,
-    cooldownSeconds: useBootstrap ? BOOTSTRAP_CONFIG.cooldownSeconds : 0,
-    minDailyBonusUsd: useBootstrap ? BOOTSTRAP_CONFIG.minDailyBonusUsd : 0,
+    depositRateBps: BOOTSTRAP_CONFIG.depositRateBps,
+    borrowRateBps: BOOTSTRAP_CONFIG.borrowRateBps,
+    vpRateBps: BOOTSTRAP_CONFIG.vpRateBps,
+    lpRateBps: BOOTSTRAP_CONFIG.lpRateBps,
+    supplyDailyBonus: BOOTSTRAP_CONFIG.supplyDailyBonus,
+    borrowDailyBonus: BOOTSTRAP_CONFIG.borrowDailyBonus,
+    repayDailyBonus: BOOTSTRAP_CONFIG.repayDailyBonus,
+    withdrawDailyBonus: BOOTSTRAP_CONFIG.withdrawDailyBonus,
+    cooldownSeconds: BOOTSTRAP_CONFIG.cooldownSeconds,
+    minDailyBonusUsd: BOOTSTRAP_CONFIG.minDailyBonusUsd,
     lastUpdate: timestamp,
   });
 }
@@ -638,16 +650,25 @@ export async function recordProtocolTransaction(
   blockNumber?: bigint
   // logIndex?: number,
   // eventLabel?: string
-): Promise<void> {
+): Promise<ScheduledEpochTransitionProjection> {
   // Bootstrap leaderboard on first event if epoch 1 override is set
   if (blockNumber !== undefined) {
     ensureBlockCache(context, blockNumber);
-    await bootstrapLeaderboardIfNeeded(context, timestamp, blockNumber);
-    const { applyStaticLPPoolCutover } = await loadLpModule();
+    await prefillHistoricEpochsIfNeeded(context, timestamp);
+    await bootstrapLeaderboardIfNeeded(context, timestamp);
+    const { applyStaticLPPoolCutover } = await loadLPModule();
     await applyStaticLPPoolCutover(context, timestamp, blockNumber);
   }
 
-  await applyScheduledEpochTransitions(context, timestamp, blockNumber);
+  const transitionProjection = await applyScheduledEpochTransitions(
+    context,
+    timestamp,
+    blockNumber
+  );
+  if (isPreload(context) && transitionProjection.closedEpochNumbers.length > 0) {
+    const { preloadStaticLPPoolFreezeProjection } = await loadLPModule();
+    await preloadStaticLPPoolFreezeProjection(context, transitionProjection.closedEpochNumbers);
+  }
   let ps = await getOrCreateProtocolStats(context, timestamp);
   if (ps.lastTxHash !== txHash) {
     const updatedPs = {
@@ -663,6 +684,7 @@ export async function recordProtocolTransaction(
       await maybeCreateProtocolSnapshot(context, updatedPs, txHash, timestamp, blockNumber);
     }
   }
+  return transitionProjection;
 }
 
 async function maybeCreateProtocolSnapshot(
@@ -711,43 +733,109 @@ async function maybeCreateProtocolSnapshot(
   });
 }
 
-const MAX_SCHEDULED_TRANSITIONS = 5;
-
-// The epoch-end LP sweep is global and expensive. During the preload pass every
-// event in the boundary batch re-enters the end branch: preload writes are
-// no-ops at the framework level (generated/src/UserContext.res binds `set` to
-// noopSet when isPreload), so the epoch is never observed as closed by the next
-// preload event and the sweep repeats once per event in the batch.
-//
-// Run it once per boundary in that pass - the first event still issues and
-// groups the reads, which is the whole point of preload - and never skip it in
-// the processing pass, which is where the sweep actually writes. Skipping can
-// therefore only ever drop work whose writes are discarded.
-let lastPreloadEpochSweep: string | null = null;
-
-async function settleLPPositionsForEpochEnd(
+async function freezeLPForEpochEnd(
   context: handlerContext,
   epochNumber: bigint,
   endTime: number
 ): Promise<void> {
-  if (isPreload(context)) {
-    const key = `${epochNumber}:${endTime}`;
-    if (lastPreloadEpochSweep === key) return;
-    lastPreloadEpochSweep = key;
+  const lpPoolRegistry = (
+    context as unknown as {
+      LPPoolRegistry?: handlerContext['LPPoolRegistry'];
+    }
+  ).LPPoolRegistry;
+  if (!lpPoolRegistry) return;
+
+  // Settle every LP holder once, at the Tide boundary, BEFORE freezing growth.
+  //
+  // Lazy growth converts into points only when a user is touched. A holder whose sole
+  // activity is holding an LP position is never touched by a market event, and the keeper's
+  // closing ceremony is threshold-filtered, so a sub-threshold LP-only holder would accrue
+  // growth into a cursor and then never score - absent from a CLOSED Tide that the
+  // pre-rewrite indexer credits.
+  //
+  // This runs in BOTH Envio passes so preload batches the same reads the ordered pass makes.
+  // It is O(positions) once per Tide boundary (~29.5 days), not per market event: market
+  // handlers remain strictly position-count invariant, which is the property that matters.
+  //
+  // Both steps run even when the closing Tide is prefilled, because neither can write points
+  // into it. Suppression already lives one level down: every LP points write in lp.ts funnels
+  // through updateUserEpochLPPoints, which returns early on isPrefilledTimestamp, and
+  // setUserEpochStats refuses any write to a prefilled epoch. What the sweep contributes here
+  // is CURSOR state -- each holder's UserLPEpochCursor settled up to the boundary -- and
+  // freezeLPGrowthForEpoch contributes the frozen pool-level header. The next Tide reads both
+  // as the baseline its accrual starts from.
+  //
+  // Skipping them left LP-only holders stranded: never touched by a market event, never
+  // settled at the boundary, so they accrued growth into a cursor and then never scored --
+  // exactly the failure the comment above describes. Measured: 14 of the 19 users present in
+  // production's live Tide but absent locally held LP positions, and none of them had been
+  // keeper-settled in that Tide.
+  await settleAllLPHolders(context, endTime);
+
+  const { freezeLPGrowthForEpoch } = await loadLPGrowthModule();
+  await freezeLPGrowthForEpoch(context, epochNumber, endTime);
+}
+
+/**
+ * Settle every LP holder with live liquidity, at `timestamp`.
+ *
+ * Fungible pools advance one scalar growth clock and each holder reads its share off a cursor
+ * only WHEN TOUCHED. A holder whose sole activity is holding the position is never touched by a
+ * market event, and the keeper's ceremony is threshold-filtered, so without an explicit sweep it
+ * accrues growth into its cursor and never scores. Called at a Tide boundary (so a closing Tide
+ * credits everyone) and on the keeper's BatchComplete (so the OPEN Tide reflects them too --
+ * otherwise an untouched LP-only holder is absent from the live leaderboard until the Tide
+ * closes). Bounded work: only holders with liquidity > 0 are settled.
+ */
+export async function settleAllLPHolders(
+  context: handlerContext,
+  timestamp: number
+): Promise<void> {
+  const registry = await context.LPPoolRegistry.get('global');
+  if (!registry || registry.poolIds.length === 0) return;
+
+  const positionIds = new Set<string>();
+  for (const poolId of new Set(registry.poolIds.map(normalizeAddress))) {
+    const index = await context.LPPoolPositionIndex.get(poolId);
+    for (const positionId of index?.positionIds ?? []) positionIds.add(positionId);
   }
-  const { settleAllLPPoolPositions } = await loadLpModule();
-  await settleAllLPPoolPositions(context, endTime);
+  if (positionIds.size === 0) return;
+
+  const holders = new Set<string>();
+  for (const positionId of positionIds) {
+    const position = await context.UserLPPosition.get(positionId);
+    if (position && position.liquidity > 0n) holders.add(normalizeAddress(position.user_id));
+  }
+  if (holders.size === 0) return;
+
+  const { settleUserLPPositions } = await loadLPModule();
+  for (const holder of [...holders].sort()) {
+    await settleUserLPPositions(context, holder, timestamp);
+  }
 }
 
 export async function applyScheduledEpochTransitions(
   context: handlerContext,
   timestamp: number,
   blockNumber?: bigint
-): Promise<void> {
+): Promise<ScheduledEpochTransitionProjection> {
   if (blockNumber !== undefined) ensureBlockCache(context, blockNumber);
   const state = await getCachedLeaderboardState(context);
+  const projectedEpochs = new Map<string, LeaderboardEpoch | undefined>();
+  const readProjectedEpoch = async (epochNumber: bigint) => {
+    const key = epochNumber.toString();
+    if (projectedEpochs.has(key)) return projectedEpochs.get(key);
+    const epoch = await getCachedEpoch(context, epochNumber);
+    projectedEpochs.set(key, epoch);
+    return epoch;
+  };
+  const writeProjectedEpoch = (epoch: LeaderboardEpochInput) => {
+    projectedEpochs.set(epoch.epochNumber.toString(), epoch as LeaderboardEpoch);
+    writeLeaderboardEpoch(context, epoch);
+  };
   let currentEpochNumber = state?.currentEpochNumber ?? 0n;
   let isActive = state?.isActive ?? false;
+  const closedEpochNumbers: bigint[] = [];
   let updated = false;
 
   if (currentEpochNumber === 0n) {
@@ -756,7 +844,7 @@ export async function applyScheduledEpochTransitions(
 
   for (let i = 0; i < MAX_SCHEDULED_TRANSITIONS; i += 1) {
     if (isActive) {
-      const epoch = await getCachedEpoch(context, currentEpochNumber);
+      const epoch = await readProjectedEpoch(currentEpochNumber);
       if (!epoch) break;
 
       const scheduledEndTime = epoch.scheduledEndTime ?? 0;
@@ -776,14 +864,15 @@ export async function applyScheduledEpochTransitions(
               ? blockNumber
               : epoch.endBlock;
 
-        writeLeaderboardEpoch(context, {
+        writeProjectedEpoch({
           ...epoch,
           endBlock,
           endTime,
           isActive: false,
           duration,
         });
-        await settleLPPositionsForEpochEnd(context, currentEpochNumber, endTime);
+        closedEpochNumbers.push(currentEpochNumber);
+        await freezeLPForEpochEnd(context, currentEpochNumber, endTime);
 
         isActive = false;
         updated = true;
@@ -798,7 +887,7 @@ export async function applyScheduledEpochTransitions(
       if (getEpochDatesOverride(currentEpochNumber)) break;
 
       const nextEpochNumber = currentEpochNumber + 1n;
-      const nextEpoch = await getCachedEpoch(context, nextEpochNumber);
+      const nextEpoch = await readProjectedEpoch(nextEpochNumber);
       const scheduledStartTime = nextEpoch?.scheduledStartTime ?? 0;
 
       if (scheduledStartTime > 0 && scheduledStartTime <= timestamp) {
@@ -817,14 +906,15 @@ export async function applyScheduledEpochTransitions(
               ? blockNumber
               : epoch.endBlock;
 
-        writeLeaderboardEpoch(context, {
+        writeProjectedEpoch({
           ...epoch,
           endBlock,
           endTime,
           isActive: false,
           duration,
         });
-        await settleLPPositionsForEpochEnd(context, currentEpochNumber, endTime);
+        closedEpochNumbers.push(currentEpochNumber);
+        await freezeLPForEpochEnd(context, currentEpochNumber, endTime);
 
         // A tide never starts before the previous one ended (see the gap branch
         // below for why a scheduled start can land inside a running tide).
@@ -842,7 +932,7 @@ export async function applyScheduledEpochTransitions(
               : (nextEpoch?.startBlock ?? 0n);
 
         if (nextEpoch) {
-          writeLeaderboardEpoch(context, {
+          writeProjectedEpoch({
             ...nextEpoch,
             startBlock,
             startTime,
@@ -863,7 +953,7 @@ export async function applyScheduledEpochTransitions(
     }
 
     const nextEpochNumber = currentEpochNumber === 0n ? 1n : currentEpochNumber + 1n;
-    const nextEpoch = await getCachedEpoch(context, nextEpochNumber);
+    const nextEpoch = await readProjectedEpoch(nextEpochNumber);
     if (!nextEpoch) break;
 
     const scheduledStartTime = nextEpoch.scheduledStartTime ?? 0;
@@ -875,7 +965,7 @@ export async function applyScheduledEpochTransitions(
       // keeps whatever was actually scheduled on-chain.
       const previousEnd =
         currentEpochNumber > 0n
-          ? ((await getCachedEpoch(context, currentEpochNumber))?.endTime ?? 0)
+          ? ((await readProjectedEpoch(currentEpochNumber))?.endTime ?? 0)
           : 0;
       const startTime = Math.max(
         nextEpoch.startTime > 0
@@ -890,7 +980,7 @@ export async function applyScheduledEpochTransitions(
             ? blockNumber
             : nextEpoch.startBlock;
 
-      writeLeaderboardEpoch(context, {
+      writeProjectedEpoch({
         ...nextEpoch,
         startBlock,
         startTime,
@@ -909,13 +999,21 @@ export async function applyScheduledEpochTransitions(
     break;
   }
 
+  let projectedState = state;
   if (updated) {
-    writeLeaderboardState(context, {
+    projectedState = {
       id: 'current',
       currentEpochNumber,
       isActive,
-    });
+    };
+    writeLeaderboardState(context, projectedState);
   }
+  return {
+    state: projectedState,
+    epoch: currentEpochNumber > 0n ? projectedEpochs.get(currentEpochNumber.toString()) : undefined,
+    closedEpochNumbers,
+    transitioned: updated,
+  };
 }
 
 // ============================================
@@ -1064,10 +1162,6 @@ async function calculateAverageVPFromStorage(
   startTimestamp: number,
   endTimestamp: number
 ): Promise<bigint> {
-  if (endTimestamp <= startTimestamp) {
-    return calculateCurrentVPFromStorage(context, userAddress, endTimestamp);
-  }
-
   const normalizedUser = normalizeAddress(userAddress);
   const userTokens = await context.UserTokenList.get(normalizedUser);
   if (!userTokens || !userTokens.tokenIds) {
@@ -1295,8 +1389,8 @@ function historyValueAt<T>(
   }
   const len = Math.min(timestamps.length, values.length);
   for (let i = len - 1; i >= 0; i--) {
-    if ((timestamps[i] ?? 0) <= timestamp) {
-      return values[i] ?? fallback;
+    if (timestamps[i] <= timestamp) {
+      return values[i];
     }
   }
   return fallback;
@@ -1539,9 +1633,8 @@ export async function calculateAverageSpecialEditionMultiplierBps(
   let weighted = 0n;
   let durationTotal = 0n;
   for (let i = 0; i < sorted.length - 1; i++) {
-    const start = sorted[i] ?? startTimestamp;
-    const end = sorted[i + 1] ?? endTimestamp;
-    if (end <= start) continue;
+    const start = sorted[i];
+    const end = sorted[i + 1];
 
     const duration = BigInt(end - start);
     const multiplier = await calculateSpecialEditionMultiplierAt(context, normalizedUserId, start);
@@ -1549,7 +1642,7 @@ export async function calculateAverageSpecialEditionMultiplierBps(
     durationTotal += duration;
   }
 
-  return durationTotal > 0n ? weighted / durationTotal : BASIS_POINTS;
+  return weighted / durationTotal;
 }
 
 export async function refreshUserSpecialEditionState(
@@ -1682,18 +1775,6 @@ export async function applyUserSpecialEditionDelta(
     logIndex,
     changeReason: reason,
   });
-}
-
-async function syncUserNFTOwnershipFromChain(
-  context: handlerContext,
-  userId: string,
-  timestamp: number,
-  blockNumber?: bigint
-): Promise<void> {
-  void context;
-  void userId;
-  void timestamp;
-  void blockNumber;
 }
 
 export function createVPHistoryEntry(
@@ -2066,7 +2147,7 @@ export async function getOrCreateUserEpochStats(
       firstSeenAt: timestamp,
       lastUpdatedAt: 0,
     };
-    context.UserEpochStats.set(stats);
+    setUserEpochStats(context, stats);
   }
   return stats;
 }
@@ -2226,7 +2307,6 @@ export async function updateLifetimePoints(
     // Only update all-time leaderboard if leaderboard is active
     const leaderboardState = await context.LeaderboardState.get('current');
     if (leaderboardState && leaderboardState.currentEpochNumber > 0n) {
-      const { updateAllTimeLeaderboard } = await import('../helpers/leaderboard');
       await updateAllTimeLeaderboard(
         context,
         normalizedUserId,
@@ -2317,9 +2397,8 @@ export async function calculateAverageCombinedMultiplierBps(
   let weighted = 0n;
   let durationTotal = 0n;
   for (let i = 0; i < boundaries.length - 1; i++) {
-    const start = boundaries[i] ?? startTimestamp;
-    const end = boundaries[i + 1] ?? endTimestamp;
-    if (end <= start) continue;
+    const start = boundaries[i];
+    const end = boundaries[i + 1];
 
     const averageVP = await calculateAverageVPFromStorage(context, normalizedUserId, start, end);
     const vpMultiplier = await calculateVPMultiplier(context, averageVP);
@@ -2509,19 +2588,17 @@ export function getCurrentBalancesFromScaled(
   },
   userReserve: {
     scaledATokenBalance: bigint;
-    scaledVariableDebt: bigint;
+    scaledDebt: bigint;
     currentATokenBalance: bigint;
-    currentVariableDebt: bigint;
-    currentStableDebt: bigint;
+    currentDebt: bigint;
   },
   timestamp: number,
   indexOverride?: IndexOverride
-): { supply: bigint; variableDebt: bigint; totalDebt: bigint } {
+): { supply: bigint; debt: bigint } {
   if (timestamp < reserve.lastUpdateTimestamp && !indexOverride) {
     return {
       supply: userReserve.currentATokenBalance,
-      variableDebt: userReserve.currentVariableDebt,
-      totalDebt: userReserve.currentVariableDebt + userReserve.currentStableDebt,
+      debt: userReserve.currentDebt,
     };
   }
 
@@ -2535,16 +2612,12 @@ export function getCurrentBalancesFromScaled(
       ? rayMul(userReserve.scaledATokenBalance, liquidityIndex)
       : userReserve.currentATokenBalance;
 
-  const variableDebt =
-    userReserve.scaledVariableDebt > 0n && variableBorrowIndex > 0n
-      ? rayMul(userReserve.scaledVariableDebt, variableBorrowIndex)
-      : userReserve.currentVariableDebt;
+  const debt =
+    userReserve.scaledDebt > 0n && variableBorrowIndex > 0n
+      ? rayMul(userReserve.scaledDebt, variableBorrowIndex)
+      : userReserve.currentDebt;
 
-  return {
-    supply,
-    variableDebt,
-    totalDebt: variableDebt + userReserve.currentStableDebt,
-  };
+  return { supply, debt };
 }
 
 export async function updatePriceOracleIndex(
@@ -2678,7 +2751,7 @@ export async function accruePointsForUserReserve(
           reserve.lastUpdateTimestamp
         )
       : undefined;
-  const { supply: currentSupplyBI, variableDebt: currentBorrowBI } = getCurrentBalancesFromScaled(
+  const { supply: currentSupplyBI, debt: currentBorrowBI } = getCurrentBalancesFromScaled(
     reserve,
     userReserve,
     balanceTimestamp,
@@ -2939,11 +3012,10 @@ export async function accruePointsForUserReserve(
       testnetBonusBps,
     };
 
-    context.UserEpochStats.set(epochStats);
+    setUserEpochStats(context, epochStats);
     await updateLifetimePoints(context, normalizedUserId, epochStats);
 
     const finalPoints = Number(totalPointsWithMultiplier) / 1e18;
-    const { updateLeaderboard } = await import('../helpers/leaderboard');
     await updateLeaderboard(context, normalizedUserId, finalPoints, timestamp);
   }
 }
@@ -2980,14 +3052,35 @@ export async function settlePointsForUser(
   blockNumber: bigint,
   options?: {
     ignoreCooldown?: boolean;
-    skipNftSync?: boolean;
     skipLPSync?: boolean;
-    skipLPChainSync?: boolean;
   }
 ): Promise<void> {
   ensureBlockCache(context, blockNumber);
   const normalizedUserId = normalizeAddress(userId);
+  // Blacklisted from Tide 9 on: accrue nothing and touch nothing. Multiplier state is
+  // deliberately not refreshed either -- it only feeds points this address cannot earn.
+  if (isPointAccrualBlacklisted(normalizedUserId, timestamp)) return;
   const normalizedReserveId = reserveId ? reserveId.toLowerCase() : null;
+  // Inside a prefilled Tide the stored figures are authoritative; recomputing would overwrite
+  // settled, paid history with today's arithmetic. The user's IDENTITY state is still built,
+  // because that is what live settlement reads once the prefilled span ends: a user whose only
+  // activity fell inside a prefilled Tide would otherwise never gain a UserReserveList or a
+  // UserLeaderboardState, and the first live Tide could not see them. Measured before this:
+  // 4,164 of 11,554 users present in the prefilled Tides had no UserLeaderboardState at all.
+  //
+  // Neither call below carries points. addReserveToUserList maintains an id list;
+  // refreshUserVotingPowerState creates the state row with neutral 10000 bps multipliers and
+  // zero lifetime points, then updates only voting-power and multiplier fields. The epoch
+  // figures keep coming from disk, and setUserEpochStats still refuses writes for a prefilled
+  // epoch. This mirrors the two early returns below, which already refresh voting-power state
+  // before bailing out.
+  if (isPrefilledTimestamp(timestamp)) {
+    if (normalizedReserveId) {
+      await addReserveToUserList(context, normalizedUserId, normalizedReserveId, timestamp);
+    }
+    await refreshUserVotingPowerState(context, normalizedUserId, timestamp);
+    return;
+  }
   const leaderboardState = await getCachedLeaderboardState(context);
   // Allow settlements during gap; accrual is capped at the epoch end.
   if (Number(blockNumber) < LEADERBOARD_START_BLOCK) {
@@ -3008,15 +3101,8 @@ export async function settlePointsForUser(
       ? epoch.endTime
       : timestamp;
 
-  if (!options?.skipNftSync && shouldSyncNFTOwnershipFromChain()) {
-    await syncUserNFTOwnershipFromChain(context, normalizedUserId, timestamp, blockNumber);
-  }
-  if (!options?.skipLPSync && !options?.skipLPChainSync && shouldSyncLPPositionsFromChain()) {
-    const { syncUserLPPositionsFromChain } = await loadLpModule();
-    await syncUserLPPositionsFromChain(context, normalizedUserId, timestamp, blockNumber);
-  }
   if (!options?.skipLPSync) {
-    const { settleUserLPPositions } = await loadLpModule();
+    const { settleUserLPPositions } = await loadLPModule();
     await settleUserLPPositions(context, normalizedUserId, timestamp, blockNumber);
   }
   const vpState = await refreshUserVotingPowerState(context, normalizedUserId, timestamp);
@@ -3071,7 +3157,7 @@ export async function settlePointsForUser(
               reserve.lastUpdateTimestamp
             )
           : undefined;
-      const { supply: currentSupplyBI, totalDebt: currentDebtBI } = getCurrentBalancesFromScaled(
+      const { supply: currentSupplyBI, debt: currentDebtBI } = getCurrentBalancesFromScaled(
         reserve,
         userReserve,
         balanceTimestamp,
@@ -3195,11 +3281,10 @@ export async function settlePointsForUser(
             testnetBonusBps,
           };
 
-          context.UserEpochStats.set(updatedStats);
+          setUserEpochStats(context, updatedStats);
           await updateLifetimePoints(context, normalizedUserId, updatedStats);
 
           const finalPoints = Number(updatedStats.totalPointsWithMultiplier) / 1e18;
-          const { updateLeaderboard } = await import('../helpers/leaderboard');
           await updateLeaderboard(context, normalizedUserId, finalPoints, timestamp);
         }
       }
@@ -3214,9 +3299,7 @@ export async function settlePointsForAllReserves(
   blockNumber: bigint,
   options?: {
     ignoreCooldown?: boolean;
-    skipNftSync?: boolean;
     skipLPSync?: boolean;
-    skipLPChainSync?: boolean;
   }
 ): Promise<void> {
   await settlePointsForUser(
@@ -3236,6 +3319,8 @@ export async function awardDailySupplyPoints(
   _blockNumber?: bigint
 ): Promise<void> {
   const normalizedUserId = normalizeAddress(userId);
+  if (isPointAccrualBlacklisted(normalizedUserId, timestamp)) return;
+  if (isPrefilledTimestamp(timestamp)) return;
   const leaderboardState = await context.LeaderboardState.get('current');
   if (
     !leaderboardState ||
@@ -3295,7 +3380,7 @@ export async function awardDailySupplyPoints(
   );
 
   const testnetBonusBps = epochNumber === 1n ? getTestnetBonusBps(normalizedUserId) : 0n;
-  context.UserEpochStats.set({
+  setUserEpochStats(context, {
     ...updatedStats,
     totalPoints,
     totalPointsWithMultiplier,
@@ -3310,7 +3395,6 @@ export async function awardDailySupplyPoints(
   });
 
   const finalPoints = Number(totalPointsWithMultiplier) / 1e18;
-  const { updateLeaderboard } = await import('../helpers/leaderboard');
   await updateLeaderboard(context, normalizedUserId, finalPoints, timestamp);
 }
 
@@ -3321,6 +3405,8 @@ export async function awardDailyBorrowPoints(
   _blockNumber?: bigint
 ): Promise<void> {
   const normalizedUserId = normalizeAddress(userId);
+  if (isPointAccrualBlacklisted(normalizedUserId, timestamp)) return;
+  if (isPrefilledTimestamp(timestamp)) return;
   const leaderboardState = await context.LeaderboardState.get('current');
   if (
     !leaderboardState ||
@@ -3380,7 +3466,7 @@ export async function awardDailyBorrowPoints(
   );
 
   const testnetBonusBps = epochNumber === 1n ? getTestnetBonusBps(normalizedUserId) : 0n;
-  context.UserEpochStats.set({
+  setUserEpochStats(context, {
     ...updatedStats,
     totalPoints,
     totalPointsWithMultiplier,
@@ -3395,7 +3481,6 @@ export async function awardDailyBorrowPoints(
   });
 
   const finalPoints = Number(totalPointsWithMultiplier) / 1e18;
-  const { updateLeaderboard } = await import('../helpers/leaderboard');
   await updateLeaderboard(context, normalizedUserId, finalPoints, timestamp);
 }
 
@@ -3406,6 +3491,8 @@ export async function awardDailyRepayPoints(
   _blockNumber?: bigint
 ): Promise<void> {
   const normalizedUserId = normalizeAddress(userId);
+  if (isPointAccrualBlacklisted(normalizedUserId, timestamp)) return;
+  if (isPrefilledTimestamp(timestamp)) return;
   const leaderboardState = await context.LeaderboardState.get('current');
   if (!leaderboardState || leaderboardState.currentEpochNumber === 0n || !leaderboardState.isActive)
     return;
@@ -3460,7 +3547,7 @@ export async function awardDailyRepayPoints(
   );
 
   const testnetBonusBps = epochNumber === 1n ? getTestnetBonusBps(normalizedUserId) : 0n;
-  context.UserEpochStats.set({
+  setUserEpochStats(context, {
     ...updatedStats,
     totalPoints,
     totalPointsWithMultiplier,
@@ -3475,7 +3562,6 @@ export async function awardDailyRepayPoints(
   });
 
   const finalPoints = Number(totalPointsWithMultiplier) / 1e18;
-  const { updateLeaderboard } = await import('../helpers/leaderboard');
   await updateLeaderboard(context, normalizedUserId, finalPoints, timestamp);
 }
 
@@ -3486,6 +3572,8 @@ export async function awardDailyWithdrawPoints(
   _blockNumber?: bigint
 ): Promise<void> {
   const normalizedUserId = normalizeAddress(userId);
+  if (isPointAccrualBlacklisted(normalizedUserId, timestamp)) return;
+  if (isPrefilledTimestamp(timestamp)) return;
   const leaderboardState = await context.LeaderboardState.get('current');
   if (!leaderboardState || leaderboardState.currentEpochNumber === 0n || !leaderboardState.isActive)
     return;
@@ -3540,7 +3628,7 @@ export async function awardDailyWithdrawPoints(
   );
 
   const testnetBonusBps = epochNumber === 1n ? getTestnetBonusBps(normalizedUserId) : 0n;
-  context.UserEpochStats.set({
+  setUserEpochStats(context, {
     ...updatedStats,
     totalPoints,
     totalPointsWithMultiplier,
@@ -3555,7 +3643,6 @@ export async function awardDailyWithdrawPoints(
   });
 
   const finalPoints = Number(totalPointsWithMultiplier) / 1e18;
-  const { updateLeaderboard } = await import('../helpers/leaderboard');
   await updateLeaderboard(context, normalizedUserId, finalPoints, timestamp);
 }
 

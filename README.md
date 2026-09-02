@@ -69,15 +69,20 @@ ENVIO_API_TOKEN=your-envio-api-token
 # ENVIO_ENABLE_EXTERNAL_CALLS=true  # master gate for all external calls
 # ENVIO_ENABLE_ETH_CALLS=true       # opt-in to eth_call reads (also requires above)
 
-# Optional: One-time chain baselines during settlement
-# ENVIO_ENABLE_NFT_CHAIN_SYNC=true
-# ENVIO_ENABLE_LP_CHAIN_SYNC=true
-
 # Optional: LP debug logging
 # DEBUG_LP_POINTS=true
 ```
 
 > **Note**: For production deployments to Envio's hosted service, environment variables are configured through the Envio dashboard instead of a `.env` file.
+
+### Historical Keeper backfills
+
+`ENVIO_KEEPER_FINAL_ONLY_FROM_EPOCH` is disabled when empty. A malformed non-empty
+value fails loudly, and the floor must never be backdated merely because a Tide
+is closed. Enable it only when every Tide from that floor forward has an archived
+ceremony manifest proving that every active-phase raw Keeper user appears both in
+the manifest users and in the indexed `UserEpochFinalization` rows after replay.
+Set `ENVIO_LEADERBOARD_LIVE_EPOCH` to the current live Tide for the same replay.
 
 ## Common Scripts
 
@@ -85,6 +90,7 @@ ENVIO_API_TOKEN=your-envio-api-token
 
 - `pnpm run codegen`: Generate Envio bindings and types from schema and config
 - `pnpm run dev`: Run the local indexer with hot reload
+- `pnpm run dev:restart`: Clear local state and reindex from scratch
 - `pnpm run start`: Start the indexer in production mode
 - `pnpm run stop`: Stop the running indexer
 - `pnpm run local:docker:up`: Start local Postgres for development
@@ -100,10 +106,10 @@ ENVIO_API_TOKEN=your-envio-api-token
 
 ### Testing
 
-- `pnpm run test:build`: Compile tests to `dist-test`
-- `pnpm run test`: Compile and run unit tests
+- `pnpm run test:build`: Type-check handlers and tests without emitting files
+- `pnpm run test`: Type-check and run the TypeScript tests directly
 - `pnpm run test:coverage`: Generate coverage report
-- `pnpm run test:coverage:check`: Enforce 100% test coverage
+- `pnpm run test:coverage:check`: Enforce 100% lines/functions/branches/statements
 
 ## Project Structure
 
@@ -138,6 +144,7 @@ neverland-hyperindex/
 │   │   ├── uniswapV3.ts            # Uniswap V3 math helpers
 │   │   └── viem.ts                 # Viem utilities
 │   └── types/                      # TypeScript type definitions
+│       ├── envio.ts                # V3 schema entity/context aliases
 │       └── shims.d.ts              # Type shims
 ├── .env.example                    # Environment variables template
 ├── .gitignore                      # Git ignore file
@@ -199,6 +206,7 @@ The project includes production-ready Docker Compose configurations for self-hos
 #### Architecture
 
 The self-hosted stack includes:
+
 - **PostgreSQL 16**: Data storage with persistent volumes
 - **Hasura GraphQL Engine**: Auto-generated GraphQL API layer
 - **Envio Indexer**: Event processing and data aggregation
@@ -231,8 +239,6 @@ CLOUDFLARE_TUNNEL_TOKEN=your-tunnel-token
 # Optional: Feature flags
 ENVIO_ENABLE_EXTERNAL_CALLS=false
 ENVIO_ENABLE_ETH_CALLS=false
-ENVIO_ENABLE_NFT_CHAIN_SYNC=false
-ENVIO_ENABLE_LP_CHAIN_SYNC=false
 DEBUG_LP_POINTS=false
 
 # Optional: Logging
@@ -276,12 +282,14 @@ docker compose -f docker-compose.staging.yml up -d
 #### Service Endpoints
 
 **Production:**
+
 - GraphQL API: `http://localhost:8080/v1/graphql`
 - Hasura Console: `http://localhost:8080/console`
 - Metrics: `http://localhost:9090`
 - PostgreSQL: `localhost:5432`
 
 **Staging:**
+
 - GraphQL API: `http://localhost:8081/v1/graphql`
 - Hasura Console: `http://localhost:8081/console`
 - Metrics: `http://localhost:9091`
@@ -299,16 +307,19 @@ For secure public access without exposing ports:
 #### Persistent Data
 
 Data is stored in Docker volumes:
+
 - `postgres_data`: Database files
 - `node_modules`: Cached dependencies
 - `pnpm_store`: pnpm package cache
 
 To backup database:
+
 ```bash
 docker exec neverland-postgres pg_dump -U postgres envio > backup.sql
 ```
 
 To restore:
+
 ```bash
 cat backup.sql | docker exec -i neverland-postgres psql -U postgres envio
 ```
@@ -344,6 +355,7 @@ docker compose -f docker-compose.prod.yml up -d
 #### Troubleshooting
 
 **Indexer not starting:**
+
 ```bash
 # Check logs
 docker compose -f docker-compose.prod.yml logs indexer
@@ -356,12 +368,14 @@ docker exec neverland-postgres psql -U postgres -d envio -c "SELECT 1"
 ```
 
 **Slow sync performance:**
+
 - Verify `ENVIO_API_TOKEN` is set correctly
 - Check RPC endpoint latency
 - Monitor system resources (CPU, RAM, disk I/O)
 - Review `LOG_LEVEL=debug` for bottlenecks
 
 **Out of memory:**
+
 - Increase Docker memory limit (Settings → Resources)
 - Adjust `ENVIO_THROTTLE_*` environment variables to reduce concurrency
 
@@ -417,11 +431,7 @@ query {
     currentEpochNumber
     isActive
   }
-  UserEpochStats(
-    where: { epochNumber: { _eq: "1" } }
-    order_by: { totalPoints: desc }
-    limit: 10
-  ) {
+  UserEpochStats(where: { epochNumber: { _eq: "1" } }, order_by: { totalPoints: desc }, limit: 10) {
     user_id
     totalPoints
     lpPoints
@@ -473,35 +483,30 @@ query {
     collection
     name
     active
-    staticBoostBps      # null = decay, 0 = decay, >0 = static boost (e.g., 2000 = 20%)
+    staticBoostBps # null = decay, 0 = decay, >0 = static boost (e.g., 2000 = 20%)
     startTimestamp
     endTimestamp
   }
-  
+
   # Get decay configuration for collections without static boost
   NFTMultiplierConfig(where: { id: { _eq: "current" } }) {
-    firstBonus          # First NFT bonus (e.g., 1000 = 10%)
-    decayRatio          # Decay ratio (e.g., 9000 = 90% of previous)
+    firstBonus # First NFT bonus (e.g., 1000 = 10%)
+    decayRatio # Decay ratio (e.g., 9000 = 90% of previous)
     lastUpdate
   }
-  
+
   # Get user's NFT holdings and calculated multiplier
   UserLeaderboardState(where: { id: { _eq: "0x..." } }) {
     nftCount
-    nftMultiplier       # Combined static + decay multiplier
+    nftMultiplier # Combined static + decay multiplier
     vpMultiplier
-    combinedMultiplier  # (nftMultiplier * vpMultiplier) / 10000, capped at 100000
+    combinedMultiplier # (nftMultiplier * vpMultiplier) / 10000, capped at 100000
     votingPower
     lifetimePoints
   }
-  
+
   # Get user's specific NFT ownership
-  UserNFTOwnership(
-    where: { 
-      user_id: { _eq: "0x..." }
-      hasNFT: { _eq: true }
-    }
-  ) {
+  UserNFTOwnership(where: { user_id: { _eq: "0x..." }, hasNFT: { _eq: true } }) {
     partnership_id
     balance
     hasNFT
@@ -530,16 +535,16 @@ query {
 1. Fork the repository
 2. Create a feature branch
 3. Make your changes
-4. Ensure all tests pass and coverage is at 100%
+4. Ensure `pnpm run test:coverage:check` passes
 5. Submit a pull request
 
 ## Quality Gates
 
 This project maintains high code quality standards:
 
-- **Pre-commit hooks**: Enforce formatting, linting, and type checks
-- **CI/CD**: Automated testing and deployment validation
-- **Test Coverage**: 100% coverage requirement for all new code
+- **Pre-commit hooks**: Enforce code generation cleanliness, formatting, linting, type checks, and the coverage gate
+- **CI/CD**: Enforce formatting, linting, and generated-source cleanliness
+- **Test Coverage**: Require 100% statements, branches, functions, and lines for included sources; `src/handlers/lp.ts` is the sole executable coverage exception
 - **Type Safety**: Strict TypeScript configuration
 
 ## Troubleshooting

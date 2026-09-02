@@ -1,8 +1,8 @@
 {
   "compilerOptions": {
     "target": "ES2020",
-    "module": "CommonJS",
-    "moduleResolution": "node",
+    "module": "node16",
+    "moduleResolution": "node16",
     "strict": true,
     "noImplicitAny": true,
     "esModuleInterop": true,
@@ -12,12 +12,8 @@
     "rootDir": ".",
     "declaration": true,
     "resolveJsonModule": true,
-    "baseUrl": ".",
-    "paths": {
-      "generated": ["./generated"],
-      "generated/*": ["./generated/*"]
-    }
+    "types": ["node"]
   },
-  "include": ["src/**/*", "generated/**/*.d.ts"],
+  "include": ["src/**/*", "generated/**/*.d.ts", "scripts/**/*", "envio-env.d.ts"],
   "exclude": ["node_modules", "dist"]
 }

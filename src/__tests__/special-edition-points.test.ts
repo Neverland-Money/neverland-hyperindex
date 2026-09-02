@@ -6,7 +6,6 @@ import { LEADERBOARD_START_BLOCK } from '../helpers/constants';
 
 process.env.ENVIO_ENABLE_EXTERNAL_CALLS = 'false';
 process.env.ENVIO_ENABLE_ETH_CALLS = 'false';
-process.env.ENVIO_LEADERBOARD_LIVE_EPOCH = '';
 
 // End-to-end proof that the special-edition multiplier BOOSTS accrued points, the
 // same additive-join way an NFT-collection multiplier does. Two identical pure-VP
@@ -69,7 +68,7 @@ function seed(mockDb: MockDb) {
   for (const [owner, tokenId] of [
     [MEMBER, 9001n],
     [BASE, 9002n],
-  ]) {
+  ] as const) {
     mockDb = mockDb.entities.DustLockToken.set({
       id: tokenId.toString(),
       owner,

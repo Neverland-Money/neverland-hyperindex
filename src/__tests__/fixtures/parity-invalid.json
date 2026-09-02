@@ -1,0 +1,15 @@
+{
+  "exactScalarPrecision": true,
+  "nonLpDifferences": [],
+  "lpDifferences": [
+    {
+      "user": "not-an-address",
+      "epochNumber": "8",
+      "component": "not-a-component",
+      "baselinePoints": "1",
+      "candidatePoints": "1",
+      "computedRoundingBound": "0"
+    }
+  ],
+  "closedTideRankings": []
+}

@@ -19,13 +19,10 @@ const ADDRESSES = {
   claimer: '0x0000000000000000000000000000000000002008',
   distributorOld: '0x0000000000000000000000000000000000002009',
   distributorNew: '0x0000000000000000000000000000000000002010',
-  vault: '0x0000000000000000000000000000000000002011',
   provider: '0x0000000000000000000000000000000000002012',
   debtAsset: '0x0000000000000000000000000000000000002013',
-  collateralAsset: '0x0000000000000000000000000000000000002014',
   rewardReceiver: '0x0000000000000000000000000000000000002015',
   dustTokenOwner: '0x0000000000000000000000000000000000002016',
-  debtUnderlying: '0x0000000000000000000000000000000000002017',
 };
 
 function loadTestHelpers() {
@@ -381,69 +378,6 @@ test('revenue reward recover and distributor update records are created', async 
 
   const distributorId = `${distributorEvent.transaction.hash}-${distributorEvent.logIndex}`;
   assert.ok(mockDb.entities.RevenueRewardDistributorUpdate.get(distributorId));
-});
-
-test('self-repay updates vault, user, and protocol totals', async () => {
-  const TestHelpers = loadTestHelpers();
-  let mockDb = TestHelpers.MockDb.createMockDb();
-  const eventData = createEventDataFactory();
-
-  const createEvent = TestHelpers.UserVaultFactory.UserVaultCreated.createMockEvent({
-    user: ADDRESSES.user,
-    vault: ADDRESSES.vault,
-    ...eventData(11, 200, ADDRESSES.provider),
-  });
-  mockDb = await TestHelpers.UserVaultFactory.UserVaultCreated.processEvent({
-    event: createEvent,
-    mockDb,
-  });
-
-  const vaultEntity = mockDb.entities.UserVaultEntity.get(ADDRESSES.vault.toLowerCase());
-  const vault = mockDb.entities.UserVault.get(ADDRESSES.vault.toLowerCase());
-  assert.ok(vaultEntity);
-  assert.ok(vault);
-
-  mockDb = mockDb.entities.SubToken.set({
-    id: ADDRESSES.collateralAsset,
-    pool_id: 'pool',
-    tokenContractImpl: undefined,
-    underlyingAssetAddress: ADDRESSES.debtUnderlying,
-    underlyingAssetDecimals: 18,
-  });
-
-  const repayEvent = TestHelpers.UserVault.LoanSelfRepaid.createMockEvent({
-    user: ADDRESSES.user,
-    vault: ADDRESSES.vault,
-    debtAsset: ADDRESSES.debtAsset,
-    collateralAsset: ADDRESSES.collateralAsset,
-    amount: 300n,
-    ...eventData(12, 210, ADDRESSES.vault),
-  });
-  mockDb = await TestHelpers.UserVault.LoanSelfRepaid.processEvent({
-    event: repayEvent,
-    mockDb,
-  });
-
-  const repaymentId = `${repayEvent.transaction.hash}-${repayEvent.logIndex}`;
-  const repayment = mockDb.entities.LoanSelfRepayment.get(repaymentId);
-  assert.ok(repayment);
-  assert.equal(repayment?.poolAddressesProvider, ADDRESSES.debtAsset.toLowerCase());
-  assert.equal(repayment?.debtAsset, ADDRESSES.debtUnderlying.toLowerCase());
-
-  const updatedVault = mockDb.entities.UserVault.get(ADDRESSES.vault.toLowerCase());
-  assert.equal(updatedVault?.totalRepayVolume, 300n);
-  assert.equal(updatedVault?.repayCount, 1n);
-
-  const updatedEntity = mockDb.entities.UserVaultEntity.get(ADDRESSES.vault.toLowerCase());
-  assert.equal(updatedEntity?.totalSelfRepayVolume, 300n);
-  assert.equal(updatedEntity?.totalSelfRepayCount, 1n);
-
-  const user = mockDb.entities.User.get(ADDRESSES.user.toLowerCase());
-  assert.equal(user?.totalSelfRepaymentsReceived, 300n);
-
-  const stats = mockDb.entities.ProtocolStats.get('1');
-  assert.equal(stats?.totalSelfRepayVolume, 300n);
-  assert.equal(stats?.totalSelfRepayCount, 1n);
 });
 
 test('self-repay toggle updates DustLockToken and history', async () => {

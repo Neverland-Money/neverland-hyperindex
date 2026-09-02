@@ -36,7 +36,7 @@
       {
         "name": "",
         "type": "address",
-        "internalType": "contract IDustLock"
+        "internalType": "contract ILeaderboardKeeperDustLock"
       }
     ],
     "stateMutability": "view"
@@ -130,7 +130,7 @@
       {
         "name": "",
         "type": "address",
-        "internalType": "contract INFTPartnershipRegistry"
+        "internalType": "contract ILeaderboardKeeperNFTRegistry"
       }
     ],
     "stateMutability": "view"

@@ -5,3 +5,6 @@ packages:
 onlyBuiltDependencies:
   - esbuild
   - rescript
+
+patchedDependencies:
+  envio@2.32.12: patches/envio@2.32.12.patch

@@ -1,3 +1,9 @@
+// Pins the operator settings (prefill off, fixture-only data dir) before any project
+// module loads. This file does not import the `v3-test-helpers` seam, so without this
+// a bare `node --test` invocation would inherit them from the repo `.env` via envio's
+// dotenv. Redundant under `pnpm run test`, which loads the same module via `--import`.
+import './test-env-preload';
+
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';

@@ -50,15 +50,12 @@ export interface ReserveEntity {
   decimals: number;
   usageAsCollateralEnabled: boolean;
   borrowingEnabled: boolean;
-  stableBorrowRateEnabled: boolean;
   isActive: boolean;
   isFrozen: boolean;
   reserveInterestRateStrategy: string;
   optimalUtilizationRate: bigint;
   variableRateSlope1: bigint;
   variableRateSlope2: bigint;
-  stableRateSlope1: bigint;
-  stableRateSlope2: bigint;
   baseVariableBorrowRate: bigint;
   baseLTVasCollateral: bigint;
   reserveLiquidationThreshold: bigint;
@@ -68,23 +65,18 @@ export interface ReserveEntity {
   totalATokenSupply: bigint;
   totalLiquidityAsCollateral: bigint;
   availableLiquidity: bigint;
-  totalPrincipalStableDebt: bigint;
-  totalScaledVariableDebt: bigint;
-  totalCurrentVariableDebt: bigint;
+  totalScaledDebt: bigint;
+  totalCurrentDebt: bigint;
   totalSupplies: bigint;
   liquidityRate: bigint;
   accruedToTreasury: bigint;
-  averageStableRate: bigint;
   variableBorrowRate: bigint;
-  stableBorrowRate: bigint;
   liquidityIndex: bigint;
   variableBorrowIndex: bigint;
   aToken_id: string;
   vToken_id: string;
-  sToken_id: string;
   reserveFactor: bigint;
   lastUpdateTimestamp: number;
-  stableDebtLastUpdateTimestamp: number;
   isPaused: boolean;
   isDropped: boolean;
   isListed: boolean;
@@ -97,9 +89,8 @@ export interface ReserveEntity {
   eMode_id: string | undefined;
   siloedBorrowing: boolean;
   lifetimeLiquidity: bigint;
-  lifetimePrincipalStableDebt: bigint;
-  lifetimeScaledVariableDebt: bigint;
-  lifetimeCurrentVariableDebt: bigint;
+  lifetimeScaledDebt: bigint;
+  lifetimeCurrentDebt: bigint;
   lifetimeRepayments: bigint;
   lifetimeWithdrawals: bigint;
   lifetimeBorrows: bigint;
@@ -156,15 +147,12 @@ export function createDefaultReserve(
     decimals: 18,
     usageAsCollateralEnabled: false,
     borrowingEnabled: false,
-    stableBorrowRateEnabled: false,
     isActive: false,
     isFrozen: false,
     reserveInterestRateStrategy: ZERO_ADDRESS,
     optimalUtilizationRate: 0n,
     variableRateSlope1: 0n,
     variableRateSlope2: 0n,
-    stableRateSlope1: 0n,
-    stableRateSlope2: 0n,
     baseVariableBorrowRate: 0n,
     baseLTVasCollateral: 0n,
     reserveLiquidationThreshold: 0n,
@@ -174,23 +162,18 @@ export function createDefaultReserve(
     totalATokenSupply: 0n,
     totalLiquidityAsCollateral: 0n,
     availableLiquidity: 0n,
-    totalPrincipalStableDebt: 0n,
-    totalScaledVariableDebt: 0n,
-    totalCurrentVariableDebt: 0n,
+    totalScaledDebt: 0n,
+    totalCurrentDebt: 0n,
     totalSupplies: 0n,
     liquidityRate: 0n,
     accruedToTreasury: 0n,
-    averageStableRate: 0n,
     variableBorrowRate: 0n,
-    stableBorrowRate: 0n,
     liquidityIndex: 0n,
     variableBorrowIndex: 0n,
     aToken_id: ZERO_ADDRESS,
     vToken_id: ZERO_ADDRESS,
-    sToken_id: ZERO_ADDRESS,
     reserveFactor: 0n,
     lastUpdateTimestamp: 0,
-    stableDebtLastUpdateTimestamp: 0,
     isPaused: false,
     isDropped: false,
     isListed: false,
@@ -203,9 +186,8 @@ export function createDefaultReserve(
     eMode_id: undefined,
     siloedBorrowing: false,
     lifetimeLiquidity: 0n,
-    lifetimePrincipalStableDebt: 0n,
-    lifetimeScaledVariableDebt: 0n,
-    lifetimeCurrentVariableDebt: 0n,
+    lifetimeScaledDebt: 0n,
+    lifetimeCurrentDebt: 0n,
     lifetimeRepayments: 0n,
     lifetimeWithdrawals: 0n,
     lifetimeBorrows: 0n,

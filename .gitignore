@@ -87,8 +87,7 @@ dist
 dist-test
 
 # References and Agents
-/references
-AGENTS.md
+skills-lock.json
 
 # Gatsby files
 .cache/
@@ -152,3 +151,4 @@ vite.config.ts.timestamp-*
 
 # Envio
 /generated
+.headsync/

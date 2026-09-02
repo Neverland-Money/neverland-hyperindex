@@ -6,16 +6,17 @@
  * receipt reads or historic chain calls.
  */
 
-import { normalizeAddress } from '../helpers/constants';
+import { NeverlandProfileItemsSeller } from '../../generated';
+import {
+  CATEGORY_CONSUMABLE,
+  CATEGORY_PERMANENT,
+  OWNERSHIP_TRANSFERRED,
+  OWNERSHIP_TRANSFER_STARTED,
+  normalizeAddress,
+} from '../helpers/constants';
 import { getOrCreateUser, recordProtocolTransaction } from './shared';
 
-import { NeverlandProfileItemsSeller } from '../../generated';
 import type { handlerContext } from '../../generated';
-
-const CATEGORY_PERMANENT = 'Permanent';
-const CATEGORY_CONSUMABLE = 'Consumable';
-const OWNERSHIP_TRANSFER_STARTED = 'OwnershipTransferStarted';
-const OWNERSHIP_TRANSFERRED = 'OwnershipTransferred';
 
 function normalizeBytes32(value: string): string {
   return value.toLowerCase();
@@ -202,13 +203,7 @@ async function updateUserStats(
     await getOrCreateUser(context, recipient);
   }
 
-  const [buyerStats, recipientStats] =
-    buyer === recipient
-      ? [await getOrCreateUserStats(context, seller, buyer, timestamp), undefined]
-      : await Promise.all([
-          getOrCreateUserStats(context, seller, buyer, timestamp),
-          getOrCreateUserStats(context, seller, recipient, timestamp),
-        ]);
+  const buyerStats = await getOrCreateUserStats(context, seller, buyer, timestamp);
   const nextBuyerStats = {
     ...buyerStats,
     buyerPurchaseCount: buyerStats.buyerPurchaseCount + (isNewPurchase ? 1n : 0n),
@@ -234,10 +229,7 @@ async function updateUserStats(
   }
 
   context.ProfileShopUserStats.set(nextBuyerStats);
-
-  if (!recipientStats) {
-    throw new Error(`Missing profile shop recipient stats for ${recipient}`);
-  }
+  const recipientStats = await getOrCreateUserStats(context, seller, recipient, timestamp);
 
   context.ProfileShopUserStats.set({
     ...recipientStats,

@@ -98,8 +98,8 @@ export async function updateReserveUsdValues(
   const suppliesE8 = (reserve.totalATokenSupply * priceE8) / decimalsBI;
   const suppliesUsd = Number(suppliesE8) / 1e8;
 
-  const totalDebt = reserve.totalCurrentVariableDebt + reserve.totalPrincipalStableDebt;
-  const borrowsE8 = (totalDebt * priceE8) / decimalsBI;
+  const debt = reserve.totalCurrentDebt;
+  const borrowsE8 = (debt * priceE8) / decimalsBI;
   const borrowsUsd = Number(borrowsE8) / 1e8;
 
   const availableE8 = (reserve.availableLiquidity * priceE8) / decimalsBI;

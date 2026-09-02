@@ -6,7 +6,12 @@
  * events; app timestamps are intentionally not used for scoring.
  */
 
-import { normalizeAddress } from '../helpers/constants';
+import { SpecialEditionRegistry } from '../../generated';
+import {
+  SPECIAL_EDITION_TRANSFER_IN,
+  SPECIAL_EDITION_TRANSFER_OUT,
+  normalizeAddress,
+} from '../helpers/constants';
 import {
   ZERO_ADDRESS,
   applyUserSpecialEditionDelta,
@@ -15,26 +20,21 @@ import {
   settlePointsForUser,
 } from './shared';
 
-import { SpecialEditionRegistry } from '../../generated';
 import type { handlerContext } from '../../generated';
 
-const SPECIAL_EDITION_TRANSFER_OUT = 'SPECIAL_EDITION_TRANSFER_OUT';
-const SPECIAL_EDITION_TRANSFER_IN = 'SPECIAL_EDITION_TRANSFER_IN';
+type SpecialEditionConfigInput = Parameters<handlerContext['SpecialEditionConfig']['set']>[0];
 
 function asBigInt(value: bigint | number | string): bigint {
   return BigInt(value);
 }
 
-function eventTimestamp(
-  eventTimestampValue: bigint | number | string,
-  blockTimestamp: number
-): number {
+function eventTimestamp(eventTimestampValue: bigint, blockTimestamp: number): number {
   const parsed = Number(eventTimestampValue);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : blockTimestamp;
+  return parsed > 0 ? parsed : blockTimestamp;
 }
 
-function eventLogIndex(logIndex: bigint | number | string | undefined): number {
-  return Number(logIndex ?? 0);
+function eventLogIndex(logIndex: number): number {
+  return Number(logIndex);
 }
 
 function editionConfigId(editionId: bigint): string {
@@ -73,20 +73,17 @@ function updateBitmap(currentBitmap: bigint, editionId: bigint, active: boolean)
   return active ? currentBitmap | mask : currentBitmap & ~mask;
 }
 
-async function writeConfigSnapshot(
+function writeConfigSnapshot(
   context: handlerContext,
-  editionId: bigint,
+  config: SpecialEditionConfigInput,
   timestamp: number,
   txHash: string,
   logIndex: number,
   changeReason: string
-) {
-  const config = await context.SpecialEditionConfig.get(editionConfigId(editionId));
-  if (!config) return;
-
+): void {
   context.SpecialEditionConfigSnapshot.set({
-    id: `${editionId.toString()}:${timestamp}:${txHash}:${logIndex}:${changeReason}`,
-    editionId,
+    id: `${config.editionId.toString()}:${timestamp}:${txHash}:${logIndex}:${changeReason}`,
+    editionId: config.editionId,
     key: config.key,
     name: config.name,
     perTokenBoostBps: config.perTokenBoostBps,
@@ -109,7 +106,6 @@ async function settleOwnerBeforeSpecialEditionChange(
 
   await settlePointsForUser(context, normalizedOwner, null, timestamp, blockNumber, {
     ignoreCooldown: true,
-    skipNftSync: true,
   });
 }
 
@@ -256,7 +252,7 @@ SpecialEditionRegistry.EditionCreated.handler(async ({ event, context }) => {
     lastUpdate: timestamp,
   });
 
-  context.SpecialEditionConfig.set({
+  const nextConfig = {
     id: editionConfigId(editionId),
     editionId,
     key: event.params.key,
@@ -269,11 +265,12 @@ SpecialEditionRegistry.EditionCreated.handler(async ({ event, context }) => {
     changeTimestamps: [timestamp],
     boostBpsHistory: [event.params.perTokenBoostBps],
     enabledHistory: [event.params.enabled ? 1n : 0n],
-  });
+  } satisfies SpecialEditionConfigInput;
+  context.SpecialEditionConfig.set(nextConfig);
 
-  await writeConfigSnapshot(
+  writeConfigSnapshot(
     context,
-    editionId,
+    nextConfig,
     timestamp,
     event.transaction.hash,
     eventLogIndex(event.logIndex),
@@ -294,7 +291,7 @@ SpecialEditionRegistry.EditionConfigured.handler(async ({ event, context }) => {
   const id = editionConfigId(editionId);
   const existing = await context.SpecialEditionConfig.get(id);
 
-  context.SpecialEditionConfig.set({
+  const nextConfig = {
     id,
     editionId,
     key: existing?.key ?? '',
@@ -307,7 +304,8 @@ SpecialEditionRegistry.EditionConfigured.handler(async ({ event, context }) => {
     changeTimestamps: [...(existing?.changeTimestamps ?? []), timestamp],
     boostBpsHistory: [...(existing?.boostBpsHistory ?? []), event.params.newPerTokenBoostBps],
     enabledHistory: [...(existing?.enabledHistory ?? []), (existing?.enabled ?? true) ? 1n : 0n],
-  });
+  } satisfies SpecialEditionConfigInput;
+  context.SpecialEditionConfig.set(nextConfig);
 
   const registry = await getOrCreateSpecialEditionRegistryState(context, timestamp);
   if (!registry.editionIds.some(current => current === editionId)) {
@@ -318,9 +316,9 @@ SpecialEditionRegistry.EditionConfigured.handler(async ({ event, context }) => {
     });
   }
 
-  await writeConfigSnapshot(
+  writeConfigSnapshot(
     context,
-    editionId,
+    nextConfig,
     timestamp,
     event.transaction.hash,
     eventLogIndex(event.logIndex),
@@ -341,7 +339,7 @@ SpecialEditionRegistry.EditionEnabledUpdated.handler(async ({ event, context }) 
   const id = editionConfigId(editionId);
   const existing = await context.SpecialEditionConfig.get(id);
 
-  context.SpecialEditionConfig.set({
+  const nextConfig = {
     id,
     editionId,
     key: existing?.key ?? '',
@@ -354,7 +352,8 @@ SpecialEditionRegistry.EditionEnabledUpdated.handler(async ({ event, context }) 
     changeTimestamps: [...(existing?.changeTimestamps ?? []), timestamp],
     boostBpsHistory: [...(existing?.boostBpsHistory ?? []), existing?.perTokenBoostBps ?? 0n],
     enabledHistory: [...(existing?.enabledHistory ?? []), event.params.newEnabled ? 1n : 0n],
-  });
+  } satisfies SpecialEditionConfigInput;
+  context.SpecialEditionConfig.set(nextConfig);
 
   const registry = await getOrCreateSpecialEditionRegistryState(context, timestamp);
   if (!registry.editionIds.some(current => current === editionId)) {
@@ -365,9 +364,9 @@ SpecialEditionRegistry.EditionEnabledUpdated.handler(async ({ event, context }) 
     });
   }
 
-  await writeConfigSnapshot(
+  writeConfigSnapshot(
     context,
-    editionId,
+    nextConfig,
     timestamp,
     event.transaction.hash,
     eventLogIndex(event.logIndex),

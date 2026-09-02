@@ -3,7 +3,13 @@ import { test } from 'node:test';
 
 import { TestHelpers } from './v3-test-helpers';
 
-import { DUST_LOCK_START_BLOCK, ZERO_ADDRESS } from '../helpers/constants';
+import {
+  AUSD_ADDRESS,
+  DUST_LOCK_START_BLOCK,
+  LEADERBOARD_START_BLOCK,
+  ZERO_ADDRESS,
+} from '../helpers/constants';
+import { LP_GROWTH_Q128 } from '../helpers/lpGrowthMath';
 
 process.env.ENVIO_ENABLE_EXTERNAL_CALLS = 'false';
 process.env.ENVIO_ENABLE_ETH_CALLS = 'false';
@@ -13,7 +19,12 @@ const ADDRESSES = {
   user: '0x000000000000000000000000000000000000a002',
   userTwo: '0x000000000000000000000000000000000000a003',
   treasury: '0x000000000000000000000000000000000000a004',
+  lpPool: '0x000000000000000000000000000000000000a005',
+  lpToken: '0x000000000000000000000000000000000000a006',
 };
+
+const LP_POSITION_ID = `v2:${ADDRESSES.lpPool}:${ADDRESSES.user}`;
+const ONE_POINT_GROWTH_X128 = LP_GROWTH_Q128 * 100_000_000n * 10_000n * 86_400n;
 
 function loadTestHelpers() {
   return TestHelpers;
@@ -201,6 +212,161 @@ test('dust lock lifecycle events update tokens and voting power', async () => {
 
   const tokenList = mockDb.entities.UserTokenList.get(ADDRESSES.userTwo);
   assert.equal(tokenList?.tokenIds.length, 1);
+});
+
+test('generated DustLock deposit consumes LP growth before mutating the owned lock', async () => {
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const timestamp = 1000;
+  const blockNumber = LEADERBOARD_START_BLOCK + 100;
+
+  mockDb = mockDb.entities.LeaderboardState.set({
+    id: 'current',
+    currentEpochNumber: 1n,
+    isActive: true,
+  });
+  mockDb = mockDb.entities.LeaderboardEpoch.set({
+    id: '1',
+    epochNumber: 1n,
+    startBlock: BigInt(DUST_LOCK_START_BLOCK),
+    startTime: 900,
+    endBlock: undefined,
+    endTime: undefined,
+    isActive: true,
+    duration: undefined,
+    scheduledStartTime: 900,
+    scheduledEndTime: 2000,
+  });
+  mockDb = mockDb.entities.LeaderboardConfig.set({
+    id: 'global',
+    depositRateBps: 0n,
+    borrowRateBps: 0n,
+    vpRateBps: 0n,
+    lpRateBps: 0n,
+    supplyDailyBonus: 0,
+    borrowDailyBonus: 0,
+    repayDailyBonus: 0,
+    withdrawDailyBonus: 0,
+    cooldownSeconds: 0,
+    minDailyBonusUsd: 0,
+    lastUpdate: 900,
+  });
+  mockDb = mockDb.entities.UserTokenList.set({
+    id: ADDRESSES.user,
+    user_id: ADDRESSES.user,
+    tokenIds: [1n],
+    lastUpdate: 900,
+  });
+  mockDb = mockDb.entities.DustLockToken.set({
+    id: '1',
+    owner: ADDRESSES.user,
+    lockedAmount: 100n,
+    end: 5000,
+    isPermanent: false,
+    createdAt: 800,
+    updatedAt: 900,
+    lastDepositType: undefined,
+    selfRepayEnabled: false,
+    rewardReceiver: undefined,
+  });
+  mockDb = mockDb.entities.LPPoolRegistry.set({
+    id: 'global',
+    poolIds: [ADDRESSES.lpPool],
+    lastUpdate: 900,
+  });
+  mockDb = mockDb.entities.LPPoolConfig.set({
+    id: ADDRESSES.lpPool,
+    pool: ADDRESSES.lpPool,
+    positionManager: ADDRESSES.lpPool,
+    token0: AUSD_ADDRESS,
+    token1: ADDRESSES.lpToken,
+    fee: 3000,
+    lpRateBps: 0n,
+    isActive: true,
+    enabledAtEpoch: 1n,
+    enabledAtTimestamp: 900,
+    disabledAtEpoch: undefined,
+    disabledAtTimestamp: undefined,
+    lastUpdate: 900,
+  });
+  mockDb = mockDb.entities.LPPoolState.set({
+    id: ADDRESSES.lpPool,
+    pool: ADDRESSES.lpPool,
+    currentTick: 0,
+    sqrtPriceX96: 1n << 96n,
+    token0Price: 100_000_000n,
+    token1Price: 100_000_000n,
+    feeProtocol0: 0,
+    feeProtocol1: 0,
+    lastUpdate: 900,
+  });
+  mockDb = mockDb.entities.LPPoolV2State.set({
+    id: ADDRESSES.lpPool,
+    pool: ADDRESSES.lpPool,
+    reserve0: 1n,
+    reserve1: 1n,
+    lpTotalSupply: 1n,
+    lastUpdate: 900,
+  });
+  mockDb = mockDb.entities.LPPoolEpochGrowth.set({
+    id: `${ADDRESSES.lpPool}:1`,
+    pool: ADDRESSES.lpPool,
+    epochNumber: 1n,
+    startTimestamp: 900,
+    lastTimestamp: timestamp,
+    scalarGrowthX128: ONE_POINT_GROWTH_X128,
+    isFrozen: false,
+    frozenAt: undefined,
+    lastUpdate: timestamp,
+  });
+  mockDb = mockDb.entities.UserLPPosition.set({
+    id: LP_POSITION_ID,
+    tokenId: 0n,
+    user_id: ADDRESSES.user,
+    pool: ADDRESSES.lpPool,
+    positionManager: ADDRESSES.lpPool,
+    tickLower: -887272,
+    tickUpper: 887272,
+    liquidity: 1n,
+    amount0: 1n,
+    amount1: 1n,
+    isInRange: true,
+    valueUsd: 200_000_000n,
+    lastInRangeTimestamp: 900,
+    accumulatedInRangeSeconds: 0n,
+    lastSettledAt: 900,
+    settledLpPoints: 0n,
+    createdAt: 899,
+    lastUpdate: 900,
+  });
+  mockDb = mockDb.entities.UserLPPositionIndex.set({
+    id: ADDRESSES.user,
+    user_id: ADDRESSES.user,
+    positionIds: [LP_POSITION_ID],
+    lastUpdate: 900,
+  });
+
+  const deposit = TestHelpers.DustLock.Deposit.createMockEvent({
+    provider: ADDRESSES.user,
+    tokenId: 1n,
+    value: 10n,
+    locktime: 6000n,
+    depositType: 1n,
+    mockEventData: {
+      block: { number: blockNumber, timestamp },
+      logIndex: 77,
+      srcAddress: ADDRESSES.dustLock,
+      transaction: { hash: `0x${'cd'.repeat(32)}` },
+    },
+  });
+  mockDb = await TestHelpers.DustLock.Deposit.processEvent({ event: deposit, mockDb });
+
+  const cursor = mockDb.entities.UserLPEpochCursor.get(`${LP_POSITION_ID}:1`);
+  const stats = mockDb.entities.UserEpochStats.get(`${ADDRESSES.user}:1`);
+  const token = mockDb.entities.DustLockToken.get('1');
+  assert.equal(cursor?.lastSettledAt, timestamp);
+  assert.equal(cursor?.growthBaselineX128, ONE_POINT_GROWTH_X128);
+  assert.equal(stats?.lpPoints, 1_000_000_000_000_000_000n);
+  assert.equal(token?.lockedAmount, 110n);
 });
 
 test('dust lock admin events emit audit records', async () => {

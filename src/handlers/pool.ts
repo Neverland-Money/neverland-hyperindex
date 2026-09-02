@@ -3,8 +3,8 @@
  * Supply, Borrow, Repay, Withdraw, Liquidation, FlashLoan, etc.
  */
 
-import type { handlerContext } from '../../generated';
 import { Pool } from '../../generated';
+import type { handlerContext } from '../../generated';
 import {
   recordProtocolTransaction,
   getOrCreateUser,
@@ -12,6 +12,7 @@ import {
   getReserveNormalizedIncome,
   getReserveNormalizedVariableDebt,
   addReserveToUserList,
+  getOrCreateProtocolStats,
 } from './shared';
 import { calculateGrowth } from '../helpers/math';
 import { getHistoryEntityId } from '../helpers/entityHelpers';
@@ -48,18 +49,12 @@ async function getOrCreateUserReserveForCollateralToggle(
     reserve_id: reserveId,
     scaledATokenBalance: 0n,
     currentATokenBalance: 0n,
-    scaledVariableDebt: 0n,
-    currentVariableDebt: 0n,
-    principalStableDebt: 0n,
-    currentStableDebt: 0n,
-    currentTotalDebt: 0n,
-    stableBorrowRate: 0n,
-    oldStableBorrowRate: 0n,
+    scaledDebt: 0n,
+    currentDebt: 0n,
     liquidityRate: 0n,
     variableBorrowIndex: 0n,
     usageAsCollateralEnabledOnUser: false,
     lastUpdateTimestamp: timestamp,
-    stableBorrowLastUpdateTimestamp: 0,
   };
 }
 
@@ -131,8 +126,6 @@ async function maybeStoreEpochEndReserveSnapshot(
     variableBorrowRate: bigint;
     variableBorrowIndex: bigint;
     utilizationRate: number;
-    stableBorrowRate: bigint;
-    averageStableRate: bigint;
     liquidityIndex: bigint;
     liquidityRate: bigint;
     totalLiquidity: bigint;
@@ -142,12 +135,10 @@ async function maybeStoreEpochEndReserveSnapshot(
     priceInUsdE8: bigint;
     priceInUsd: number;
     accruedToTreasury: bigint;
-    totalScaledVariableDebt: bigint;
-    totalCurrentVariableDebt: bigint;
-    totalPrincipalStableDebt: bigint;
-    lifetimePrincipalStableDebt: bigint;
-    lifetimeScaledVariableDebt: bigint;
-    lifetimeCurrentVariableDebt: bigint;
+    totalScaledDebt: bigint;
+    totalCurrentDebt: bigint;
+    lifetimeScaledDebt: bigint;
+    lifetimeCurrentDebt: bigint;
     lifetimeLiquidity: bigint;
     lifetimeRepayments: bigint;
     lifetimeWithdrawals: bigint;
@@ -192,8 +183,6 @@ async function maybeStoreEpochEndReserveSnapshot(
     variableBorrowRate: reserve.variableBorrowRate,
     variableBorrowIndex: variableBorrowIndexAtEnd,
     utilizationRate: reserve.utilizationRate,
-    stableBorrowRate: reserve.stableBorrowRate,
-    averageStableBorrowRate: reserve.averageStableRate,
     liquidityIndex: liquidityIndexAtEnd,
     liquidityRate: reserve.liquidityRate,
     totalLiquidity: reserve.totalLiquidity,
@@ -204,12 +193,10 @@ async function maybeStoreEpochEndReserveSnapshot(
     priceInUsd: reserve.priceInUsd,
     timestamp: epochEndTime,
     accruedToTreasury: reserve.accruedToTreasury,
-    totalScaledVariableDebt: reserve.totalScaledVariableDebt,
-    totalCurrentVariableDebt: reserve.totalCurrentVariableDebt,
-    totalPrincipalStableDebt: reserve.totalPrincipalStableDebt,
-    lifetimePrincipalStableDebt: reserve.lifetimePrincipalStableDebt,
-    lifetimeScaledVariableDebt: reserve.lifetimeScaledVariableDebt,
-    lifetimeCurrentVariableDebt: reserve.lifetimeCurrentVariableDebt,
+    totalScaledDebt: reserve.totalScaledDebt,
+    totalCurrentDebt: reserve.totalCurrentDebt,
+    lifetimeScaledDebt: reserve.lifetimeScaledDebt,
+    lifetimeCurrentDebt: reserve.lifetimeCurrentDebt,
     lifetimeLiquidity: reserve.lifetimeLiquidity,
     lifetimeRepayments: reserve.lifetimeRepayments,
     lifetimeWithdrawals: reserve.lifetimeWithdrawals,
@@ -241,10 +228,11 @@ Pool.Supply.handler(async ({ event, context }) => {
     const reserveAddress = normalizeAddress(event.params.reserve);
     const reserveId = `${reserveAddress}-${poolId}`;
     const userId = normalizeAddress(event.params.onBehalfOf);
+    const callerId = normalizeAddress(event.params.user);
     const userReserveId = `${userId}-${reserveId}`;
 
     await getOrCreateUser(context, userId);
-    await getOrCreateUser(context, normalizeAddress(event.params.user));
+    await getOrCreateUser(context, callerId);
 
     if (event.params.referralCode > 0) {
       const referrerId = event.params.referralCode.toString();
@@ -267,7 +255,7 @@ Pool.Supply.handler(async ({ event, context }) => {
       action: 'Supply',
       pool_id: poolId,
       user_id: userId,
-      caller_id: normalizeAddress(event.params.user),
+      caller_id: callerId,
       reserve_id: reserveId,
       referrer_id: event.params.referralCode > 0 ? event.params.referralCode.toString() : undefined,
       userReserve_id: userReserveId,
@@ -282,13 +270,29 @@ Pool.Supply.handler(async ({ event, context }) => {
       kind: 'Supply',
       reserve: reserveId,
       user: userId,
-      counterparty: normalizeAddress(event.params.user),
+      counterparty: callerId,
       onBehalfOf: userId,
       amount: event.params.amount,
       timestamp: Number(event.block.timestamp),
       blockNumber: Number(event.block.number),
       logIndex: Number(event.logIndex),
     });
+
+    const vault = await context.UserVaultEntity.get(callerId);
+    if (vault?.owner === userId) {
+      context.AutoDeposit.set({
+        id,
+        vault: callerId,
+        user: userId,
+        poolAddressesProvider: poolId,
+        asset: reserveAddress,
+        reserve_id: reserveId,
+        amount: event.params.amount,
+        assetPriceUSD,
+        timestamp: Number(event.block.timestamp),
+        txHash: event.transaction.hash,
+      });
+    }
     /* c8 ignore start */
   } catch (error) {
     context.log.error(`Failed to process Supply event: ${error}`);
@@ -340,8 +344,7 @@ Pool.Borrow.handler(async ({ event, context }) => {
     }
 
     const userReserve = await context.UserReserve.get(userReserveId);
-    const stableTokenDebt = userReserve?.principalStableDebt || 0n;
-    const variableTokenDebt = userReserve?.scaledVariableDebt || 0n;
+    const scaledDebt = userReserve?.scaledDebt || 0n;
     const assetPriceUSD = await getAssetPriceUSD(
       context,
       reserveAddress,
@@ -362,8 +365,7 @@ Pool.Borrow.handler(async ({ event, context }) => {
       borrowRate: event.params.borrowRate,
       borrowRateMode: Number(event.params.interestRateMode),
       referrer_id: event.params.referralCode ? event.params.referralCode.toString() : undefined,
-      stableTokenDebt,
-      variableTokenDebt,
+      scaledDebt,
       assetPriceUSD,
       timestamp: Number(event.block.timestamp),
     });
@@ -440,6 +442,64 @@ Pool.Repay.handler(async ({ event, context }) => {
     timestamp: Number(event.block.timestamp),
     blockNumber: Number(event.block.number),
     logIndex: Number(event.logIndex),
+  });
+
+  const vaultAddress = normalizeAddress(event.params.repayer);
+  const vault = await context.UserVaultEntity.get(vaultAddress);
+  if (!vault || vault.owner !== userId) return;
+
+  const timestamp = Number(event.block.timestamp);
+  context.LoanSelfRepayment.set({
+    id,
+    vault: vaultAddress,
+    user: userId,
+    poolAddressesProvider: poolId,
+    debtAsset: reserveAddress,
+    reserve_id: reserveId,
+    amount: event.params.amount,
+    assetPriceUSD,
+    timestamp,
+    txHash: event.transaction.hash,
+  });
+
+  let vaultSummary = await context.UserVault.get(vaultAddress);
+  if (!vaultSummary) {
+    vaultSummary = {
+      id: vaultAddress,
+      user: userId,
+      createdAt: timestamp,
+      totalRepayVolume: 0n,
+      repayCount: 0n,
+      lastRepayAt: 0,
+    };
+  }
+  context.UserVault.set({
+    ...vaultSummary,
+    totalRepayVolume: vaultSummary.totalRepayVolume + event.params.amount,
+    repayCount: vaultSummary.repayCount + 1n,
+    lastRepayAt: timestamp,
+  });
+
+  context.UserVaultEntity.set({
+    ...vault,
+    totalSelfRepayVolume: vault.totalSelfRepayVolume + event.params.amount,
+    totalSelfRepayCount: vault.totalSelfRepayCount + 1n,
+    lastUpdate: timestamp,
+  });
+
+  const user = await context.User.get(userId);
+  if (user) {
+    context.User.set({
+      ...user,
+      totalSelfRepaymentsReceived: user.totalSelfRepaymentsReceived + event.params.amount,
+    });
+  }
+
+  const ps = await getOrCreateProtocolStats(context, timestamp);
+  context.ProtocolStats.set({
+    ...ps,
+    totalSelfRepayVolume: ps.totalSelfRepayVolume + event.params.amount,
+    totalSelfRepayCount: ps.totalSelfRepayCount + 1n,
   });
 });
 
@@ -696,7 +756,6 @@ Pool.ReserveDataUpdated.handler(async ({ event, context }) => {
     context.Reserve.set({
       ...reserve,
       liquidityRate: event.params.liquidityRate,
-      stableBorrowRate: event.params.stableBorrowRate,
       variableBorrowRate: event.params.variableBorrowRate,
       liquidityIndex: event.params.liquidityIndex,
       variableBorrowIndex: event.params.variableBorrowIndex,
@@ -712,8 +771,7 @@ Pool.ReserveDataUpdated.handler(async ({ event, context }) => {
       reserve: reserveId,
       hourStart,
       liquidityAPRRay: event.params.liquidityRate,
-      variableBorrowAPRRay: event.params.variableBorrowRate,
-      stableBorrowAPRRay: event.params.stableBorrowRate,
+      borrowAPRRay: event.params.variableBorrowRate,
       liquidityIndexRay: event.params.liquidityIndex,
       variableBorrowIndexRay: event.params.variableBorrowIndex,
       lastUpdateTs: Number(event.block.timestamp),
@@ -793,91 +851,6 @@ Pool.UserEModeSet.handler(async ({ event, context }) => {
   });
 });
 
-Pool.MintUnbacked.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-
-  const poolId = await resolvePoolId(context, event.srcAddress);
-  const reserveAddress = normalizeAddress(event.params.reserve);
-  const reserveId = `${reserveAddress}-${poolId}`;
-  const userId = normalizeAddress(event.params.onBehalfOf);
-
-  await getOrCreateUser(context, userId);
-  await getOrCreateUser(context, normalizeAddress(event.params.user));
-
-  const id = `${event.transaction.hash}-${event.logIndex}`;
-  context.MintUnbacked.set({
-    id,
-    pool_id: poolId,
-    user_id: userId,
-    caller_id: normalizeAddress(event.params.user),
-    reserve_id: reserveId,
-    amount: event.params.amount,
-    referral: Number(event.params.referralCode),
-    userReserve_id: `${userId}-${reserveId}`,
-    timestamp: Number(event.block.timestamp),
-  });
-
-  const reserve = await context.Reserve.get(reserveId);
-  if (reserve) {
-    context.Reserve.set({
-      ...reserve,
-      unbacked: reserve.unbacked + event.params.amount,
-    });
-  }
-});
-
-Pool.BackUnbacked.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-
-  const poolId = await resolvePoolId(context, event.srcAddress);
-  const reserveAddress = normalizeAddress(event.params.reserve);
-  const reserveId = `${reserveAddress}-${poolId}`;
-
-  await getOrCreateUser(context, normalizeAddress(event.params.backer));
-
-  const pool = await context.Pool.get(poolId);
-  const premium = event.params.fee;
-  const bridgeFee = pool?.bridgeProtocolFee || 0n;
-  const protocolFee = (premium * bridgeFee + 5000n) / 10000n;
-  const lpFee = premium - protocolFee;
-
-  const id = `${event.transaction.hash}-${event.logIndex}`;
-  context.BackUnbacked.set({
-    id,
-    pool_id: poolId,
-    reserve_id: reserveId,
-    backer_id: normalizeAddress(event.params.backer),
-    amount: event.params.amount,
-    fee: event.params.fee,
-    lpFee,
-    protocolFee,
-    userReserve_id: `${normalizeAddress(event.params.backer)}-${reserveId}`,
-    timestamp: Number(event.block.timestamp),
-  });
-
-  const reserve = await context.Reserve.get(reserveId);
-  if (reserve) {
-    const newUnbacked =
-      reserve.unbacked > event.params.amount ? reserve.unbacked - event.params.amount : 0n;
-    context.Reserve.set({
-      ...reserve,
-      unbacked: newUnbacked,
-      lifetimePortalLPFee: reserve.lifetimePortalLPFee + lpFee,
-      lifetimePortalProtocolFee: reserve.lifetimePortalProtocolFee + protocolFee,
-    });
-  }
-});
-
 Pool.IsolationModeTotalDebtUpdated.handler(async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
@@ -896,80 +869,6 @@ Pool.IsolationModeTotalDebtUpdated.handler(async ({ event, context }) => {
     isolatedDebt: event.params.totalDebt,
     pool_id: poolId,
     reserve_id: reserveId,
-    timestamp: Number(event.block.timestamp),
-  });
-});
-
-Pool.SwapBorrowRateMode.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-
-  const poolId = await resolvePoolId(context, event.srcAddress);
-  const reserveAddress = normalizeAddress(event.params.reserve);
-  const reserveId = `${reserveAddress}-${poolId}`;
-  const userId = normalizeAddress(event.params.user);
-  const userReserveId = `${userId}-${reserveId}`;
-
-  await getOrCreateUser(context, userId);
-
-  const reserve = await context.Reserve.get(reserveId);
-
-  const id = `${event.transaction.hash}-${event.logIndex}`;
-
-  // Determine swap direction: 1 = stable, 2 = variable
-  const borrowRateModeFrom = Number(event.params.interestRateMode);
-  const borrowRateModeTo = borrowRateModeFrom === 1 ? 2 : 1;
-
-  context.SwapBorrowRate.set({
-    id,
-    txHash: event.transaction.hash,
-    action: 'SwapBorrowRate',
-    pool_id: poolId,
-    user_id: userId,
-    reserve_id: reserveId,
-    userReserve_id: userReserveId,
-    borrowRateModeFrom,
-    borrowRateModeTo,
-    stableBorrowRate: reserve?.stableBorrowRate || 0n,
-    variableBorrowRate: reserve?.variableBorrowRate || 0n,
-    timestamp: Number(event.block.timestamp),
-  });
-});
-
-Pool.RebalanceStableBorrowRate.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-
-  const poolId = await resolvePoolId(context, event.srcAddress);
-  const reserveAddress = normalizeAddress(event.params.reserve);
-  const reserveId = `${reserveAddress}-${poolId}`;
-  const userId = normalizeAddress(event.params.user);
-  const userReserveId = `${userId}-${reserveId}`;
-
-  await getOrCreateUser(context, userId);
-
-  const userReserve = await context.UserReserve.get(userReserveId);
-
-  const id = `${event.transaction.hash}-${event.logIndex}`;
-
-  context.RebalanceStableBorrowRate.set({
-    id,
-    txHash: event.transaction.hash,
-    action: 'RebalanceStableBorrowRate',
-    pool_id: poolId,
-    user_id: userId,
-    reserve_id: reserveId,
-    userReserve_id: userReserveId,
-    borrowRateFrom: userReserve?.oldStableBorrowRate || 0n,
-    borrowRateTo: userReserve?.stableBorrowRate || 0n,
     timestamp: Number(event.block.timestamp),
   });
 });

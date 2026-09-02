@@ -3,6 +3,7 @@
  * VotingPowerSynced, NFTBalanceSynced, LPBalanceSynced, UserSettled
  */
 
+import { LeaderboardKeeper } from '../../generated';
 import {
   calculateNFTMultiplierFromCount,
   calculateVPMultiplier,
@@ -10,53 +11,146 @@ import {
   findVPTierIndex,
   getOrCreateUserLeaderboardState,
   recordProtocolTransaction,
+  settleAllLPHolders,
   settlePointsForAllReserves,
+  type ScheduledEpochTransitionProjection,
 } from './shared';
 import { normalizeAddress } from '../helpers/constants';
+import { syncUserLPPositionsFromChain } from './lp';
 
-import { LeaderboardKeeper } from '../../generated';
-import type { handlerContext } from '../../generated';
-
-function shouldSyncChainStateOnKeeperSettlement(): boolean {
-  return process.env.ENVIO_KEEPER_USER_SETTLED_SYNC_CHAIN === 'true';
-}
+import type { LeaderboardEpoch, UserEpochFinalization, handlerContext } from '../../generated';
 
 /**
- * Backfill optimization gate for keeper `UserSettled`.
+ * Keeper `UserSettled` settlement modes.
  *
- * The indexer can't know the live Tide in advance while replaying history, so the operator sets
- * `ENVIO_LEADERBOARD_LIVE_EPOCH` to the current live epoch number before a backfill. With it set,
- * a keeper settlement that lands MID-EPOCH (`isActive`) inside a PAST/closed epoch (below the live
- * one) only re-forces points accrual that each balance-change settlement plus the epoch's gap
- * settlement already capture — a no-op for the final points — so the heavy reserve sweep is skipped.
- *
- * Always kept: GAP-period settlements (`isActive === false`, which finalize the epoch), the live
- * epoch, and any future epoch. Unset/0 disables the gate (original behavior). The raw
- * `LeaderboardKeeperUserSettled` event is still recorded regardless.
- *
- * CAVEAT: reserve points use the point-in-time combined multiplier sampled at each settlement
- * (VP points are averaged, so they're unaffected). Because `VotingPowerSynced` does not settle
- * reserves, skipping keeper settlements can shift reserve points for users whose VP-driven
- * multiplier changes between their own activity events. Validate against the prod parity check
- * (scripts/compare-leaderboard-parity.ts) before trusting it on a production index.
+ * Every keeper settlement is processed in full. A previous backfill optimization
+ * (`ENVIO_LEADERBOARD_LIVE_EPOCH`) skipped the reserve sweep for mid-epoch settlements in
+ * closed past epochs, on the assumption it was a no-op for final points. It was not: reserve
+ * points use the point-in-time combined multiplier sampled at each settlement, so skipping
+ * settlements shifts them. Measured against production and the published Tide draws, that gate
+ * altered deposit, borrow and VP-multiplier points for ~1,000 / ~600 / ~800 users per gated
+ * Tide, and moved 92-97 of every 100 published winners in Tides 1-5. It has been removed; the
+ * raw `LeaderboardKeeperUserSettled` row is recorded and the settlement is always applied.
  */
-export function getConfiguredLiveEpoch(): bigint {
-  const raw = process.env.ENVIO_LEADERBOARD_LIVE_EPOCH;
-  if (!raw) return 0n;
-  try {
-    const value = BigInt(raw);
-    return value > 0n ? value : 0n;
-  } catch {
-    return 0n;
+
+export type KeeperSettlementMode = 'LIVE_OR_UNVERIFIED_ACTIVE' | 'GAP_FINALIZE' | 'GAP_DUPLICATE';
+
+function isExactUsableClosedKeeperEpoch(
+  epoch: LeaderboardEpoch | undefined,
+  epochNumber: bigint
+): epoch is LeaderboardEpoch & { endTime: number } {
+  return (
+    epoch !== undefined &&
+    epoch.id === epochNumber.toString() &&
+    epoch.epochNumber === epochNumber &&
+    !epoch.isActive &&
+    epoch.endTime !== undefined &&
+    epoch.endTime > 0 &&
+    epoch.endTime >= epoch.startTime
+  );
+}
+
+async function validateKeeperGapFinalizationProof(
+  context: handlerContext,
+  normalizedUserId: string,
+  epochNumber: bigint,
+  finalizationId: string,
+  finalization: UserEpochFinalization
+): Promise<void> {
+  const [epoch, settlementEvent] = await Promise.all([
+    context.LeaderboardEpoch.get(epochNumber.toString()),
+    context.LeaderboardKeeperUserSettled.get(finalization.settlementEventId),
+  ]);
+  if (
+    finalization.id !== finalizationId ||
+    normalizeAddress(finalization.user_id) !== normalizedUserId ||
+    finalization.epochNumber !== epochNumber ||
+    !isExactUsableClosedKeeperEpoch(epoch, epochNumber) ||
+    finalization.epochEndTime !== epoch.endTime ||
+    finalization.settledThrough !== epoch.endTime ||
+    finalization.finalizedAt < epoch.endTime ||
+    !settlementEvent ||
+    settlementEvent.id !== finalization.settlementEventId ||
+    normalizeAddress(settlementEvent.user_id) !== normalizedUserId ||
+    settlementEvent.epochNumber !== epochNumber ||
+    !settlementEvent.isGap ||
+    settlementEvent.timestamp !== finalization.finalizedAt ||
+    settlementEvent.txHash !== finalization.txHash
+  ) {
+    throw new Error(`invalid keeper gap finalization proof: ${finalizationId}`);
   }
 }
 
-export async function shouldSkipMidEpochKeeperSettle(context: handlerContext): Promise<boolean> {
-  const liveEpoch = getConfiguredLiveEpoch();
-  if (liveEpoch === 0n) return false;
+export async function classifyKeeperSettlement(
+  context: handlerContext,
+  userId: string
+): Promise<{
+  mode: KeeperSettlementMode;
+  epochNumber: bigint;
+  finalizationId: string;
+}> {
   const state = await context.LeaderboardState.get('current');
-  if (!state) return false;
-  return state.currentEpochNumber < liveEpoch && state.isActive === true;
+  const epochNumber = state?.currentEpochNumber ?? 0n;
+  const finalizationId = `${normalizeAddress(userId)}:${epochNumber}`;
+
+  if (!state || state.isActive) {
+    return {
+      mode: 'LIVE_OR_UNVERIFIED_ACTIVE',
+      epochNumber,
+      finalizationId,
+    };
+  }
+
+  const finalization = await context.UserEpochFinalization.get(finalizationId);
+  if (finalization) {
+    await validateKeeperGapFinalizationProof(
+      context,
+      normalizeAddress(userId),
+      epochNumber,
+      finalizationId,
+      finalization
+    );
+  }
+  return {
+    mode: finalization ? 'GAP_DUPLICATE' : 'GAP_FINALIZE',
+    epochNumber,
+    finalizationId,
+  };
+}
+
+export function resolveKeeperEventTimestamp(
+  eventTimestamp: bigint | undefined,
+  blockTimestamp: number
+): number {
+  return Number(eventTimestamp ?? blockTimestamp);
+}
+
+function withScheduledEpochProjection(
+  context: handlerContext,
+  projection: ScheduledEpochTransitionProjection
+): handlerContext {
+  if (!projection.transitioned || context.isPreload !== true || !projection.state) {
+    return context;
+  }
+  const stateStore = Object.create(context.LeaderboardState) as handlerContext['LeaderboardState'];
+  Object.defineProperty(stateStore, 'get', { value: async () => projection.state });
+  const projectedEpochId = projection.state.currentEpochNumber.toString();
+  const epochStore = Object.create(context.LeaderboardEpoch) as handlerContext['LeaderboardEpoch'];
+  Object.defineProperty(epochStore, 'get', {
+    value: async (id: string) => {
+      const storedEpoch = await context.LeaderboardEpoch.get(id);
+      return new Map<string, LeaderboardEpoch | undefined>([
+        [id, storedEpoch],
+        [projectedEpochId, projection.epoch],
+      ]).get(id);
+    },
+  });
+  const projectedContext = Object.create(context) as handlerContext;
+  Object.defineProperties(projectedContext, {
+    LeaderboardState: { value: stateStore },
+    LeaderboardEpoch: { value: epochStore },
+  });
+  return projectedContext;
 }
 
 async function getOrCreateKeeperState(context: handlerContext, timestamp: number) {
@@ -207,7 +301,6 @@ LeaderboardKeeper.LPBalanceSynced.handler(async ({ event, context }) => {
 
   const poolConfig = await context.LPPoolConfig.get(pool);
   if (poolConfig && liquidity > 0n) {
-    const { syncUserLPPositionsFromChain } = await import('./lp');
     await syncUserLPPositionsFromChain(context, userId, timestamp, blockNumber, {
       forceRescan: true,
       managers: [poolConfig.positionManager],
@@ -226,23 +319,59 @@ LeaderboardKeeper.LPBalanceSynced.handler(async ({ event, context }) => {
 });
 
 LeaderboardKeeper.UserSettled.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
+  const transitionProjection = await recordProtocolTransaction(
     context,
     event.transaction.hash,
     Number(event.block.timestamp),
     BigInt(event.block.number)
   );
+  const phaseContext = withScheduledEpochProjection(context, transitionProjection);
   const userId = normalizeAddress(event.params.user);
-  const timestamp = Number(event.params.timestamp ?? event.block.timestamp);
+  const timestamp = resolveKeeperEventTimestamp(event.params.timestamp, event.block.timestamp);
   const blockNumber = BigInt(event.block.number);
+  const eventTimeState = await phaseContext.LeaderboardState.get('current');
+  const epochNumber = eventTimeState?.currentEpochNumber ?? 0n;
+  const isGap = eventTimeState ? !eventTimeState.isActive : false;
 
   const settlementId = `${event.transaction.hash}-${event.logIndex}`;
   context.LeaderboardKeeperUserSettled.set({
     id: settlementId,
     user_id: userId,
+    epochNumber,
+    isGap,
     timestamp,
     txHash: event.transaction.hash,
   });
+
+  const classification = await classifyKeeperSettlement(phaseContext, userId);
+  if (classification.mode === 'GAP_DUPLICATE') {
+    return;
+  }
+
+  if (classification.mode === 'GAP_FINALIZE') {
+    const epoch = await phaseContext.LeaderboardEpoch.get(classification.epochNumber.toString());
+    if (!isExactUsableClosedKeeperEpoch(epoch, classification.epochNumber)) {
+      throw new Error(
+        `keeper gap finalization requires an exact closed LeaderboardEpoch: ${classification.epochNumber.toString()}`
+      );
+    }
+
+    await settlePointsForAllReserves(phaseContext, userId, timestamp, blockNumber, {
+      ignoreCooldown: true,
+    });
+    context.UserEpochFinalization.set({
+      id: classification.finalizationId,
+      user_id: userId,
+      epochNumber: classification.epochNumber,
+      epochEndTime: epoch.endTime,
+      settledThrough: epoch.endTime,
+      finalizedAt: timestamp,
+      blockNumber,
+      txHash: event.transaction.hash,
+      settlementEventId: settlementId,
+    });
+    return;
+  }
 
   // Backfill gate: skip the HEAVY reserve sweep for a mid-epoch keeper settlement
   // in a closed past epoch — for reserve users that accrual is recaptured by later
@@ -255,18 +384,9 @@ LeaderboardKeeper.UserSettled.handler(async ({ event, context }) => {
   // balance change to recapture it). The pure-VP path is cheap (empty reserve
   // loop, no eth_call) and idempotent via the per-(user,epoch) accrual cursor, so
   // running it even mid-epoch is safe. The raw event above is recorded regardless.
-  if (await shouldSkipMidEpochKeeperSettle(context)) {
-    const userReserveList = await context.UserReserveList.get(userId);
-    const hasReserves = (userReserveList?.reserveIds?.length ?? 0) > 0;
-    if (hasReserves) return; // keep skipping the expensive reserve sweep for reserve users
-    // else fall through and settle the cheap pure-VP path
-  }
 
-  const syncChainState = shouldSyncChainStateOnKeeperSettlement();
-  await settlePointsForAllReserves(context, userId, timestamp, blockNumber, {
+  await settlePointsForAllReserves(phaseContext, userId, timestamp, blockNumber, {
     ignoreCooldown: true,
-    skipNftSync: !syncChainState,
-    skipLPChainSync: !syncChainState,
   });
 });
 
@@ -285,6 +405,14 @@ LeaderboardKeeper.BatchComplete.handler(async ({ event, context }) => {
     timestamp: Number(event.params.timestamp),
     txHash: event.transaction.hash,
   });
+
+  // The keeper's ceremony is threshold-filtered, so it never settles a sub-threshold LP-only
+  // holder, and no market event touches one either. Under the lazy fungible-growth model that
+  // holder accrues into a cursor and stays absent from the OPEN Tide's leaderboard until the
+  // Tide closes, while the pre-rewrite indexer credits it live. Sweeping here restores
+  // agreement at the operator's settle-users moment. Bounded to holders with liquidity > 0,
+  // and points inside a prefilled Tide stay suppressed by updateUserEpochLPPoints.
+  await settleAllLPHolders(context, Number(event.block.timestamp));
 });
 
 LeaderboardKeeper.KeeperUpdated.handler(async ({ event, context }) => {

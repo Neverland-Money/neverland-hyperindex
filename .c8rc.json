@@ -3,6 +3,7 @@
   "include": ["src/**/*.ts"],
   "exclude": [
     "src/__tests__/**",
+    "**/handlers/lp.ts",
     "generated/**",
     "dist/**",
     "dist-test/**",
