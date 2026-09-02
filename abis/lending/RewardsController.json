@@ -11,46 +11,6 @@
     "type": "constructor"
   },
   {
-    "inputs": [],
-    "name": "ClaimerUnauthorized",
-    "type": "error"
-  },
-  {
-    "inputs": [],
-    "name": "InvalidRewardAddress",
-    "type": "error"
-  },
-  {
-    "inputs": [],
-    "name": "InvalidToAddress",
-    "type": "error"
-  },
-  {
-    "inputs": [],
-    "name": "InvalidUserAddress",
-    "type": "error"
-  },
-  {
-    "inputs": [],
-    "name": "OnlyEmissionManagerOrSelf",
-    "type": "error"
-  },
-  {
-    "inputs": [],
-    "name": "StrategyNotContract",
-    "type": "error"
-  },
-  {
-    "inputs": [],
-    "name": "StrategyZeroAddress",
-    "type": "error"
-  },
-  {
-    "inputs": [],
-    "name": "TransferError",
-    "type": "error"
-  },
-  {
     "anonymous": false,
     "inputs": [
       {
@@ -167,6 +127,25 @@
       {
         "indexed": true,
         "internalType": "address",
+        "name": "reward",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "rewardOracle",
+        "type": "address"
+      }
+    ],
+    "name": "RewardOracleUpdated",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
         "name": "user",
         "type": "address"
       },
@@ -254,16 +233,6 @@
         "internalType": "address",
         "name": "to",
         "type": "address"
-      },
-      {
-        "internalType": "uint256",
-        "name": "lockTime",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
       }
     ],
     "name": "claimAllRewards",
@@ -298,16 +267,6 @@
         "internalType": "address",
         "name": "to",
         "type": "address"
-      },
-      {
-        "internalType": "uint256",
-        "name": "lockTime",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
       }
     ],
     "name": "claimAllRewardsOnBehalf",
@@ -332,16 +291,6 @@
         "internalType": "address[]",
         "name": "assets",
         "type": "address[]"
-      },
-      {
-        "internalType": "uint256",
-        "name": "lockTime",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
       }
     ],
     "name": "claimAllRewardsToSelf",
@@ -381,16 +330,6 @@
         "internalType": "address",
         "name": "reward",
         "type": "address"
-      },
-      {
-        "internalType": "uint256",
-        "name": "lockTime",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
       }
     ],
     "name": "claimRewards",
@@ -430,16 +369,6 @@
         "internalType": "address",
         "name": "reward",
         "type": "address"
-      },
-      {
-        "internalType": "uint256",
-        "name": "lockTime",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
       }
     ],
     "name": "claimRewardsOnBehalf",
@@ -469,16 +398,6 @@
         "internalType": "address",
         "name": "reward",
         "type": "address"
-      },
-      {
-        "internalType": "uint256",
-        "name": "lockTime",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
       }
     ],
     "name": "claimRewardsToSelf",
@@ -665,6 +584,25 @@
   {
     "inputs": [],
     "name": "getEmissionManager",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "reward",
+        "type": "address"
+      }
+    ],
+    "name": "getRewardOracle",
     "outputs": [
       {
         "internalType": "address",
@@ -892,7 +830,7 @@
       },
       {
         "internalType": "address",
-        "name": "claimer",
+        "name": "caller",
         "type": "address"
       }
     ],
@@ -955,7 +893,25 @@
         "type": "address"
       },
       {
-        "internalType": "contract IDustTransferStrategy",
+        "internalType": "contract IEACAggregatorProxy",
+        "name": "rewardOracle",
+        "type": "address"
+      }
+    ],
+    "name": "setRewardOracle",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "reward",
+        "type": "address"
+      },
+      {
+        "internalType": "contract ITransferStrategyBase",
         "name": "transferStrategy",
         "type": "address"
       }

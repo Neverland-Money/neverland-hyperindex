@@ -17,7 +17,17 @@
   },
   {
     "inputs": [],
+    "name": "ArrayNotSortedOrContainsDuplicates",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "EndTimestampMoreThanCurrent",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "EpochFinalizationPending",
     "type": "error"
   },
   {
@@ -28,6 +38,11 @@
   {
     "inputs": [],
     "name": "InvalidRange",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "InvalidTokenId",
     "type": "error"
   },
   {
@@ -390,6 +405,19 @@
     "type": "function"
   },
   {
+    "inputs": [],
+    "name": "getAllUsersWithSelfRepayingLoan",
+    "outputs": [
+      {
+        "internalType": "address[]",
+        "name": "users",
+        "type": "address[]"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
     "inputs": [
       {
         "internalType": "uint256",
@@ -493,6 +521,35 @@
       }
     ],
     "name": "getUserTokensWithSelfRepayingLoan",
+    "outputs": [
+      {
+        "internalType": "uint256[]",
+        "name": "tokenIds",
+        "type": "uint256[]"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "user",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "from",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "to",
+        "type": "uint256"
+      }
+    ],
+    "name": "getUserTokensWithSelfRepayingLoanRange",
     "outputs": [
       {
         "internalType": "uint256[]",
@@ -735,6 +792,24 @@
   {
     "inputs": [
       {
+        "internalType": "address",
+        "name": "token",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "amount",
+        "type": "uint256"
+      }
+    ],
+    "name": "notifyRewardAmountForFollowingEpoch",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "uint256",
         "name": "tokenId",
         "type": "uint256"
@@ -916,6 +991,25 @@
     "type": "function"
   },
   {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "user",
+        "type": "address"
+      }
+    ],
+    "name": "userTokensWithSelfRepayingLoanLength",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "count",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
     "inputs": [],
     "name": "userVaultFactory",
     "outputs": [
@@ -923,6 +1017,32 @@
         "internalType": "contract IUserVaultFactory",
         "name": "",
         "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "usersWithSelfRepayingLoanLength",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "count",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "version",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
       }
     ],
     "stateMutability": "view",

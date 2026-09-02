@@ -32,6 +32,19 @@
   },
   {
     "type": "function",
+    "name": "MAX_STATIC_BOOST",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "MIN_DECAY_RATIO",
     "inputs": [],
     "outputs": [
@@ -77,6 +90,11 @@
       },
       {
         "name": "endTimestamp",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "staticBoostBps",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -182,6 +200,11 @@
             "name": "name",
             "type": "string",
             "internalType": "string"
+          },
+          {
+            "name": "staticBoostBps",
+            "type": "uint256",
+            "internalType": "uint256"
           }
         ]
       }
@@ -416,6 +439,12 @@
         "internalType": "uint256"
       },
       {
+        "name": "staticBoostBps",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
         "name": "currentFirstBonus",
         "type": "uint256",
         "indexed": false,
@@ -520,6 +549,17 @@
     "inputs": [
       {
         "name": "firstBonus",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "InvalidStaticBoost",
+    "inputs": [
+      {
+        "name": "staticBoostBps",
         "type": "uint256",
         "internalType": "uint256"
       }

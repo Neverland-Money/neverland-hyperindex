@@ -4,7 +4,7 @@
  */
 
 // Ray = 1e27
-const RAY = 10n ** 27n;
+export const RAY = 10n ** 27n;
 const HALF_RAY = RAY / 2n;
 const WAD_RAY_RATIO = 10n ** 9n;
 const SECONDS_PER_YEAR = 31556952n;

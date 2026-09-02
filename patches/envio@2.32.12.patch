@@ -1,0 +1,51 @@
+diff --git a/src/sources/SourceManager.res b/src/sources/SourceManager.res
+index 162efc08892358a2bd48fb48a2e5eb07775e0742..6f84b09e42fcb08aadd5b1f511dda16244b64f1e 100644
+--- a/src/sources/SourceManager.res
++++ b/src/sources/SourceManager.res
+@@ -1,5 +1,14 @@
+ open Belt
+ 
++// ENVIO_HEAD_DEBOUNCE_MS withholds new chain heights for N ms so one query spans many blocks.
++// catalyst <catanet@pm.me>
++let headDebounceMs: int = %raw(`(Number(process.env.ENVIO_HEAD_DEBOUNCE_MS) || 0)`)
++
++let scheduleUnrefTimeout: (unit => unit, int) => unit = %raw(`function (fn, ms) {
++  var t = setTimeout(fn, ms);
++  if (t && typeof t.unref === "function") t.unref();
++}`)
++
+ type sourceManagerStatus = Idle | WaitingForNewBlock | Querieng
+ 
+ type sourceState = {
+@@ -231,12 +240,27 @@ let getSourceNewHeight = async (
+           // create subscription instead of polling
+           switch source.createHeightSubscription {
+           | Some(createSubscription) =>
+-            let unsubscribe = createSubscription(~onHeight=newHeight => {
+-              sourceState.knownHeight = newHeight
+-              // Resolve all pending height resolvers
++            let pendingHeight = ref(0)
++            let debouncePending = ref(false)
++            let publishAndRelease = () => {
++              debouncePending := false
++              if pendingHeight.contents > sourceState.knownHeight {
++                sourceState.knownHeight = pendingHeight.contents
++              }
+               let resolvers = sourceState.pendingHeightResolvers
+               sourceState.pendingHeightResolvers = []
+-              resolvers->Array.forEach(resolve => resolve(newHeight))
++              resolvers->Array.forEach(resolve => resolve(sourceState.knownHeight))
++            }
++            let unsubscribe = createSubscription(~onHeight=newHeight => {
++              pendingHeight := newHeight
++              if headDebounceMs > 0 {
++                if !debouncePending.contents {
++                  debouncePending := true
++                  scheduleUnrefTimeout(publishAndRelease, headDebounceMs)
++                }
++              } else {
++                publishAndRelease()
++              }
+             })
+             sourceState.unsubscribe = Some(unsubscribe)
+           | None =>

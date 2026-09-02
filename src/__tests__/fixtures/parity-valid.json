@@ -1,0 +1,52 @@
+{
+  "exactScalarPrecision": true,
+  "nonLpDifferences": [],
+  "lpDifferences": [
+    {
+      "user": "0x00000000000000000000000000000000000000a1",
+      "epochNumber": "8",
+      "component": "lpPoints",
+      "baselinePoints": "1000",
+      "candidatePoints": "1001",
+      "computedRoundingBound": "1"
+    }
+  ],
+  "closedTideRankings": [
+    {
+      "epochNumber": "8",
+      "baselineScores": [
+        {
+          "user": "0x00000000000000000000000000000000000000a1",
+          "totalPoints": "1000",
+          "totalPointsWithMultiplier": "1000"
+        }
+      ],
+      "candidateScores": [
+        {
+          "user": "0x00000000000000000000000000000000000000A1",
+          "totalPoints": "1001",
+          "totalPointsWithMultiplier": "1001"
+        }
+      ]
+    }
+  ],
+  "finalizationCoverage": {
+    "proposedFloor": "8",
+    "baselineClosedTides": ["8"],
+    "candidateClosedTides": ["8"],
+    "requiredClosedTides": ["8"],
+    "tides": [
+      {
+        "epochNumber": "8",
+        "activePhaseUsers": ["0x00000000000000000000000000000000000000a1"],
+        "finalizationUsers": ["0x00000000000000000000000000000000000000a1"]
+      }
+    ],
+    "manifestTides": [
+      {
+        "epochNumber": "8",
+        "users": ["0x00000000000000000000000000000000000000A1"]
+      }
+    ]
+  }
+}

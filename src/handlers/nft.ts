@@ -4,18 +4,12 @@
  *
  * ## NFT Balance Tracking Strategy:
  *
- * 1. **Bootstrap Phase** (One-time, after partnership added):
- *    - First settlement for a user baselines their balance for the new collection
- *    - Sets initial UserNFTOwnership records for existing holders
- *    - Users get multiplier bonus from existing holdings immediately
- *
- * 2. **Ongoing Tracking** (Automatic):
- *    - Transfer events maintain accurate balances going forward
- *
- * This approach eliminates the need for periodic syncing while ensuring:
- * - No missed holdings from before partnership activation
- * - Automatic accurate tracking after bootstrap
- * - Users accumulate points from held NFTs without needing to transfer
+ * - PartnershipAdded registers a dynamic collection from that block forward;
+ *   Envio does not backfill earlier transfers.
+ * - Indexed Transfer events maintain ownership balances from the registration
+ *   boundary onward.
+ * - Production is event-only. Holdings that predate the indexed boundary are
+ *   not reconstructed with an on-chain balance read.
  *
  * ## NFT Multiplier System:
  *
@@ -36,11 +30,22 @@
  *
  * ## Event Handling for staticBoostBps:
  *
- * - undefined in event = preserve existing value (old contracts, resync-safe)
- * - 0 in event = explicitly decay-based NFT
- * - >0 in event = static boost value in basis points
+ * - The current PartnershipAdded topic always applies its emitted value: 0
+ *   selects geometric decay and a positive value selects a static boost.
+ * - PartnershipAddedLegacy has no staticBoostBps field. It preserves an
+ *   existing indexed value during replay, otherwise leaving the boost unset.
+ * - PartnershipUpdated has no staticBoostBps field and preserves the existing
+ *   value while updating the remaining partnership configuration.
  */
 
+import {
+  LilStars,
+  NFTPartnershipRegistry,
+  Overnads,
+  PartnerNFT,
+  RealNads,
+  The10kSquad,
+} from '../../generated';
 import {
   getOrCreateUserLeaderboardState,
   createMultiplierSnapshot,
@@ -54,14 +59,6 @@ import {
   writeNFTRegistryState,
 } from './shared';
 import { normalizeAddress, isStaticNftCollection } from '../helpers/constants';
-import {
-  LilStars,
-  NFTPartnershipRegistry,
-  Overnads,
-  PartnerNFT,
-  RealNads,
-  The10kSquad,
-} from '../../generated';
 import type { handlerContext } from '../../generated';
 
 async function getOrCreateRegistryState(context: handlerContext, timestamp: number) {
@@ -101,69 +98,104 @@ async function updateActiveCollections(
   });
 }
 
+type NFTPartnershipAddedParams = {
+  readonly collection: string;
+  readonly name: string;
+  readonly active: boolean;
+  readonly startTimestamp: bigint;
+  readonly endTimestamp: bigint;
+  readonly currentFirstBonus: bigint;
+  readonly currentDecayRatio: bigint;
+};
+
+/** Apply a decoded PartnershipAdded payload to indexed state. */
+async function applyNFTPartnershipAdded(
+  context: handlerContext,
+  params: NFTPartnershipAddedParams,
+  emittedStaticBoostBps: bigint | undefined,
+  timestamp: number
+): Promise<void> {
+  const id = normalizeAddress(params.collection);
+  const staticBoostBps =
+    emittedStaticBoostBps ?? (await context.NFTPartnership.get(id))?.staticBoostBps;
+
+  writeNFTPartnership(context, {
+    id,
+    collection: id,
+    name: params.name,
+    active: params.active,
+    staticBoostBps,
+    startTimestamp: Number(params.startTimestamp),
+    endTimestamp: params.endTimestamp > 0n ? Number(params.endTimestamp) : undefined,
+    addedAt: timestamp,
+    lastUpdate: timestamp,
+  });
+
+  writeNFTMultiplierConfig(context, {
+    id: 'current',
+    firstBonus: params.currentFirstBonus,
+    decayRatio: params.currentDecayRatio,
+    lastUpdate: timestamp,
+  });
+
+  await updateActiveCollections(context, id, params.active, timestamp);
+}
+
+type NFTPartnershipAddedEvent = {
+  readonly params: NFTPartnershipAddedParams;
+  readonly block: { readonly number: number; readonly timestamp: number };
+  readonly transaction: { readonly hash: string };
+};
+
+async function handleNFTPartnershipAdded(
+  context: handlerContext,
+  event: NFTPartnershipAddedEvent,
+  emittedStaticBoostBps: bigint | undefined
+): Promise<void> {
+  const timestamp = Number(event.block.timestamp);
+  await recordProtocolTransaction(
+    context,
+    event.transaction.hash,
+    timestamp,
+    BigInt(event.block.number)
+  );
+
+  // Dynamic registration is forward-only; this event starts Transfer tracking
+  // and does not reconstruct balances held before the registration block.
+  await applyNFTPartnershipAdded(context, event.params, emittedStaticBoostBps, timestamp);
+}
+
+function registerPartnerNFTCollection(
+  registration: (address: string) => void,
+  rawCollection: string
+): void {
+  const collection = normalizeAddress(rawCollection);
+  // Collections that are already statically configured in config.yaml (with
+  // their own Transfer handler) must not also be registered as dynamic
+  // PartnerNFT contracts. Envio does not dedupe across contract names, so that
+  // would double-dispatch Transfer logs and double-count balances/multipliers.
+  if (isStaticNftCollection(collection)) return;
+  registration(collection);
+}
+
 // ============================================
 // NFTPartnershipRegistry Handlers
 // ============================================
 
 NFTPartnershipRegistry.PartnershipAdded.contractRegister(async ({ event, context }) => {
-  const collection = normalizeAddress(event.params.collection);
-  // Collections that are already statically configured in config.yaml (with their
-  // own Transfer handler) must not also be registered as dynamic PartnerNFT
-  // contracts — Envio does not dedupe across contract names, so doing so would
-  // double-dispatch their Transfer logs and double-count NFT balances/multipliers.
-  if (isStaticNftCollection(collection)) return;
-  context.addPartnerNFT(collection);
+  registerPartnerNFTCollection((a: string) => context.addPartnerNFT(a), event.params.collection);
+});
+
+NFTPartnershipRegistry.PartnershipAddedLegacy.contractRegister(async ({ event, context }) => {
+  registerPartnerNFTCollection((a: string) => context.addPartnerNFT(a), event.params.collection);
 });
 
 NFTPartnershipRegistry.PartnershipAdded.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const id = normalizeAddress(event.params.collection);
-  const timestamp = Number(event.block.timestamp);
+  await handleNFTPartnershipAdded(context, event, event.params.staticBoostBps);
+});
 
-  // The first settlement after a partnership is added can baseline ownership
-  // via a one-time on-chain balance check per user.
-
-  // Extract staticBoostBps if present in event (future contract versions)
-  const paramsWithBoost = event.params as typeof event.params & { staticBoostBps?: bigint };
-
-  // Check if partnership already exists (for resync)
-  const existing = await context.NFTPartnership.get(id);
-
-  // Only update staticBoostBps if explicitly provided in event
-  // undefined = not in event (old contracts), preserve existing value
-  // 0 = explicitly decay-based NFT
-  // >0 = static boost value
-  const staticBoostBps =
-    paramsWithBoost.staticBoostBps !== undefined
-      ? paramsWithBoost.staticBoostBps
-      : existing?.staticBoostBps;
-
-  writeNFTPartnership(context, {
-    id,
-    collection: id,
-    name: event.params.name,
-    active: event.params.active,
-    staticBoostBps,
-    startTimestamp: Number(event.params.startTimestamp),
-    endTimestamp: event.params.endTimestamp > 0n ? Number(event.params.endTimestamp) : undefined,
-    addedAt: timestamp,
-    lastUpdate: timestamp,
-  });
-
-  // Update global config with values from the event
-  writeNFTMultiplierConfig(context, {
-    id: 'current',
-    firstBonus: event.params.currentFirstBonus,
-    decayRatio: event.params.currentDecayRatio,
-    lastUpdate: timestamp,
-  });
-
-  await updateActiveCollections(context, id, event.params.active, timestamp);
+NFTPartnershipRegistry.PartnershipAddedLegacy.handler(async ({ event, context }) => {
+  await handleNFTPartnershipAdded(context, event, undefined);
 });
 
 NFTPartnershipRegistry.PartnershipUpdated.handler(async ({ event, context }) => {
@@ -177,20 +209,11 @@ NFTPartnershipRegistry.PartnershipUpdated.handler(async ({ event, context }) => 
 
   const partnership = await context.NFTPartnership.get(id);
   if (partnership) {
-    // Extract staticBoostBps if present in event
-    const paramsWithBoost = event.params as typeof event.params & { staticBoostBps?: bigint };
-
-    // Only update staticBoostBps if explicitly provided
-    const staticBoostBps =
-      paramsWithBoost.staticBoostBps !== undefined
-        ? paramsWithBoost.staticBoostBps
-        : partnership.staticBoostBps;
-
     writeNFTPartnership(context, {
       ...partnership,
       name: event.params.name,
       active: event.params.active,
-      staticBoostBps,
+      // PartnershipUpdated has no staticBoostBps input, so the spread preserves it.
       startTimestamp: Number(event.params.startTimestamp),
       endTimestamp: event.params.endTimestamp > 0n ? Number(event.params.endTimestamp) : undefined,
       lastUpdate: Number(event.block.timestamp),
@@ -329,7 +352,6 @@ PartnerNFT.Transfer.handler(async ({ event, context }) => {
         BigInt(event.block.number),
         {
           ignoreCooldown: true,
-          skipNftSync: true,
         }
       );
 
@@ -506,7 +528,6 @@ async function handleNFTTransfer(
         BigInt(event.block.number),
         {
           ignoreCooldown: true,
-          skipNftSync: true,
         }
       );
 

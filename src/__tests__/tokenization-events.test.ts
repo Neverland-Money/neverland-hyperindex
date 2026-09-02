@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import { TestHelpers } from './v3-test-helpers';
 
 import { createDefaultReserve } from '../helpers/entityHelpers';
-import { KNOWN_GATEWAYS } from '../helpers/constants';
+import { KNOWN_GATEWAYS, WMON_ADDRESS } from '../helpers/constants';
 import { VIEM_ERROR_ADDRESS, installViemMock } from './viem-mock';
 
 process.env.ENVIO_ENABLE_EXTERNAL_CALLS = 'false';
@@ -51,13 +51,6 @@ test('borrow allowance delegated creates user reserve and delegated allowances',
   const eventData = createEventDataFactory();
 
   mockDb = mockDb.entities.SubToken.set({
-    id: ADDRESSES.stableToken,
-    pool_id: ADDRESSES.pool,
-    tokenContractImpl: undefined,
-    underlyingAssetAddress: ADDRESSES.asset,
-    underlyingAssetDecimals: 6,
-  });
-  mockDb = mockDb.entities.SubToken.set({
     id: ADDRESSES.variableToken,
     pool_id: ADDRESSES.pool,
     tokenContractImpl: undefined,
@@ -65,31 +58,8 @@ test('borrow allowance delegated creates user reserve and delegated allowances',
     underlyingAssetDecimals: 6,
   });
 
-  const stableEvent = TestHelpers.StableDebtToken.BorrowAllowanceDelegated.createMockEvent({
-    fromUser: ADDRESSES.fromUser,
-    toUser: ADDRESSES.toUser,
-    asset: ADDRESSES.asset,
-    amount: 50n,
-    ...eventData(1, 100, ADDRESSES.stableToken),
-  });
-  mockDb = await TestHelpers.StableDebtToken.BorrowAllowanceDelegated.processEvent({
-    event: stableEvent,
-    mockDb,
-  });
-
-  const stableId = `${ADDRESSES.fromUser}-${ADDRESSES.toUser}-${ADDRESSES.asset}-stable`;
-  const stableAllowance = mockDb.entities.BorrowAllowance.get(stableId);
-  assert.ok(stableAllowance);
-  assert.equal(stableAllowance?.amount, 50n);
-
   const reserveId = `${ADDRESSES.asset}-${ADDRESSES.pool}`;
   const userReserveId = `${ADDRESSES.fromUser}-${reserveId}`;
-  assert.ok(mockDb.entities.UserReserve.get(userReserveId));
-
-  const delegatedStableId = `stable${ADDRESSES.fromUser}${ADDRESSES.toUser}${ADDRESSES.asset}`;
-  const delegatedStable = mockDb.entities.StableTokenDelegatedAllowance.get(delegatedStableId);
-  assert.ok(delegatedStable);
-  assert.equal(delegatedStable?.amountAllowed, 50n);
 
   const variableEvent = TestHelpers.VariableDebtToken.BorrowAllowanceDelegated.createMockEvent({
     fromUser: ADDRESSES.fromUser,
@@ -103,14 +73,15 @@ test('borrow allowance delegated creates user reserve and delegated allowances',
     mockDb,
   });
 
-  const variableId = `${ADDRESSES.fromUser}-${ADDRESSES.toUser}-${ADDRESSES.asset}-variable`;
+  const variableId = `${ADDRESSES.fromUser}-${ADDRESSES.toUser}-${ADDRESSES.asset}`;
   const variableAllowance = mockDb.entities.BorrowAllowance.get(variableId);
   assert.ok(variableAllowance);
   assert.equal(variableAllowance?.amount, 75n);
 
-  const delegatedVariableId = `variable${ADDRESSES.fromUser}${ADDRESSES.toUser}${ADDRESSES.asset}`;
-  const delegatedVariable =
-    mockDb.entities.VariableTokenDelegatedAllowance.get(delegatedVariableId);
+  assert.ok(mockDb.entities.UserReserve.get(userReserveId));
+
+  const delegatedVariableId = `${ADDRESSES.fromUser}${ADDRESSES.toUser}${ADDRESSES.asset}`;
+  const delegatedVariable = mockDb.entities.DelegatedAllowance.get(delegatedVariableId);
   assert.ok(delegatedVariable);
   assert.equal(delegatedVariable?.amountAllowed, 75n);
 
@@ -130,10 +101,10 @@ test('price observed normalizes price and records history', async () => {
     price: 2000n,
     baseUnit: 1000n,
     oracle: ADDRESSES.oracle,
-    action: 0,
+    action: 0n,
     ok: false,
     user: ADDRESSES.fromUser,
-    timestamp: 120,
+    timestamp: 120n,
     ...eventData(3, 120, ADDRESSES.stableToken),
   });
   mockDb = await TestHelpers.AToken.PriceObserved.processEvent({ event, mockDb });
@@ -144,6 +115,8 @@ test('price observed normalizes price and records history', async () => {
   assert.equal(asset?.lastPriceUsd, 2);
   assert.equal(asset?.isFallbackRequired, true);
 
+  // `${asset}-${blockNumber}-${logIndex}`, with the event's block passed through unshifted by
+  // v2's native mock.
   const historyId = `${ADDRESSES.asset}-3-1`;
   const history = mockDb.entities.PriceHistoryItem.get(historyId);
   assert.ok(history);
@@ -154,10 +127,10 @@ test('price observed normalizes price and records history', async () => {
     price: 500000000n,
     baseUnit: 100000000n,
     oracle: ADDRESSES.oracle,
-    action: 0,
+    action: 0n,
     ok: true,
     user: ADDRESSES.fromUser,
-    timestamp: 130,
+    timestamp: 130n,
     ...eventData(4, 130, ADDRESSES.stableToken),
   });
   mockDb = await TestHelpers.AToken.PriceObserved.processEvent({ event: eventTwo, mockDb });
@@ -225,18 +198,12 @@ test('gateway withdrawals attribute redeem to actual user', async () => {
     reserve_id: reserveId,
     scaledATokenBalance: 1000n * UNIT,
     currentATokenBalance: 1000n * UNIT,
-    scaledVariableDebt: 0n,
-    currentVariableDebt: 0n,
-    principalStableDebt: 0n,
-    currentStableDebt: 0n,
-    currentTotalDebt: 0n,
-    stableBorrowRate: 0n,
-    oldStableBorrowRate: 0n,
+    scaledDebt: 0n,
+    currentDebt: 0n,
     liquidityRate: 0n,
     variableBorrowIndex: RAY,
     usageAsCollateralEnabledOnUser: false,
     lastUpdateTimestamp: 100,
-    stableBorrowLastUpdateTimestamp: 0,
   });
 
   const transferMeta = eventData(5, 200, ADDRESSES.aToken);
@@ -366,18 +333,12 @@ test('aToken burn updates balances and reserve totals', async () => {
     reserve_id: reserveId,
     scaledATokenBalance: 1000n,
     currentATokenBalance: 1000n,
-    scaledVariableDebt: 0n,
-    currentVariableDebt: 0n,
-    principalStableDebt: 0n,
-    currentStableDebt: 0n,
-    currentTotalDebt: 0n,
-    stableBorrowRate: 0n,
-    oldStableBorrowRate: 0n,
+    scaledDebt: 0n,
+    currentDebt: 0n,
     liquidityRate: 0n,
     variableBorrowIndex: RAY,
     usageAsCollateralEnabledOnUser: true,
     lastUpdateTimestamp: 1000,
-    stableBorrowLastUpdateTimestamp: 0,
   });
 
   const burn = TestHelpers.AToken.Burn.createMockEvent({
@@ -532,18 +493,12 @@ test('aToken burn falls back to user reserve index when reserve missing', async 
     reserve_id: reserveId,
     scaledATokenBalance: 100n,
     currentATokenBalance: 100n,
-    scaledVariableDebt: 0n,
-    currentVariableDebt: 0n,
-    principalStableDebt: 0n,
-    currentStableDebt: 0n,
-    currentTotalDebt: 0n,
-    stableBorrowRate: 0n,
-    oldStableBorrowRate: 0n,
+    scaledDebt: 0n,
+    currentDebt: 0n,
     liquidityRate: 0n,
     variableBorrowIndex: 777n,
     usageAsCollateralEnabledOnUser: false,
     lastUpdateTimestamp: 1000,
-    stableBorrowLastUpdateTimestamp: 0,
   });
 
   const burn = TestHelpers.AToken.Burn.createMockEvent({
@@ -619,18 +574,12 @@ test('aToken mint handles missing reserve and collateral updates', async () => {
     reserve_id: reserveId,
     scaledATokenBalance: 0n,
     currentATokenBalance: 0n,
-    scaledVariableDebt: 0n,
-    currentVariableDebt: 0n,
-    principalStableDebt: 0n,
-    currentStableDebt: 0n,
-    currentTotalDebt: 0n,
-    stableBorrowRate: 0n,
-    oldStableBorrowRate: 0n,
+    scaledDebt: 0n,
+    currentDebt: 0n,
     liquidityRate: 0n,
     variableBorrowIndex: 0n,
     usageAsCollateralEnabledOnUser: true,
     lastUpdateTimestamp: 1000,
-    stableBorrowLastUpdateTimestamp: 0,
   });
 
   const mint = TestHelpers.AToken.Mint.createMockEvent({
@@ -826,18 +775,12 @@ test('balance transfers clamp collateral when reserve totals are too small', asy
     reserve_id: reserveId,
     scaledATokenBalance: 100n,
     currentATokenBalance: 100n,
-    scaledVariableDebt: 0n,
-    currentVariableDebt: 0n,
-    principalStableDebt: 0n,
-    currentStableDebt: 0n,
-    currentTotalDebt: 0n,
-    stableBorrowRate: 0n,
-    oldStableBorrowRate: 0n,
+    scaledDebt: 0n,
+    currentDebt: 0n,
     liquidityRate: 0n,
     variableBorrowIndex: 0n,
     usageAsCollateralEnabledOnUser: true,
     lastUpdateTimestamp: 1000,
-    stableBorrowLastUpdateTimestamp: 0,
   });
   mockDb = mockDb.entities.UserReserve.set({
     id: `${ADDRESSES.toUser}-${reserveId}`,
@@ -846,18 +789,12 @@ test('balance transfers clamp collateral when reserve totals are too small', asy
     reserve_id: reserveId,
     scaledATokenBalance: 0n,
     currentATokenBalance: 0n,
-    scaledVariableDebt: 0n,
-    currentVariableDebt: 0n,
-    principalStableDebt: 0n,
-    currentStableDebt: 0n,
-    currentTotalDebt: 0n,
-    stableBorrowRate: 0n,
-    oldStableBorrowRate: 0n,
+    scaledDebt: 0n,
+    currentDebt: 0n,
     liquidityRate: 0n,
     variableBorrowIndex: 0n,
     usageAsCollateralEnabledOnUser: false,
     lastUpdateTimestamp: 1000,
-    stableBorrowLastUpdateTimestamp: 0,
   });
 
   const transfer = TestHelpers.AToken.BalanceTransfer.createMockEvent({
@@ -954,13 +891,6 @@ test('variable and stable debt flows update points and reserves', async () => {
     underlyingAssetAddress: ADDRESSES.asset,
     underlyingAssetDecimals: DECIMALS,
   });
-  mockDb = mockDb.entities.SubToken.set({
-    id: ADDRESSES.stableToken,
-    pool_id: ADDRESSES.pool,
-    tokenContractImpl: undefined,
-    underlyingAssetAddress: ADDRESSES.asset,
-    underlyingAssetDecimals: DECIMALS,
-  });
   mockDb = mockDb.entities.PriceOracleAsset.set({
     id: ADDRESSES.asset,
     oracle_id: '',
@@ -1014,30 +944,14 @@ test('variable and stable debt flows update points and reserves', async () => {
     price: 2000n,
     baseUnit: 1000n,
     oracle: ADDRESSES.oracle,
-    action: 0,
+    action: 0n,
     ok: true,
     user: ADDRESSES.fromUser,
-    timestamp: 100,
+    timestamp: 100n,
     ...eventData(40, 100, ADDRESSES.variableToken),
   });
   mockDb = await TestHelpers.VariableDebtToken.PriceObserved.processEvent({
     event: priceObserved,
-    mockDb,
-  });
-
-  const stablePriceObserved = TestHelpers.StableDebtToken.PriceObserved.createMockEvent({
-    asset: ADDRESSES.asset,
-    price: 3000n,
-    baseUnit: 1000n,
-    oracle: ADDRESSES.oracle,
-    action: 0,
-    ok: true,
-    user: ADDRESSES.fromUser,
-    timestamp: 110,
-    ...eventData(41, 110, ADDRESSES.stableToken),
-  });
-  mockDb = await TestHelpers.StableDebtToken.PriceObserved.processEvent({
-    event: stablePriceObserved,
     mockDb,
   });
 
@@ -1061,30 +975,6 @@ test('variable and stable debt flows update points and reserves', async () => {
   });
   mockDb = await TestHelpers.VariableDebtToken.Burn.processEvent({ event: burn, mockDb });
 
-  const stableMint = TestHelpers.StableDebtToken.Mint.createMockEvent({
-    user: ADDRESSES.fromUser,
-    onBehalfOf: ADDRESSES.fromUser,
-    amount: 50n,
-    currentBalance: 0n,
-    balanceIncrease: 0n,
-    newRate: 2n,
-    avgStableRate: 2n,
-    newTotalSupply: 50n,
-    ...eventData(44, 86420, ADDRESSES.stableToken),
-  });
-  mockDb = await TestHelpers.StableDebtToken.Mint.processEvent({ event: stableMint, mockDb });
-
-  const stableBurn = TestHelpers.StableDebtToken.Burn.createMockEvent({
-    from: ADDRESSES.fromUser,
-    amount: 50n,
-    currentBalance: 50n,
-    balanceIncrease: 0n,
-    avgStableRate: 2n,
-    newTotalSupply: 0n,
-    ...eventData(45, 86430, ADDRESSES.stableToken),
-  });
-  mockDb = await TestHelpers.StableDebtToken.Burn.processEvent({ event: stableBurn, mockDb });
-
   const user = mockDb.entities.User.get(ADDRESSES.fromUser);
   assert.ok(user);
   assert.equal(user?.borrowedReservesCount, 0);
@@ -1100,31 +990,11 @@ test('debt token initialization updates subtoken mapping', async () => {
     pool_id: ADDRESSES.pool,
   });
   mockDb = mockDb.entities.SubToken.set({
-    id: ADDRESSES.stableToken,
-    pool_id: ADDRESSES.pool,
-    tokenContractImpl: undefined,
-    underlyingAssetAddress: ADDRESSES.asset,
-    underlyingAssetDecimals: DECIMALS,
-  });
-  mockDb = mockDb.entities.SubToken.set({
     id: ADDRESSES.variableToken,
     pool_id: ADDRESSES.pool,
     tokenContractImpl: undefined,
     underlyingAssetAddress: ADDRESSES.asset,
     underlyingAssetDecimals: DECIMALS,
-  });
-
-  const stableInit = TestHelpers.StableDebtToken.Initialized.createMockEvent({
-    underlyingAsset: ADDRESSES.asset,
-    pool: ADDRESSES.pool,
-    debtTokenDecimals: 6n,
-    debtTokenSymbol: 'sd',
-    debtTokenName: 'Stable',
-    ...eventData(50, 90000, ADDRESSES.stableToken),
-  });
-  mockDb = await TestHelpers.StableDebtToken.Initialized.processEvent({
-    event: stableInit,
-    mockDb,
   });
 
   const variableInit = TestHelpers.VariableDebtToken.Initialized.createMockEvent({
@@ -1140,7 +1010,6 @@ test('debt token initialization updates subtoken mapping', async () => {
     mockDb,
   });
 
-  assert.ok(mockDb.entities.MapAssetPool.get(ADDRESSES.stableToken));
   assert.ok(mockDb.entities.MapAssetPool.get(ADDRESSES.variableToken));
 });
 
@@ -1196,7 +1065,7 @@ test('aToken initialization uses event metadata without chain reads', async () =
     pool: ADDRESSES.pool,
     aTokenDecimals: 6n,
     aTokenSymbol: 'nTST',
-    aTokenName: 'Neverland Interest Bearing Test Token',
+    aTokenName: 'Neverland Interest Bearing TST',
     ...eventData(64, 91040, ADDRESSES.aToken),
   });
   mockDb = await TestHelpers.AToken.Initialized.processEvent({ event: init, mockDb });
@@ -1204,50 +1073,342 @@ test('aToken initialization uses event metadata without chain reads', async () =
   const reserveId = `${ADDRESSES.asset}-${ADDRESSES.pool}`;
   const reserve = mockDb.entities.Reserve.get(reserveId);
   assert.equal(reserve?.symbol, 'TST');
-  assert.equal(reserve?.name, 'Test Token');
+  // The AToken name is `${prefix} ${reserveSymbol}` and carries no long name of
+  // its own, so an unknown reserve's name is its symbol. KNOWN_TOKENS is what
+  // supplies a distinct long name ('Wrapped Ether' for WETH).
+  assert.equal(reserve?.name, 'TST');
 });
 
-test('stable debt mint initializes user reserve when missing', async () => {
+test('aToken initialization strips an isolated market prefix and keeps event decimals', async () => {
   const TestHelpers = loadTestHelpers();
   let mockDb = TestHelpers.MockDb.createMockDb();
   const eventData = createEventDataFactory();
 
-  mockDb = mockDb.entities.SubToken.set({
-    id: ADDRESSES.stableToken,
-    pool_id: ADDRESSES.pool,
-    tokenContractImpl: undefined,
-    underlyingAssetAddress: ADDRESSES.asset,
-    underlyingAssetDecimals: DECIMALS,
+  // Pendle markets deploy with SymbolPrefix 'np' and ATokenNamePrefix
+  // 'Neverland Pendle'. Matching only the canonical 'n'/'Neverland Interest
+  // Bearing' left these as symbol 'pSHMON', name 'Neverland Pendle SHMON'.
+  const init = TestHelpers.AToken.Initialized.createMockEvent({
+    underlyingAsset: ADDRESSES.asset,
+    pool: ADDRESSES.pool,
+    aTokenDecimals: 8n,
+    aTokenSymbol: 'npSHMON',
+    aTokenName: 'Neverland Pendle SHMON',
+    ...eventData(65, 91050, ADDRESSES.aToken),
   });
+  mockDb = await TestHelpers.AToken.Initialized.processEvent({ event: init, mockDb });
 
   const reserveId = `${ADDRESSES.asset}-${ADDRESSES.pool}`;
-  const reserve = createDefaultReserve(reserveId, ADDRESSES.pool, ADDRESSES.asset);
-  mockDb = mockDb.entities.Reserve.set({
-    ...reserve,
-    decimals: DECIMALS,
-    liquidityIndex: RAY,
-    variableBorrowIndex: RAY,
-    liquidityRate: 0n,
-    variableBorrowRate: 0n,
-    lastUpdateTimestamp: 0,
-    isActive: true,
-    borrowingEnabled: true,
+  const reserve = mockDb.entities.Reserve.get(reserveId);
+  assert.equal(reserve?.symbol, 'SHMON');
+  assert.equal(reserve?.name, 'SHMON');
+  assert.equal(reserve?.decimals, 8);
+
+  // TokenInfo must be corrected too: config.ts seeds it from ReserveInitialized,
+  // which carries no decimals, so it lands as 18 until this event fixes it.
+  const tokenInfo = mockDb.entities.TokenInfo.get(ADDRESSES.asset);
+  assert.equal(tokenInfo?.decimals, 8);
+  assert.equal(tokenInfo?.symbol, 'SHMON');
+});
+
+test('aToken initialization propagates on-chain decimals into TokenInfo', async () => {
+  // PoolConfigurator.ReserveInitialized does NOT carry decimals, so config.ts writes
+  // TokenInfo with `getTokenMetadata(asset)?.decimals ?? 18`. For any asset absent from the
+  // hardcoded table that is a blind 18. AToken.Initialized DOES carry the true
+  // `aTokenDecimals`, so it must correct TokenInfo - otherwise TVL and LP valuation read 18
+  // for a 6-decimal token, which is exactly what happened before XAUt0 was hand-added.
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  const init = TestHelpers.AToken.Initialized.createMockEvent({
+    underlyingAsset: VIEM_ERROR_ADDRESS,
+    pool: ADDRESSES.pool,
+    aTokenDecimals: 6n,
+    aTokenSymbol: 'nMOCK',
+    aTokenName: 'Neverland Interest Bearing MOCK',
+    ...eventData(61, 91100, ADDRESSES.aToken),
+  });
+  mockDb = await TestHelpers.AToken.Initialized.processEvent({ event: init, mockDb });
+
+  const token = mockDb.entities.TokenInfo.get(VIEM_ERROR_ADDRESS);
+  assert.equal(token?.decimals, 6, 'TokenInfo must carry the on-chain aTokenDecimals');
+  assert.equal(token?.symbol, 'MOCK');
+
+  const reserve = mockDb.entities.Reserve.get(`${VIEM_ERROR_ADDRESS}-${ADDRESSES.pool}`);
+  assert.equal(reserve?.decimals, 6, 'Reserve and TokenInfo must agree on decimals');
+});
+
+test('reserve initialization keeps aToken-derived metadata for an unknown asset', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  // On chain, PoolConfigurator.initReserves initializes the aToken proxy BEFORE it
+  // emits ReserveInitialized, so AToken.Initialized carries the lower log index and
+  // config.ts writes last. For an asset absent from KNOWN_TOKENS, config.ts has only
+  // the 'ERC20'/'Token ERC20'/18 placeholders to write, so it must not overwrite the
+  // real values this event already derived from the aToken's own metadata.
+  const aTokenInit = TestHelpers.AToken.Initialized.createMockEvent({
+    underlyingAsset: ADDRESSES.asset,
+    pool: ADDRESSES.pool,
+    aTokenDecimals: 6n,
+    aTokenSymbol: 'npAUSD',
+    aTokenName: 'Neverland Pendle AUSD',
+    ...eventData(70, 91100, ADDRESSES.aToken),
+  });
+  mockDb = await TestHelpers.AToken.Initialized.processEvent({ event: aTokenInit, mockDb });
+
+  const reserveInit = TestHelpers.PoolConfigurator.ReserveInitialized.createMockEvent({
+    asset: ADDRESSES.asset,
+    aToken: ADDRESSES.aToken,
+    stableDebtToken: '0x0000000000000000000000000000000000000000',
+    variableDebtToken: ADDRESSES.variableToken,
+    interestRateStrategyAddress: ADDRESSES.oracle,
+    ...eventData(70, 91101, ADDRESSES.pool),
+  });
+  mockDb = await TestHelpers.PoolConfigurator.ReserveInitialized.processEvent({
+    event: reserveInit,
+    mockDb,
   });
 
-  const stableMint = TestHelpers.StableDebtToken.Mint.createMockEvent({
-    user: ADDRESSES.fromUser,
+  const reserve = mockDb.entities.Reserve.get(`${ADDRESSES.asset}-${ADDRESSES.pool}`);
+  assert.equal(reserve?.decimals, 6);
+  assert.equal(reserve?.symbol, 'AUSD');
+  assert.equal(reserve?.name, 'AUSD');
+
+  const tokenInfo = mockDb.entities.TokenInfo.get(ADDRESSES.asset);
+  assert.equal(tokenInfo?.decimals, 6);
+  assert.equal(tokenInfo?.symbol, 'AUSD');
+});
+
+test('aToken initialization prefers the curated table for a known asset', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  // WMON is in KNOWN_TOKENS, so the curated entry is taken whole. The event deliberately
+  // carries a WRONG decimals here: a listed reserve must not be rewritten by on-chain
+  // discovery, so all three fields come from the table and the 6n is ignored.
+  const init = TestHelpers.AToken.Initialized.createMockEvent({
+    underlyingAsset: WMON_ADDRESS,
+    pool: ADDRESSES.pool,
+    aTokenDecimals: 6n,
+    aTokenSymbol: 'nWMON',
+    aTokenName: 'Neverland Interest Bearing WMON',
+    ...eventData(72, 91200, ADDRESSES.aToken),
+  });
+  mockDb = await TestHelpers.AToken.Initialized.processEvent({ event: init, mockDb });
+
+  const reserve = mockDb.entities.Reserve.get(`${WMON_ADDRESS}-${ADDRESSES.pool}`);
+  assert.equal(reserve?.symbol, 'WMON');
+  assert.equal(reserve?.name, 'Wrapped MON');
+  assert.equal(reserve?.decimals, 18);
+
+  const tokenInfo = mockDb.entities.TokenInfo.get(WMON_ADDRESS);
+  assert.equal(tokenInfo?.name, 'Wrapped MON');
+  assert.equal(tokenInfo?.decimals, 18);
+});
+
+// Every debt-token handler resolves its reserve through the SubToken row written by
+// PoolConfigurator.ReserveInitialized. A token whose SubToken has not been indexed yet
+// (dynamic registration is forward-only) must be a clean no-op rather than a partial write.
+test('debt token events are no-ops without a SubToken row', async () => {
+  const TestHelpers = loadTestHelpers();
+  const eventData = createEventDataFactory();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+
+  const shared = { value: 100n, balanceIncrease: 0n, index: RAY };
+
+  const vMint = TestHelpers.VariableDebtToken.Mint.createMockEvent({
+    caller: ADDRESSES.fromUser,
     onBehalfOf: ADDRESSES.fromUser,
-    amount: 50n,
-    currentBalance: 0n,
-    balanceIncrease: 0n,
-    newRate: 2n,
-    avgStableRate: 2n,
-    newTotalSupply: 50n,
-    ...eventData(62, 91020, ADDRESSES.stableToken),
+    ...shared,
+    ...eventData(80, 92000, ADDRESSES.variableToken),
   });
-  mockDb = await TestHelpers.StableDebtToken.Mint.processEvent({ event: stableMint, mockDb });
+  mockDb = await TestHelpers.VariableDebtToken.Mint.processEvent({ event: vMint, mockDb });
 
+  const vBurn = TestHelpers.VariableDebtToken.Burn.createMockEvent({
+    from: ADDRESSES.fromUser,
+    target: ADDRESSES.fromUser,
+    ...shared,
+    ...eventData(81, 92010, ADDRESSES.variableToken),
+  });
+  mockDb = await TestHelpers.VariableDebtToken.Burn.processEvent({ event: vBurn, mockDb });
+
+  const vDelegated = TestHelpers.VariableDebtToken.BorrowAllowanceDelegated.createMockEvent({
+    fromUser: ADDRESSES.fromUser,
+    toUser: ADDRESSES.toUser,
+    asset: ADDRESSES.asset,
+    amount: 100n,
+    ...eventData(85, 92050, ADDRESSES.variableToken),
+  });
+  mockDb = await TestHelpers.VariableDebtToken.BorrowAllowanceDelegated.processEvent({
+    event: vDelegated,
+    mockDb,
+  });
+
+  assert.deepEqual(mockDb.entities.UserReserve.getAll(), []);
+  assert.deepEqual(mockDb.entities.Reserve.getAll(), []);
+});
+
+// SubToken wiring can land before the reserve and user rows exist (dynamic registration is
+// forward-only, so a token's first indexed event may be a mid-life mint or burn). Burns of a
+// position this indexer never saw opened must no-op, and mints must fall back to the event's
+// own index rather than a reserve row that is not there yet.
+test('debt token mints and burns tolerate missing reserve and user rows', async () => {
+  const TestHelpers = loadTestHelpers();
+  const eventData = createEventDataFactory();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+
+  for (const [id, underlying] of [
+    [ADDRESSES.variableToken, ADDRESSES.asset],
+    [ADDRESSES.stableToken, ADDRESSES.asset],
+  ] as const) {
+    mockDb = mockDb.entities.SubToken.set({
+      id,
+      pool_id: ADDRESSES.pool,
+      tokenContractImpl: undefined,
+      underlyingAssetAddress: underlying,
+      underlyingAssetDecimals: DECIMALS,
+    });
+  }
+
+  const vBurn = TestHelpers.VariableDebtToken.Burn.createMockEvent({
+    from: ADDRESSES.fromUser,
+    target: ADDRESSES.fromUser,
+    value: 100n,
+    balanceIncrease: 0n,
+    index: RAY,
+    ...eventData(90, 93000, ADDRESSES.variableToken),
+  });
+  mockDb = await TestHelpers.VariableDebtToken.Burn.processEvent({ event: vBurn, mockDb });
+
+  // The burn may not invent a position.
+  assert.deepEqual(mockDb.entities.UserReserve.getAll(), []);
+
+  const vMint = TestHelpers.VariableDebtToken.Mint.createMockEvent({
+    caller: ADDRESSES.fromUser,
+    onBehalfOf: ADDRESSES.fromUser,
+    value: 100n,
+    balanceIncrease: 0n,
+    index: RAY,
+    ...eventData(92, 93020, ADDRESSES.variableToken),
+  });
+  mockDb = await TestHelpers.VariableDebtToken.Mint.processEvent({ event: vMint, mockDb });
+
+  const userReserve = mockDb.entities.UserReserve.get(
+    `${ADDRESSES.fromUser}-${ADDRESSES.asset}-${ADDRESSES.pool}`
+  );
+  assert.ok(userReserve, 'a mint opens the position it is minting into');
+});
+
+// The repay path can run before the reserve row exists: the position is known (the user has
+// debt) but PoolConfigurator.ReserveInitialized has not been indexed for this market yet.
+// Index bookkeeping must then fall back to the event's own index, and the reserve-derived
+// history and daily-highwater writes must be skipped instead of throwing.
+test('debt token burns fall back to the event index when the reserve row is missing', async () => {
+  const TestHelpers = loadTestHelpers();
+  const eventData = createEventDataFactory();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+
+  for (const id of [ADDRESSES.variableToken, ADDRESSES.stableToken]) {
+    mockDb = mockDb.entities.SubToken.set({
+      id,
+      pool_id: ADDRESSES.pool,
+      tokenContractImpl: undefined,
+      underlyingAssetAddress: ADDRESSES.asset,
+      underlyingAssetDecimals: DECIMALS,
+    });
+  }
+
+  const reserveId = `${ADDRESSES.asset}-${ADDRESSES.pool}`;
   const userReserveId = `${ADDRESSES.fromUser}-${reserveId}`;
-  assert.ok(mockDb.entities.UserReserve.get(userReserveId));
-  assert.ok(mockDb.entities.UserReserveList.get(ADDRESSES.fromUser));
+  mockDb = mockDb.entities.UserReserve.set({
+    id: userReserveId,
+    pool_id: ADDRESSES.pool,
+    user_id: ADDRESSES.fromUser,
+    reserve_id: reserveId,
+    scaledATokenBalance: 0n,
+    currentATokenBalance: 0n,
+    scaledDebt: 1000n,
+    currentDebt: 1000n,
+    liquidityRate: 0n,
+    variableBorrowIndex: RAY,
+    usageAsCollateralEnabledOnUser: false,
+    lastUpdateTimestamp: 100,
+  });
+
+  const vBurn = TestHelpers.VariableDebtToken.Burn.createMockEvent({
+    from: ADDRESSES.fromUser,
+    target: ADDRESSES.fromUser,
+    value: 100n,
+    balanceIncrease: 0n,
+    index: RAY,
+    ...eventData(95, 94000, ADDRESSES.variableToken),
+  });
+  mockDb = await TestHelpers.VariableDebtToken.Burn.processEvent({ event: vBurn, mockDb });
+
+  // No reserve row means no reserve-derived history rows.
+  assert.deepEqual(mockDb.entities.ReserveParamsHistoryItem.getAll(), []);
+  assert.equal(mockDb.entities.Reserve.get(reserveId), undefined);
+  // The position itself still settles against the event's own index.
+  assert.equal(mockDb.entities.UserReserve.get(userReserveId)?.variableBorrowIndex, RAY);
+});
+
+// A reserve that exists but has never accrued carries a zero variableBorrowIndex. Repay
+// bookkeeping must fall back to the event's own index rather than writing that zero onto
+// the user's position, which would make the next rayMul read the debt as zero.
+test('debt token burns fall back to the event index when the reserve index is zero', async () => {
+  const TestHelpers = loadTestHelpers();
+  const eventData = createEventDataFactory();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+
+  for (const id of [ADDRESSES.variableToken, ADDRESSES.stableToken]) {
+    mockDb = mockDb.entities.SubToken.set({
+      id,
+      pool_id: ADDRESSES.pool,
+      tokenContractImpl: undefined,
+      underlyingAssetAddress: ADDRESSES.asset,
+      underlyingAssetDecimals: DECIMALS,
+    });
+  }
+
+  const reserveId = `${ADDRESSES.asset}-${ADDRESSES.pool}`;
+  const userReserveId = `${ADDRESSES.fromUser}-${reserveId}`;
+  const base = createDefaultReserve(reserveId, ADDRESSES.pool, ADDRESSES.asset);
+  mockDb = mockDb.entities.Reserve.set({
+    ...base,
+    decimals: DECIMALS,
+    liquidityIndex: 0n,
+    variableBorrowIndex: 0n,
+    liquidityRate: 0n,
+    totalScaledDebt: 1000n,
+    totalCurrentDebt: 1000n,
+  });
+  mockDb = mockDb.entities.UserReserve.set({
+    id: userReserveId,
+    pool_id: ADDRESSES.pool,
+    user_id: ADDRESSES.fromUser,
+    reserve_id: reserveId,
+    scaledATokenBalance: 0n,
+    currentATokenBalance: 0n,
+    scaledDebt: 1000n,
+    currentDebt: 1000n,
+    liquidityRate: 0n,
+    variableBorrowIndex: RAY,
+    usageAsCollateralEnabledOnUser: false,
+    lastUpdateTimestamp: 100,
+  });
+
+  const vBurn = TestHelpers.VariableDebtToken.Burn.createMockEvent({
+    from: ADDRESSES.fromUser,
+    target: ADDRESSES.fromUser,
+    value: 100n,
+    balanceIncrease: 0n,
+    index: RAY,
+    ...eventData(97, 95000, ADDRESSES.variableToken),
+  });
+  mockDb = await TestHelpers.VariableDebtToken.Burn.processEvent({ event: vBurn, mockDb });
+
+  assert.equal(mockDb.entities.UserReserve.get(userReserveId)?.variableBorrowIndex, RAY);
 });

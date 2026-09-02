@@ -8,6 +8,8 @@ description: Neverland Protocol Indexer
 # UserReserve, DustLockToken, etc.) to hit ~100% batched.
 preload_handlers: true
 
+# `from` is read by lp.ts when attributing a mint with no pending owner. v2 has no
+# per-event field_selection, so it is requested for every event here.
 field_selection:
   transaction_fields:
     - hash
@@ -182,6 +184,9 @@ networks:
         handler: src/handlers/nft.ts
         events:
           - event: PartnershipAdded(address indexed collection, string name, bool active, uint256 startTimestamp, uint256 endTimestamp, uint256 staticBoostBps, uint256 currentFirstBonus, uint256 currentDecayRatio, uint256 totalPartnerships)
+            name: PartnershipAdded
+          - event: PartnershipAdded(address indexed collection, string name, bool active, uint256 startTimestamp, uint256 endTimestamp, uint256 currentFirstBonus, uint256 currentDecayRatio, uint256 totalPartnerships)
+            name: PartnershipAddedLegacy
           - event: PartnershipUpdated(address indexed collection, string name, bool active, uint256 startTimestamp, uint256 endTimestamp)
           - event: PartnershipRemoved(address indexed collection, string name, uint256 totalPartnerships)
           - event: MultiplierParamsUpdated(uint256 oldFirstBonus, uint256 newFirstBonus, uint256 oldDecayRatio, uint256 newDecayRatio, uint256 timestamp, uint256 totalActivePartnerships)
@@ -219,8 +224,8 @@ networks:
       # ============================================
       # Entries WITHOUT an `address` are discovered at runtime via contractRegister
       # (PoolAddressesProvider, PoolConfigurator, Pool, AToken, *DebtToken,
-      # UserVault, PartnerNFT) or are wildcard (BalancerVault). Entries WITH an
-      # `address` below (static NFTs + LP pools) are bootstrapped from config so
+      # PartnerNFT). Entries WITH an `address` below (static NFTs + LP pools and
+      # the Balancer Vault singleton) are bootstrapped from config so
       # their full history is indexed from their start_block. NOTE: the LP
       # contracts are ALSO re-added dynamically by LeaderboardConfig.LPPoolConfigured
       # (src/handlers/leaderboard.ts) — Envio dedupes the same (contractName,address)
@@ -280,7 +285,6 @@ networks:
           - event: ReserveInitialized(address indexed asset, address indexed aToken, address stableDebtToken, address variableDebtToken, address interestRateStrategyAddress)
           - event: ReserveBorrowing(address indexed asset, bool enabled)
           - event: CollateralConfigurationChanged(address indexed asset, uint256 ltv, uint256 liquidationThreshold, uint256 liquidationBonus)
-          - event: ReserveStableRateBorrowing(address indexed asset, bool enabled)
           - event: ReserveActive(address indexed asset, bool active)
           - event: ReserveFrozen(address indexed asset, bool frozen)
           - event: ReservePaused(address indexed asset, bool paused)
@@ -291,7 +295,6 @@ networks:
           - event: EModeAssetCategoryChanged(address indexed asset, uint8 oldCategoryId, uint8 newCategoryId)
           - event: EModeCategoryAdded(uint8 indexed categoryId, uint256 ltv, uint256 liquidationThreshold, uint256 liquidationBonus, address oracle, string label)
           - event: ATokenUpgraded(address indexed asset, address indexed proxy, address indexed implementation)
-          - event: StableDebtTokenUpgraded(address indexed asset, address indexed proxy, address indexed implementation)
           - event: VariableDebtTokenUpgraded(address indexed asset, address indexed proxy, address indexed implementation)
           - event: BorrowableInIsolationChanged(address asset, bool borrowable)
           - event: SiloedBorrowingChanged(address indexed asset, bool oldState, bool newState)
@@ -321,11 +324,7 @@ networks:
           - event: ReserveDataUpdated(address indexed reserve, uint256 liquidityRate, uint256 stableBorrowRate, uint256 variableBorrowRate, uint256 liquidityIndex, uint256 variableBorrowIndex)
           - event: MintedToTreasury(address indexed reserve, uint256 amountMinted)
           - event: UserEModeSet(address indexed user, uint8 categoryId)
-          - event: MintUnbacked(address indexed reserve, address user, address indexed onBehalfOf, uint256 amount, uint16 indexed referralCode)
-          - event: BackUnbacked(address indexed reserve, address indexed backer, uint256 amount, uint256 fee)
           - event: IsolationModeTotalDebtUpdated(address indexed asset, uint256 totalDebt)
-          - event: SwapBorrowRateMode(address indexed reserve, address indexed user, uint8 interestRateMode)
-          - event: RebalanceStableBorrowRate(address indexed reserve, address indexed user)
 
       # AToken - registered from PoolConfigurator.ReserveInitialized
       - name: AToken
@@ -348,24 +347,6 @@ networks:
           - event: Initialized(address indexed underlyingAsset, address indexed pool, address incentivesController, uint8 debtTokenDecimals, string debtTokenName, string debtTokenSymbol, bytes params)
           - event: BorrowAllowanceDelegated(address indexed fromUser, address indexed toUser, address indexed asset, uint256 amount)
           - event: PriceObserved(address indexed asset, uint256 price, uint256 baseUnit, address indexed oracle, uint8 action, bool ok, address indexed user, uint256 timestamp)
-
-      # StableDebtToken - registered from PoolConfigurator.ReserveInitialized
-      - name: StableDebtToken
-        abi_file_path: abis/lending/StableDebtToken.json
-        handler: src/handlers/tokenization.ts
-        events:
-          - event: Mint(address indexed user, address indexed onBehalfOf, uint256 amount, uint256 currentBalance, uint256 balanceIncrease, uint256 newRate, uint256 avgStableRate, uint256 newTotalSupply)
-          - event: Burn(address indexed from, uint256 amount, uint256 currentBalance, uint256 balanceIncrease, uint256 avgStableRate, uint256 newTotalSupply)
-          - event: Initialized(address indexed underlyingAsset, address indexed pool, address incentivesController, uint8 debtTokenDecimals, string debtTokenName, string debtTokenSymbol, bytes params)
-          - event: BorrowAllowanceDelegated(address indexed fromUser, address indexed toUser, address indexed asset, uint256 amount)
-          - event: PriceObserved(address indexed asset, uint256 price, uint256 baseUnit, address indexed oracle, uint8 action, bool ok, address indexed user, uint256 timestamp)
-
-      # UserVault - registered from UserVaultFactory.UserVaultCreated
-      - name: UserVault
-        abi_file_path: abis/lending/UserVault.json
-        handler: src/handlers/config.ts
-        events:
-          - event: LoanSelfRepaid(address indexed user, address indexed vault, address debtAsset, address collateralAsset, uint256 amount)
 
       # PartnerNFT - registered from NFTPartnershipRegistry.PartnershipAdded (for dynamic registration)
       - name: PartnerNFT
@@ -463,9 +444,8 @@ networks:
       # ~one near-empty request per block (~hundreds of RPM on a fast chain). Giving
       # it the known Vault address folds it into the main addressed partition (which
       # skips empty blocks), collapsing head request volume. The `pool` topic filter
-      # is STILL pushed server-side via the handler-side eventFilters in
-      # src/handlers/lp.ts (Envio populates topicSelections for addressed contracts
-      # too), so only the DUST AutoRange pool's events are fetched. Pool BPT balances
+      # is STILL pushed server-side via the V3 `where.params.pool` selectors in
+      # src/handlers/lp.ts, so only the DUST AutoRange pool's events are fetched. Pool BPT balances
       # come from BalancerAutoRangePool.Transfer above.
       - name: BalancerVault
         abi_file_path: abis/balancer/BalancerVault.json

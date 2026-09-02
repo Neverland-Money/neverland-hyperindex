@@ -1,0 +1,15 @@
+{
+  "tide": 8,
+  "epoch": {
+    "id": "8",
+    "epochNumber": "8",
+    "startTime": 1785340800,
+    "endTime": 1787889600,
+    "isActive": false
+  },
+  "fields": [],
+  "totalEntries": 0,
+  "userEpochStats": [],
+  "exportedAt": "2026-08-31T00:00:00Z",
+  "source": "test fixture (next tide has a declared start override)"
+}

@@ -1,6 +1,4 @@
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import path from 'node:path';
 import { test } from 'node:test';
 
 process.env.ENVIO_DISABLE_BOOTSTRAP = 'true';
@@ -34,7 +32,6 @@ import type {
   NFTPartnershipRegistryState,
   TokenInfo,
   UserEpochStats,
-  UserLPBaseline,
   UserLPPosition,
   UserLPPositionIndex,
   UserLPStats,
@@ -70,33 +67,6 @@ type TestHelpersApi = typeof TestHelpers;
 
 function loadTestHelpers(): TestHelpersApi {
   return TestHelpers;
-  const cwd = process.cwd();
-  const distTestRoot = path.join(cwd, 'dist-test');
-  const generatedLink = path.join(distTestRoot, 'generated');
-
-  const generatedIndex = path.join(generatedLink, 'index.js');
-  if (!fs.existsSync(generatedIndex)) {
-    if (fs.existsSync(generatedLink)) {
-      fs.rmSync(generatedLink, { recursive: true, force: true });
-    }
-    fs.symlinkSync(path.join(cwd, 'generated'), generatedLink, 'dir');
-  }
-
-  const handlerModules = [
-    'tokenization',
-    'leaderboard',
-    'leaderboardKeeper',
-    'dustlock',
-    'pool',
-    'nft',
-    'config',
-    'rewards',
-  ];
-  for (const handler of handlerModules) {
-    require(path.join(distTestRoot, 'src', 'handlers', `${handler}.js`));
-  }
-
-  return require(path.join(cwd, 'generated', 'src', 'TestHelpers.res.js'));
 }
 
 function createEventDataFactory() {
@@ -350,7 +320,6 @@ test('settlements do not sync LP positions from chain when env flags are enabled
     const userLPPositionIndex = createStore<UserLPPositionIndex>();
     const userLPPosition = createStore<UserLPPosition>();
     const userLPStats = createStore<UserLPStats>();
-    const userLPBaseline = createStore<UserLPBaseline>();
     const tokenInfo = createStore<TokenInfo>();
 
     leaderboardState.set({
@@ -450,7 +419,6 @@ test('settlements do not sync LP positions from chain when env flags are enabled
       UserLPPositionIndex: userLPPositionIndex,
       UserLPPosition: userLPPosition,
       UserLPStats: userLPStats,
-      UserLPBaseline: userLPBaseline,
       TokenInfo: tokenInfo,
     } as unknown as handlerContext;
 
@@ -459,15 +427,11 @@ test('settlements do not sync LP positions from chain when env flags are enabled
       ADDRESSES.user,
       null,
       1000,
-      BigInt(LEADERBOARD_START_BLOCK + 1),
-      { skipNftSync: true }
+      BigInt(LEADERBOARD_START_BLOCK + 1)
     );
 
     const position = await userLPPosition.get(LP_TOKEN_ID.toString());
     assert.equal(position, undefined);
-
-    const baseline = await userLPBaseline.get(`${ADDRESSES.user}:${ADDRESSES.positionManager}`);
-    assert.equal(baseline, undefined);
   } finally {
     process.env.ENVIO_ENABLE_EXTERNAL_CALLS = previousExternal;
     process.env.ENVIO_ENABLE_ETH_CALLS = prevEnableEth;

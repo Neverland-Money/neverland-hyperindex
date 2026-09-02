@@ -13,10 +13,9 @@
 
 import { getOrCreateUserLeaderboardState } from '../handlers/shared';
 
-import type { handlerContext } from '../../generated';
+import { ALL_TIME_EPOCH_NUMBER, MAX_BUCKETS } from './constants';
 
-const MAX_BUCKETS = 120;
-const ALL_TIME_EPOCH_NUMBER = 0n;
+import type { handlerContext } from '../../generated';
 
 function normalizePoints(points: number): number {
   if (!Number.isFinite(points) || points < 0) {
@@ -25,7 +24,7 @@ function normalizePoints(points: number): number {
   return points;
 }
 
-export async function isUserBlacklisted(context: handlerContext, userId: string): Promise<boolean> {
+async function isUserBlacklisted(context: handlerContext, userId: string): Promise<boolean> {
   const blacklistStore = (
     context as unknown as {
       LeaderboardBlacklist?: {
@@ -45,8 +44,7 @@ export async function isUserBlacklisted(context: handlerContext, userId: string)
  * Linear head: [0, 0.1), [0.1, 0.5), [0.5, 1)
  * Exponential tail: [1, 2), [2, 4), [4, 8), [8, 16), ...
  */
-export function bucketIndexFor(points: number): number {
-  if (points < 0) return 0;
+function bucketIndexFor(points: number): number {
   if (points < 0.1) return 0;
   if (points < 0.5) return 1;
   if (points < 1) return 2;
@@ -65,7 +63,7 @@ export function bucketIndexFor(points: number): number {
 /**
  * Get bucket bounds for a given index
  */
-export function bucketBounds(index: number): [number, number] {
+function bucketBounds(index: number): [number, number] {
   if (index === 0) return [0, 0.1];
   if (index === 1) return [0.1, 0.5];
   if (index === 2) return [0.5, 1];
@@ -202,9 +200,6 @@ async function syncGlobalScoreBucket(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   bucket: any
 ) {
-  const state = await context.LeaderboardState.get('current');
-  if (!state || state.currentEpochNumber !== epochNumber) return;
-
   const globalBucketId = `b:${bucket.index}`;
   let globalBucket = await context.ScoreBucket.get(globalBucketId);
   if (!globalBucket) {
@@ -216,7 +211,7 @@ async function syncGlobalScoreBucket(
       lower: bounds[0],
       upper: bounds[1],
       count: bucket.count,
-      updatedAt: bucket.updatedAt || 0,
+      updatedAt: bucket.updatedAt,
     });
   } else {
     context.ScoreBucket.set({
@@ -303,6 +298,22 @@ async function updateLeaderboardForEpoch(
       });
     }
 
+    if (syncGlobal) {
+      const globalUserIndex = await context.UserIndex.get(userId);
+      if (globalUserIndex) {
+        context.UserIndex.deleteUnsafe(userId);
+      }
+      const epochTotals = await context.LeaderboardTotals.get(`epoch:${epochNumber}`);
+      if (epochTotals) {
+        context.LeaderboardTotals.set({
+          id: 'global',
+          epochNumber,
+          totalUsers: epochTotals.totalUsers,
+          updatedAt: timestamp,
+        });
+      }
+    }
+
     return;
   }
 
@@ -316,6 +327,16 @@ async function updateLeaderboardForEpoch(
       points: newPoints,
       updatedAt: timestamp,
     });
+    if (syncGlobal) {
+      context.UserIndex.set({
+        id: userId,
+        user: userId,
+        epochNumber,
+        points: newPoints,
+        bucketIndex: newBucketIndex,
+        updatedAt: timestamp,
+      });
+    }
     return;
   }
 

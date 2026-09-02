@@ -1,0 +1,14 @@
+{
+  "tide": 3,
+  "epoch": {
+    "id": "3",
+    "epochNumber": "3",
+    "startTime": 6000,
+    "isActive": false
+  },
+  "fields": [],
+  "totalEntries": 0,
+  "userEpochStats": [],
+  "exportedAt": "2026-08-31T00:00:00Z",
+  "source": "test fixture (no endTime)"
+}

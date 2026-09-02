@@ -3,8 +3,8 @@
  * RewardsController, RevenueReward, DustToken
  */
 
+import { DustToken, RevenueReward, RewardsController } from '../../generated';
 import type { handlerContext } from '../../generated';
-import { RewardsController, RevenueReward, DustToken } from '../../generated';
 import { ZERO_ADDRESS, normalizeAddress } from '../helpers/constants';
 import { recordProtocolTransaction, getOrCreateUser, getOrCreateProtocolStats } from './shared';
 

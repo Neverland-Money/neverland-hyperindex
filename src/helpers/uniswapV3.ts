@@ -2,7 +2,7 @@ const MAX_TICK = 887272;
 const Q96 = 2n ** 96n;
 const MAX_UINT256 = (1n << 256n) - 1n;
 
-function getSqrtRatioAtTick(tick: number): bigint {
+export function getSqrtRatioAtTick(tick: number): bigint {
   if (tick > MAX_TICK || tick < -MAX_TICK) {
     throw new Error('TICK_OUT_OF_RANGE');
   }

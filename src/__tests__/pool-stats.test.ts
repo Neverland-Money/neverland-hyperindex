@@ -7,8 +7,11 @@ import {
   adjustPoolReserveCount,
   computeRevenueDeltasUsd,
   computeUtilizationRate,
+  updatePoolStatsIncremental,
+  updateProtocolStatsIncremental,
   updateReserveUsdValues,
 } from '../helpers/protocolAggregation';
+import { getOrCreateProtocolStats } from '../handlers/shared';
 import { TestHelpers, type MockDb } from './v3-test-helpers';
 
 import type { handlerContext } from '../../generated';
@@ -218,6 +221,65 @@ test('revenue deltas ignore non-positive lifetime movement', () => {
   assert.equal(wentBackwards.deltaProtocolUsd, 0);
 });
 
+test('incremental protocol and pool updaters derive omitted revenue deltas identically', async () => {
+  const protocolRows = new Map<string, Record<string, unknown>>();
+  const poolRows = new Map<string, Record<string, unknown>>();
+  const snapshots = new Map<string, Record<string, unknown>>();
+  const context = {
+    ProtocolStats: {
+      get: async (id: string) => protocolRows.get(id),
+      set: (row: Record<string, unknown>) => protocolRows.set(row.id as string, row),
+    },
+    PoolStats: {
+      get: async (id: string) => poolRows.get(id),
+      set: (row: Record<string, unknown>) => poolRows.set(row.id as string, row),
+    },
+    PoolStatsSnapshot: {
+      get: async (id: string) => snapshots.get(id),
+      set: (row: Record<string, unknown>) => snapshots.set(row.id as string, row),
+    },
+  } as unknown as handlerContext;
+  await getOrCreateProtocolStats(context, 1);
+
+  const delta = {
+    oldSuppliesUsd: 0,
+    oldBorrowsUsd: 0,
+    oldAvailableUsd: 0,
+    newSuppliesUsd: 0,
+    newBorrowsUsd: 0,
+    newAvailableUsd: 0,
+    oldSuppliesE8: 0n,
+    oldBorrowsE8: 0n,
+    oldAvailableE8: 0n,
+    newSuppliesE8: 0n,
+    newBorrowsE8: 0n,
+    newAvailableE8: 0n,
+    oldSuppliersInterestEarned: 0n,
+    oldProtocolAccrued: 0n,
+    newSuppliersInterestEarned: 10n * UNIT,
+    newProtocolAccrued: 5n * UNIT,
+    priceE8: PRICE_E8,
+    decimals: DECIMALS,
+  };
+
+  assert.equal(await updateProtocolStatsIncremental(context, delta, 42), true);
+  await updatePoolStatsIncremental(context, ADDRESSES.poolA.toUpperCase(), delta, 42);
+
+  const protocol = protocolRows.get('1');
+  assert.equal(protocol?.supplyRevenueUsd, 20);
+  assert.equal(protocol?.protocolRevenueUsd, 10);
+  assert.equal(protocol?.totalRevenueUsd, 30);
+
+  const pool = poolRows.get(ADDRESSES.poolA);
+  assert.equal(pool?.supplyRevenueUsd, 20);
+  assert.equal(pool?.protocolRevenueUsd, 10);
+  assert.equal(pool?.totalRevenueUsd, 30);
+  const snapshot = snapshots.get(`${ADDRESSES.poolA}-42`);
+  assert.equal(snapshot?.supplyRevenueUsd, 20);
+  assert.equal(snapshot?.protocolRevenueUsd, 10);
+  assert.equal(snapshot?.totalRevenueUsd, 30);
+});
+
 /* -------------------------------------------------------------------------- */
 /* adjustPoolReserveCount                                                      */
 /* -------------------------------------------------------------------------- */
@@ -302,7 +364,7 @@ test('per-pool revenue accumulates and sums back to the protocol total', async (
 
   // A treasury mint books protocol revenue on pool A only. The real shape is
   // Mint(caller = the Pool contract) followed by MintedToTreasury, which is the
-  // event that actually recognises the revenue - and the reason PoolStats sees
+  // event that actually recognizes the revenue - and the reason PoolStats sees
   // it at all, since the old inline path wrote to ProtocolStats only.
   const treasury = '0x00000000000000000000000000000000000000aa';
   mockDb = mockDb.entities.ATokenTreasury.set({
@@ -536,8 +598,7 @@ test('a pool row never books a delta the protocol row refused', async () => {
         totalLiquidity: 100n * UNIT,
         availableLiquidity: 100n * UNIT,
         totalATokenSupply: 100n * UNIT,
-        totalCurrentVariableDebt: 0n,
-        totalPrincipalStableDebt: 0n,
+        totalCurrentDebt: 0n,
         lifetimeSuppliersInterestEarned: 5n * UNIT,
         lifetimeReserveFactorAccrued: 1n * UNIT,
       }),
@@ -607,7 +668,7 @@ function aTokenInitializedEvent(block: number, timestamp: number) {
     pool: LIFECYCLE.pool,
     treasury: ZERO_ADDRESS,
     incentivesController: ZERO_ADDRESS,
-    aTokenDecimals: 6,
+    aTokenDecimals: 6n,
     aTokenName: 'Neverland USDC',
     aTokenSymbol: 'nUSDC',
     params: '0x',

@@ -6,9 +6,7 @@ enum Action {
   RedeemUnderlying
   Repay
   Borrow
-  SwapBorrowRate
   UsageAsCollateral
-  RebalanceStableBorrowRate
   LiquidationCall
   UserEModeSet
 }
@@ -174,24 +172,8 @@ type Borrow {
   borrowRateMode: Int!
   referrer_id: String
   timestamp: Int!
-  stableTokenDebt: BigInt!
-  variableTokenDebt: BigInt!
+  scaledDebt: BigInt!
   assetPriceUSD: Float
-}
-
-type SwapBorrowRate {
-  id: ID!
-  txHash: String! @index
-  action: Action!
-  pool_id: String! @index
-  user_id: String! @index
-  reserve_id: String! @index
-  userReserve_id: String!
-  borrowRateModeFrom: Int!
-  borrowRateModeTo: Int!
-  stableBorrowRate: BigInt!
-  variableBorrowRate: BigInt!
-  timestamp: Int!
 }
 
 type UsageAsCollateral {
@@ -204,19 +186,6 @@ type UsageAsCollateral {
   userReserve_id: String!
   fromState: Boolean!
   toState: Boolean!
-  timestamp: Int!
-}
-
-type RebalanceStableBorrowRate {
-  id: ID!
-  txHash: String! @index
-  action: Action!
-  pool_id: String! @index
-  user_id: String! @index
-  reserve_id: String! @index
-  userReserve_id: String!
-  borrowRateFrom: BigInt!
-  borrowRateTo: BigInt!
   timestamp: Int!
 }
 
@@ -307,36 +276,10 @@ type ReserveRateSnapshot @index(fields: ["reserve", "hourStart"]) {
   reserve: String! @index
   hourStart: Int! @index
   liquidityAPRRay: BigInt!
-  variableBorrowAPRRay: BigInt!
-  stableBorrowAPRRay: BigInt!
+  borrowAPRRay: BigInt!
   liquidityIndexRay: BigInt!
   variableBorrowIndexRay: BigInt!
   lastUpdateTs: Int!
-}
-
-type MintUnbacked {
-  id: ID!
-  pool_id: String! @index
-  user_id: String! @index
-  caller_id: String!
-  reserve_id: String! @index
-  userReserve_id: String!
-  amount: BigInt!
-  referral: Int!
-  timestamp: Int!
-}
-
-type BackUnbacked {
-  id: ID!
-  pool_id: String! @index
-  reserve_id: String! @index
-  userReserve_id: String!
-  backer_id: String!
-  amount: BigInt!
-  fee: BigInt!
-  lpFee: BigInt!
-  protocolFee: BigInt!
-  timestamp: Int!
 }
 
 type MintedToTreasury {
@@ -361,7 +304,6 @@ type ReserveConfigurationHistoryItem {
   reserve_id: String! @index
   usageAsCollateralEnabled: Boolean!
   borrowingEnabled: Boolean!
-  stableBorrowRateEnabled: Boolean!
   isActive: Boolean!
   isFrozen: Boolean!
   reserveInterestRateStrategy: String!
@@ -377,8 +319,6 @@ type ReserveParamsHistoryItem {
   variableBorrowRate: BigInt!
   variableBorrowIndex: BigInt!
   utilizationRate: Float!
-  stableBorrowRate: BigInt!
-  averageStableBorrowRate: BigInt!
   liquidityIndex: BigInt!
   liquidityRate: BigInt!
   totalLiquidity: BigInt!
@@ -389,12 +329,10 @@ type ReserveParamsHistoryItem {
   priceInUsd: Float!
   timestamp: Int!
   accruedToTreasury: BigInt!
-  totalScaledVariableDebt: BigInt!
-  totalCurrentVariableDebt: BigInt!
-  totalPrincipalStableDebt: BigInt!
-  lifetimePrincipalStableDebt: BigInt!
-  lifetimeScaledVariableDebt: BigInt!
-  lifetimeCurrentVariableDebt: BigInt!
+  totalScaledDebt: BigInt!
+  totalCurrentDebt: BigInt!
+  lifetimeScaledDebt: BigInt!
+  lifetimeCurrentDebt: BigInt!
   lifetimeLiquidity: BigInt!
   lifetimeRepayments: BigInt!
   lifetimeWithdrawals: BigInt!
@@ -434,15 +372,12 @@ type Reserve {
   decimals: Int!
   usageAsCollateralEnabled: Boolean!
   borrowingEnabled: Boolean!
-  stableBorrowRateEnabled: Boolean!
   isActive: Boolean!
   isFrozen: Boolean!
   reserveInterestRateStrategy: String!
   optimalUtilizationRate: BigInt!
   variableRateSlope1: BigInt!
   variableRateSlope2: BigInt!
-  stableRateSlope1: BigInt!
-  stableRateSlope2: BigInt!
   baseVariableBorrowRate: BigInt!
   baseLTVasCollateral: BigInt!
   reserveLiquidationThreshold: BigInt!
@@ -452,23 +387,18 @@ type Reserve {
   totalATokenSupply: BigInt!
   totalLiquidityAsCollateral: BigInt!
   availableLiquidity: BigInt!
-  totalPrincipalStableDebt: BigInt!
-  totalScaledVariableDebt: BigInt!
-  totalCurrentVariableDebt: BigInt!
+  totalScaledDebt: BigInt!
+  totalCurrentDebt: BigInt!
   totalSupplies: BigInt!
   liquidityRate: BigInt!
   accruedToTreasury: BigInt!
-  averageStableRate: BigInt!
   variableBorrowRate: BigInt!
-  stableBorrowRate: BigInt!
   liquidityIndex: BigInt!
   variableBorrowIndex: BigInt!
   aToken_id: String! @index
   vToken_id: String! @index
-  sToken_id: String! @index
   reserveFactor: BigInt!
   lastUpdateTimestamp: Int!
-  stableDebtLastUpdateTimestamp: Int!
   isPaused: Boolean!
   isDropped: Boolean!
   # True only once PoolConfigurator.ReserveInitialized has listed this reserve.
@@ -486,9 +416,8 @@ type Reserve {
   eMode_id: String
   siloedBorrowing: Boolean!
   lifetimeLiquidity: BigInt!
-  lifetimePrincipalStableDebt: BigInt!
-  lifetimeScaledVariableDebt: BigInt!
-  lifetimeCurrentVariableDebt: BigInt!
+  lifetimeScaledDebt: BigInt!
+  lifetimeCurrentDebt: BigInt!
   lifetimeRepayments: BigInt!
   lifetimeWithdrawals: BigInt!
   lifetimeBorrows: BigInt!
@@ -519,30 +448,13 @@ type ATokenBalanceHistoryItem {
 type VTokenBalanceHistoryItem {
   id: ID!
   userReserve_id: String! @index
-  scaledVariableDebt: BigInt!
-  currentVariableDebt: BigInt!
+  scaledDebt: BigInt!
+  currentDebt: BigInt!
   timestamp: Int!
   index: BigInt!
 }
 
-type STokenBalanceHistoryItem {
-  id: ID!
-  userReserve_id: String! @index
-  principalStableDebt: BigInt!
-  currentStableDebt: BigInt!
-  timestamp: Int!
-  avgStableBorrowRate: BigInt!
-}
-
-type StableTokenDelegatedAllowance {
-  id: ID!
-  fromUser_id: String! @index
-  toUser_id: String! @index
-  amountAllowed: BigInt!
-  userReserve_id: String!
-}
-
-type VariableTokenDelegatedAllowance {
+type DelegatedAllowance {
   id: ID!
   fromUser_id: String! @index
   toUser_id: String! @index
@@ -558,15 +470,9 @@ type UserReserve {
   usageAsCollateralEnabledOnUser: Boolean!
   scaledATokenBalance: BigInt!
   currentATokenBalance: BigInt!
-  scaledVariableDebt: BigInt!
-  currentVariableDebt: BigInt!
-  principalStableDebt: BigInt!
-  currentStableDebt: BigInt!
-  currentTotalDebt: BigInt!
-  stableBorrowRate: BigInt!
-  oldStableBorrowRate: BigInt!
+  scaledDebt: BigInt!
+  currentDebt: BigInt!
   liquidityRate: BigInt!
-  stableBorrowLastUpdateTimestamp: Int!
   variableBorrowIndex: BigInt!
   lastUpdateTimestamp: Int!
 }
@@ -581,15 +487,6 @@ type User {
   lifetimeRewards: BigInt!
   userVault_id: String @index
   totalSelfRepaymentsReceived: BigInt!
-}
-
-type SwapHistory {
-  id: ID!
-  fromAsset: String!
-  toAsset: String!
-  fromAmount: BigInt!
-  receivedAmount: BigInt!
-  swapType: String!
 }
 
 type EModeCategoryConfig {
@@ -636,13 +533,6 @@ type PriceOracleAsset {
 type PriceHistoryItem {
   id: ID!
   asset: String! @index
-  price: BigInt!
-  timestamp: Int!
-}
-
-type UsdEthPriceHistoryItem {
-  id: ID!
-  oracle: String!
   price: BigInt!
   timestamp: Int!
 }
@@ -773,22 +663,6 @@ type UserReservePoints {
   resetTimestamp: Int!
   resetDepositIndex: Float!
   resetBorrowIndex: Float!
-}
-
-type TopK {
-  id: ID!
-  epochNumber: BigInt! @index
-  k: Int!
-  entries: [String!]!
-  updatedAt: Int!
-}
-
-type TopKEntry {
-  id: ID!
-  epochNumber: BigInt! @index
-  userId: String! @index
-  points: Float!
-  rank: Int!
 }
 
 type ScoreBucket {
@@ -1382,13 +1256,28 @@ type UserVaultEntity {
   isActive: Boolean!
 }
 
+type AutoDeposit {
+  id: ID!
+  vault: String! @index
+  user: String! @index
+  poolAddressesProvider: String!
+  asset: String!
+  reserve_id: String! @index
+  amount: BigInt!
+  assetPriceUSD: Float
+  timestamp: Int!
+  txHash: String!
+}
+
 type LoanSelfRepayment {
   id: ID!
   vault: String! @index
   user: String! @index
   poolAddressesProvider: String!
   debtAsset: String!
+  reserve_id: String! @index
   amount: BigInt!
+  assetPriceUSD: Float
   timestamp: Int!
   txHash: String!
 }
@@ -1487,9 +1376,11 @@ type LeaderboardKeeperBatchComplete {
   txHash: String!
 }
 
-type LeaderboardKeeperUserSettled {
+type LeaderboardKeeperUserSettled @index(fields: ["epochNumber", "isGap"]) {
   id: ID!
   user_id: String! @index
+  epochNumber: BigInt! @index
+  isGap: Boolean! @index
   timestamp: Int!
   txHash: String!
 }
@@ -1715,22 +1606,6 @@ type UserNFTBaseline {
   checkedBlock: BigInt!
 }
 
-type UserLPBaseline {
-  id: ID!
-  user_id: String! @index
-  positionManager: String! @index
-  checkedAt: Int!
-  checkedBlock: BigInt!
-}
-
-type SelfTransferredToken {
-  id: ID!
-  user: String! @index
-  collection: String! @index
-  tokenId: BigInt!
-  syncedAt: Int!
-}
-
 type UserLeaderboardState {
   id: ID!
   user_id: String! @index
@@ -1909,17 +1784,6 @@ type ManualPointsAward {
   txHash: String!
 }
 
-type EpochLeaderboardStats {
-  id: ID!
-  epoch_id: String! @index
-  totalUsers: BigInt!
-  totalPoints: BigInt!
-  avgPointsPerUser: BigInt!
-  topUserAddress: String
-  topUserPoints: BigInt
-  lastUpdate: Int!
-}
-
 # ============================================
 #     LP (Liquidity Provider) Tracking
 # ============================================
@@ -1937,6 +1801,14 @@ type LPPoolRegistry {
   id: ID!
   poolIds: [String!]!
   lastUpdate: Int!
+}
+
+type LPStaticTransition {
+  id: ID!
+  outgoingPool: String!
+  incomingPool: String!
+  blockNumber: BigInt!
+  timestamp: Int!
 }
 
 type LPPoolPositionIndex {
@@ -1990,12 +1862,39 @@ type LPPoolV2State {
   lastUpdate: Int!
 }
 
-type LPPoolSettlementCursor {
+type LPPoolEpochGrowth {
   id: ID!
   pool: String! @index
-  cursorIndex: Int!
-  lastSweepTimestamp: Int!
+  epochNumber: BigInt! @index
+  startTimestamp: Int!
+  lastTimestamp: Int!
+  scalarGrowthX128: BigInt!
+  isFrozen: Boolean!
+  frozenAt: Int
   lastUpdate: Int!
+}
+
+type UserLPEpochCursor {
+  id: ID!
+  position_id: String! @index
+  user_id: String! @index
+  pool: String! @index
+  epochNumber: BigInt! @index
+  growthBaselineX128: BigInt!
+  lastSettledAt: Int!
+  lastUpdate: Int!
+}
+
+type UserEpochFinalization {
+  id: ID!
+  user_id: String! @index
+  epochNumber: BigInt! @index
+  epochEndTime: Int!
+  settledThrough: Int!
+  finalizedAt: Int!
+  blockNumber: BigInt!
+  txHash: String!
+  settlementEventId: String!
 }
 
 type LPPoolStats {
@@ -2068,5 +1967,14 @@ type LPMintData {
   amount0: BigInt!
   amount1: BigInt!
   txHash: String! @index
+  timestamp: Int!
+}
+
+type LPPendingMintOwner {
+  id: ID!
+  tokenId: BigInt!
+  positionManager: String!
+  owner: String!
+  txHash: String!
   timestamp: Int!
 }

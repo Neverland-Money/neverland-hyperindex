@@ -50,7 +50,6 @@ const ADDRESSES = {
   poolAdmin: '0x0000000000000000000000000000000000009015',
   emergencyAdmin: '0x0000000000000000000000000000000000009016',
   newStrategy: '0x0000000000000000000000000000000000009017',
-  vaultMissing: '0x0000000000000000000000000000000000009018',
 };
 
 // Deployed PoolAddressesProvider of every isolated market, in config.yaml order.
@@ -399,6 +398,23 @@ test('every isolated Pendle provider is statically bootstrapped, exactly once', 
   );
 });
 
+test('vault discovery remains statically anchored to the factory event', () => {
+  const configText = readFileSync('config.yaml', 'utf8');
+  const factoryBlock = extractYamlContractBlock(configText, 'UserVaultFactory');
+
+  assert.match(factoryBlock, /^\s*address:\s*0x[0-9a-fA-F]{40}\s*$/m);
+  assert.match(
+    factoryBlock,
+    /UserVaultCreated\(address indexed user, address indexed vault\)/,
+    'UserVaultFactory must keep indexing the authoritative vault-to-owner mapping'
+  );
+  assert.doesNotMatch(
+    configText,
+    /^\s{6}- name:\s*UserVault\s*$/m,
+    'individual vaults must not be configured as event sources'
+  );
+});
+
 test('static provider bootstrap preserves isolated pool events before registry registration', async () => {
   const TestHelpers = loadTestHelpers();
   let mockDb = TestHelpers.MockDb.createMockDb();
@@ -577,7 +593,9 @@ test('pool configurator events update reserves and configuration history', async
   assert.equal(reserve?.symbol, 'ERC20');
   assert.equal(reserve?.name, 'Token ERC20');
   assert.equal(reserve?.decimals, 18);
-  assert.ok(mockDb.entities.SubToken.get(ADDRESSES.sToken));
+  // No SubToken row for the stable-debt token: stable debt is no longer indexed, and
+  // ReserveInitialized still carries the address purely as an ABI parameter.
+  assert.equal(mockDb.entities.SubToken.get(ADDRESSES.sToken), undefined);
 
   const initUnderlying = TestHelpers.PoolConfigurator.ReserveInitialized.createMockEvent({
     asset: ADDRESSES.assetTwo,
@@ -624,16 +642,6 @@ test('pool configurator events update reserves and configuration history', async
   });
   mockDb = await TestHelpers.PoolConfigurator.CollateralConfigurationChanged.processEvent({
     event: collateral,
-    mockDb,
-  });
-
-  const stableBorrowing = TestHelpers.PoolConfigurator.ReserveStableRateBorrowing.createMockEvent({
-    asset: VIEM_ERROR_ADDRESS,
-    enabled: true,
-    ...eventData(15, 1150, ADDRESSES.configurator),
-  });
-  mockDb = await TestHelpers.PoolConfigurator.ReserveStableRateBorrowing.processEvent({
-    event: stableBorrowing,
     mockDb,
   });
 
@@ -737,16 +745,6 @@ test('pool configurator events update reserves and configuration history', async
   });
   mockDb = await TestHelpers.PoolConfigurator.ATokenUpgraded.processEvent({
     event: aTokenUpgrade,
-    mockDb,
-  });
-
-  const stableUpgrade = TestHelpers.PoolConfigurator.StableDebtTokenUpgraded.createMockEvent({
-    proxy: ADDRESSES.sToken,
-    implementation: ADDRESSES.poolImpl,
-    ...eventData(26, 1260, ADDRESSES.configurator),
-  });
-  mockDb = await TestHelpers.PoolConfigurator.StableDebtTokenUpgraded.processEvent({
-    event: stableUpgrade,
     mockDb,
   });
 
@@ -944,6 +942,54 @@ test('reserve initialized falls back when aToken metadata collapses to empty', a
   assert.equal(reserve?.name, 'Token ERC20');
 });
 
+test('pool configurator fee updates fall back to the emitting configurator id', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  mockDb = mockDb.entities.Pool.set({
+    id: ADDRESSES.configurator,
+    flashloanPremiumTotal: 0n,
+    flashloanPremiumToProtocol: 0n,
+    bridgeProtocolFee: 0n,
+    lastUpdateTimestamp: 0,
+  });
+
+  const premiumTotal = TestHelpers.PoolConfigurator.FlashloanPremiumTotalUpdated.createMockEvent({
+    newFlashloanPremiumTotal: 11n,
+    ...eventData(50, 1500, ADDRESSES.configurator),
+  });
+  mockDb = await TestHelpers.PoolConfigurator.FlashloanPremiumTotalUpdated.processEvent({
+    event: premiumTotal,
+    mockDb,
+  });
+
+  const premiumProtocol =
+    TestHelpers.PoolConfigurator.FlashloanPremiumToProtocolUpdated.createMockEvent({
+      newFlashloanPremiumToProtocol: 12n,
+      ...eventData(51, 1510, ADDRESSES.configurator),
+    });
+  mockDb = await TestHelpers.PoolConfigurator.FlashloanPremiumToProtocolUpdated.processEvent({
+    event: premiumProtocol,
+    mockDb,
+  });
+
+  const bridgeFee = TestHelpers.PoolConfigurator.BridgeProtocolFeeUpdated.createMockEvent({
+    newBridgeProtocolFee: 13n,
+    ...eventData(52, 1520, ADDRESSES.configurator),
+  });
+  mockDb = await TestHelpers.PoolConfigurator.BridgeProtocolFeeUpdated.processEvent({
+    event: bridgeFee,
+    mockDb,
+  });
+
+  const pool = mockDb.entities.Pool.get(ADDRESSES.configurator);
+  assert.equal(pool?.flashloanPremiumTotal, 11n);
+  assert.equal(pool?.flashloanPremiumToProtocol, 12n);
+  assert.equal(pool?.bridgeProtocolFee, 13n);
+  assert.equal(pool?.lastUpdateTimestamp, 1520);
+});
+
 test('reserve initialized handles null and partial aToken metadata', async () => {
   const TestHelpers = loadTestHelpers();
   let mockDb = TestHelpers.MockDb.createMockDb();
@@ -1048,7 +1094,7 @@ test('pool configurator uses src address when pool mapping is missing', async ()
   assert.equal(mockDb.entities.Reserve.get(reserveId)?.pool_id, ADDRESSES.configurator);
 });
 
-test('vault creation and self-repay create summaries when missing', async () => {
+test('vault creation creates empty repayment summaries', async () => {
   const TestHelpers = loadTestHelpers();
   let mockDb = TestHelpers.MockDb.createMockDb();
   const eventData = createEventDataFactory();
@@ -1063,36 +1109,8 @@ test('vault creation and self-repay create summaries when missing', async () => 
     mockDb,
   });
 
-  const repay = TestHelpers.UserVault.LoanSelfRepaid.createMockEvent({
-    user: ADDRESSES.poolAdmin,
-    debtAsset: ADDRESSES.asset,
-    collateralAsset: ADDRESSES.assetThree,
-    amount: 10n,
-    ...eventData(51, 2010, ADDRESSES.provider),
-  });
-  mockDb = await TestHelpers.UserVault.LoanSelfRepaid.processEvent({ event: repay, mockDb });
-
   const vault = mockDb.entities.UserVault.get(ADDRESSES.provider);
   assert.ok(vault);
-  assert.equal(vault?.repayCount, 1n);
-});
-
-test('self-repay initializes missing vault summary', async () => {
-  const TestHelpers = loadTestHelpers();
-  let mockDb = TestHelpers.MockDb.createMockDb();
-  const eventData = createEventDataFactory();
-
-  const repay = TestHelpers.UserVault.LoanSelfRepaid.createMockEvent({
-    user: ADDRESSES.poolAdmin,
-    debtAsset: ADDRESSES.asset,
-    collateralAsset: ADDRESSES.assetThree,
-    amount: 22n,
-    ...eventData(60, 2100, ADDRESSES.vaultMissing),
-  });
-  mockDb = await TestHelpers.UserVault.LoanSelfRepaid.processEvent({ event: repay, mockDb });
-
-  const vaultSummary = mockDb.entities.UserVault.get(ADDRESSES.vaultMissing);
-  assert.ok(vaultSummary);
-  assert.equal(vaultSummary?.totalRepayVolume, 22n);
-  assert.equal(vaultSummary?.repayCount, 1n);
+  assert.equal(vault?.totalRepayVolume, 0n);
+  assert.equal(vault?.repayCount, 0n);
 });

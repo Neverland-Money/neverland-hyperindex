@@ -2,7 +2,6 @@
 
 const ENVIO_GRAPHQL_URL =
   process.env.ENVIO_GRAPHQL_URL || 'https://index.neverland.money/v1/graphql';
-const HASURA_ADMIN_SECRET = process.env.HASURA_ADMIN_SECRET || 'H9bN8Q9waXiS';
 
 interface UserLeaderboardState {
   id: string;
@@ -69,10 +68,7 @@ async function queryUserVotingPower(userAddress: string): Promise<void> {
   try {
     const response = await fetch(ENVIO_GRAPHQL_URL, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-hasura-admin-secret': HASURA_ADMIN_SECRET,
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         query,
         variables: { userId: normalizedAddress },
@@ -109,8 +105,12 @@ async function queryUserVotingPower(userAddress: string): Promise<void> {
       console.log(`  VP Tier Index: ${state.vpTierIndex || 'None'}`);
       console.log(`  VP Multiplier: ${state.vpMultiplier} (${Number(state.vpMultiplier) / 100}%)`);
       console.log(`  NFT Count: ${state.nftCount}`);
-      console.log(`  NFT Multiplier: ${state.nftMultiplier} (${Number(state.nftMultiplier) / 100}%)`);
-      console.log(`  Combined Multiplier: ${state.combinedMultiplier} (${Number(state.combinedMultiplier) / 100}%)`);
+      console.log(
+        `  NFT Multiplier: ${state.nftMultiplier} (${Number(state.nftMultiplier) / 100}%)`
+      );
+      console.log(
+        `  Combined Multiplier: ${state.combinedMultiplier} (${Number(state.combinedMultiplier) / 100}%)`
+      );
       console.log(`  Last Updated: ${new Date(state.lastUpdate * 1000).toISOString()}`);
     } else {
       console.log('No voting power data found for this user.');
@@ -122,7 +122,9 @@ async function queryUserVotingPower(userAddress: string): Promise<void> {
         console.log(`\n  Token #${idx + 1}:`);
         console.log(`    Token ID: ${token.id}`);
         console.log(`    Locked Amount: ${token.lockedAmount}`);
-        console.log(`    Lock End: ${token.isPermanent ? 'PERMANENT' : new Date(token.end * 1000).toISOString()}`);
+        console.log(
+          `    Lock End: ${token.isPermanent ? 'PERMANENT' : new Date(token.end * 1000).toISOString()}`
+        );
         console.log(`    Updated At: ${new Date(token.updatedAt * 1000).toISOString()}`);
       });
     } else {

@@ -18,6 +18,7 @@ const PERMANENT_SLUG = 'title-tide-rider';
 const PERMANENT_HASH = '0xe0efbca5026bd51c368115f4f16c9df26b320450346d25a9d076be011807d37a';
 const CONSUMABLE_SLUG = 'consumable-fairy-wand';
 const CONSUMABLE_HASH = '0x02270f741a3c4bc0cd6fbb2b77c33654063b20edcb115fe390a7f9482449b5e6';
+const UNKNOWN_HASH = '0x1111111111111111111111111111111111111111111111111111111111111111';
 
 function txHash(txSuffix: number) {
   return `0x${txSuffix.toString(16).padStart(64, '0')}`;
@@ -42,7 +43,7 @@ async function configurePermanent(mockDb: ReturnType<typeof TestHelpers.MockDb.c
     itemSlug: PERMANENT_SLUG,
     oldPrice: 0n,
     newPrice: 100n,
-    category: 0,
+    category: 0n,
     available: true,
     ...eventData(100, 1000, 1),
   });
@@ -58,7 +59,7 @@ async function configureConsumable(mockDb: ReturnType<typeof TestHelpers.MockDb.
     itemSlug: CONSUMABLE_SLUG,
     oldPrice: 0n,
     newPrice: 5n,
-    category: 1,
+    category: 1n,
     available: true,
     ...eventData(101, 1010, 2),
   });
@@ -96,7 +97,7 @@ test('profile shop item configuration builds catalog and history', async () => {
     itemSlug: PERMANENT_SLUG,
     oldPrice: 100n,
     newPrice: 150n,
-    category: 0,
+    category: 0n,
     available: false,
     ...eventData(102, 1020, 3),
   });
@@ -112,6 +113,24 @@ test('profile shop item configuration builds catalog and history', async () => {
 
   state = mockDb.entities.ProfileShopState.get(SELLER);
   assert.equal(state?.itemCount, 1n);
+
+  const unknown = TestHelpers.NeverlandProfileItemsSeller.ItemConfigured.createMockEvent({
+    itemSlugHash: UNKNOWN_HASH,
+    itemSlug: 'future-category',
+    oldPrice: 0n,
+    newPrice: 1n,
+    category: 2n,
+    available: true,
+    ...eventData(103, 1030, 4),
+  });
+  mockDb = await TestHelpers.NeverlandProfileItemsSeller.ItemConfigured.processEvent({
+    event: unknown,
+    mockDb,
+  });
+  assert.equal(
+    mockDb.entities.ProfileShopItem.get(`${SELLER}:${UNKNOWN_HASH}`)?.category,
+    'Unknown:2'
+  );
 });
 
 test('profile shop purchases expose checkout, line, item, and user lookups', async () => {
@@ -126,7 +145,7 @@ test('profile shop purchases expose checkout, line, item, and user lookups', asy
     itemSlugHash: PERMANENT_HASH,
     purchaseId: 7n,
     itemSlug: PERMANENT_SLUG,
-    category: 0,
+    category: 0n,
     quantity: 1n,
     unitPrice: 100n,
     totalPrice: 100n,
@@ -148,7 +167,7 @@ test('profile shop purchases expose checkout, line, item, and user lookups', asy
     itemSlugHash: CONSUMABLE_HASH,
     purchaseId: 7n,
     itemSlug: CONSUMABLE_SLUG,
-    category: 1,
+    category: 1n,
     quantity: 3n,
     unitPrice: 5n,
     totalPrice: 15n,
@@ -219,7 +238,7 @@ test('profile shop admin events update state and audit entities', async () => {
   let mockDb = TestHelpers.MockDb.createMockDb();
 
   const initialized = TestHelpers.NeverlandProfileItemsSeller.Initialized.createMockEvent({
-    version: 1,
+    version: 1n,
     ...eventData(200, 2000, 20),
   });
   mockDb = await TestHelpers.NeverlandProfileItemsSeller.Initialized.processEvent({
@@ -292,4 +311,109 @@ test('profile shop admin events update state and audit entities', async () => {
 
   const pauseEvent = mockDb.entities.ProfileShopPauseEvent.get(`${txHash(25)}-25`);
   assert.equal(pauseEvent?.paused, false);
+});
+
+test('self-purchase updates one user stats row and replays idempotently', async () => {
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  mockDb = await configurePermanent(mockDb);
+
+  const purchase = TestHelpers.NeverlandProfileItemsSeller.ItemPurchased.createMockEvent({
+    buyer: BUYER,
+    recipient: BUYER,
+    itemSlugHash: PERMANENT_HASH,
+    purchaseId: 8n,
+    itemSlug: PERMANENT_SLUG,
+    category: 0n,
+    quantity: 1n,
+    unitPrice: 100n,
+    totalPrice: 100n,
+    ...eventData(300, 3000, 30),
+  });
+  mockDb = await TestHelpers.NeverlandProfileItemsSeller.ItemPurchased.processEvent({
+    event: purchase,
+    mockDb,
+  });
+
+  const statsId = `${SELLER}:${BUYER}`;
+  const stats = mockDb.entities.ProfileShopUserStats.get(statsId);
+  assert.equal(stats?.buyerPurchaseCount, 1n);
+  assert.equal(stats?.buyerLineCount, 1n);
+  assert.equal(stats?.buyerQuantity, 1n);
+  assert.equal(stats?.buyerSpentDust, 100n);
+  assert.equal(stats?.recipientPurchaseCount, 1n);
+  assert.equal(stats?.recipientLineCount, 1n);
+  assert.equal(stats?.recipientQuantity, 1n);
+  assert.equal(stats?.recipientValueDust, 100n);
+  assert.equal(stats?.permanentItemsOwned, 1n);
+
+  const additionalLine = TestHelpers.NeverlandProfileItemsSeller.ItemPurchased.createMockEvent({
+    buyer: BUYER,
+    recipient: BUYER,
+    itemSlugHash: PERMANENT_HASH,
+    purchaseId: 8n,
+    itemSlug: PERMANENT_SLUG,
+    category: 0n,
+    quantity: 1n,
+    unitPrice: 100n,
+    totalPrice: 100n,
+    ...eventData(301, 3010, 31),
+  });
+  mockDb = await TestHelpers.NeverlandProfileItemsSeller.ItemPurchased.processEvent({
+    event: additionalLine,
+    mockDb,
+  });
+  const multiLineStats = mockDb.entities.ProfileShopUserStats.get(statsId);
+  assert.equal(multiLineStats?.buyerPurchaseCount, 1n);
+  assert.equal(multiLineStats?.buyerLineCount, 2n);
+  assert.equal(multiLineStats?.recipientPurchaseCount, 1n);
+  assert.equal(multiLineStats?.recipientLineCount, 2n);
+
+  const beforeReplay = {
+    lines: mockDb.entities.ProfileShopPurchaseLine.getAll(),
+    purchase: mockDb.entities.ProfileShopPurchase.get(`${SELLER}:8`),
+    item: mockDb.entities.ProfileShopItem.get(`${SELLER}:${PERMANENT_HASH}`),
+    userItem: mockDb.entities.ProfileShopUserItem.get(`${SELLER}:${BUYER}:${PERMANENT_HASH}`),
+    stats: multiLineStats,
+    state: mockDb.entities.ProfileShopState.get(SELLER),
+  };
+  mockDb = await TestHelpers.NeverlandProfileItemsSeller.ItemPurchased.processEvent({
+    event: purchase,
+    mockDb,
+  });
+  assert.deepEqual(
+    {
+      lines: mockDb.entities.ProfileShopPurchaseLine.getAll(),
+      purchase: mockDb.entities.ProfileShopPurchase.get(`${SELLER}:8`),
+      item: mockDb.entities.ProfileShopItem.get(`${SELLER}:${PERMANENT_HASH}`),
+      userItem: mockDb.entities.ProfileShopUserItem.get(`${SELLER}:${BUYER}:${PERMANENT_HASH}`),
+      stats: mockDb.entities.ProfileShopUserStats.get(statsId),
+      state: mockDb.entities.ProfileShopState.get(SELLER),
+    },
+    beforeReplay
+  );
+});
+
+test('purchase before configuration seeds the event unit price', async () => {
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const purchase = TestHelpers.NeverlandProfileItemsSeller.ItemPurchased.createMockEvent({
+    buyer: BUYER,
+    recipient: RECIPIENT,
+    itemSlugHash: UNKNOWN_HASH,
+    purchaseId: 9n,
+    itemSlug: 'unconfigured-item',
+    category: 2n,
+    quantity: 2n,
+    unitPrice: 77n,
+    totalPrice: 154n,
+    ...eventData(301, 3010, 31),
+  });
+  mockDb = await TestHelpers.NeverlandProfileItemsSeller.ItemPurchased.processEvent({
+    event: purchase,
+    mockDb,
+  });
+
+  const item = mockDb.entities.ProfileShopItem.get(`${SELLER}:${UNKNOWN_HASH}`);
+  assert.equal(item?.configured, false);
+  assert.equal(item?.price, 77n);
+  assert.equal(item?.category, 'Unknown:2');
 });

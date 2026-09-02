@@ -1,3 +1,9 @@
+// Pins the operator settings (prefill off, fixture-only data dir) before any project
+// module loads. This file does not import the `v3-test-helpers` seam, so without this
+// a bare `node --test` invocation would inherit them from the repo `.env` via envio's
+// dotenv. Redundant under `pnpm run test`, which loads the same module via `--import`.
+import './test-env-preload';
+
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
@@ -449,7 +455,7 @@ test('bootstrap leaderboard seeds voting power tiers when provided', async () =>
       LeaderboardConfig: leaderboardConfig,
     } as unknown as handlerContext;
 
-    await bootstrapLeaderboardIfNeeded(context, 1767434401, 46264051n);
+    await bootstrapLeaderboardIfNeeded(context, 1767434401);
 
     const seededTier = await votingPowerTier.get(originalTierLength.toString());
     assert.ok(seededTier);
@@ -1190,6 +1196,58 @@ test('applyScheduledEpochTransitions uses startTime fallback without block numbe
   assert.equal(epoch1?.startBlock, 0n);
 });
 
+test('applyScheduledEpochTransitions projects a next Tide from an inactive row without an end', async () => {
+  const leaderboardState = createStore<LeaderboardState>();
+  const leaderboardEpoch = createStore<LeaderboardEpoch>();
+  const context = {
+    LeaderboardState: leaderboardState,
+    LeaderboardEpoch: leaderboardEpoch,
+  } as unknown as handlerContext;
+
+  leaderboardState.set({
+    id: 'current',
+    currentEpochNumber: 1n,
+    isActive: false,
+  });
+  leaderboardEpoch.set({
+    id: '1',
+    epochNumber: 1n,
+    startBlock: 1n,
+    startTime: 100,
+    endBlock: undefined,
+    endTime: undefined,
+    isActive: false,
+    duration: undefined,
+    scheduledStartTime: 100,
+    scheduledEndTime: 0,
+  });
+  leaderboardEpoch.set({
+    id: '2',
+    epochNumber: 2n,
+    startBlock: 0n,
+    startTime: 0,
+    endBlock: undefined,
+    endTime: undefined,
+    isActive: false,
+    duration: undefined,
+    scheduledStartTime: 150,
+    scheduledEndTime: 0,
+  });
+
+  const projection = await applyScheduledEpochTransitions(context, 200, 777n);
+  assert.deepEqual(
+    [
+      projection.state?.currentEpochNumber,
+      projection.state?.isActive,
+      projection.epoch?.epochNumber,
+      projection.epoch?.startTime,
+      projection.closedEpochNumbers,
+      projection.transitioned,
+    ],
+    [2n, true, 2n, 150, [], true]
+  );
+});
+
 test('applyScheduledEpochTransitions skips when scheduled end is missing', async () => {
   const leaderboardState = createStore<LeaderboardState>();
   const leaderboardEpoch = createStore<LeaderboardEpoch>();
@@ -1393,6 +1451,8 @@ test('composeCombinedMultiplierBps joins category multipliers additively, not mu
   assert.equal(composeCombinedMultiplierBps(14500n, 12000n, 13000n), 19500n);
   // All-neutral stays exactly 1x.
   assert.equal(composeCombinedMultiplierBps(10000n, 10000n, 10000n), 10000n);
+  // Legacy sub-neutral rows fail closed at the neutral 1x floor.
+  assert.equal(composeCombinedMultiplierBps(0n, 0n, 0n), 10000n);
   // A single non-neutral category passes straight through (additive == multiplicative here).
   assert.equal(composeCombinedMultiplierBps(20000n, 10000n, 10000n), 20000n);
   // The additive join still clamps at MAX_COMBINED_MULTIPLIER (10x = 100000).

@@ -12,24 +12,45 @@
  */
 
 import {
+  BalancerAutoRangePool,
+  BalancerVault,
+  NonfungiblePositionManager,
+  UniswapV2Pair,
+  UniswapV3Pool,
+} from '../../generated';
+import {
   applyCombinedMultiplierScaled,
   calculateAverageCombinedMultiplierBps,
   computeTotalPointsWithMultiplier,
   getOrCreateUser,
   getOrCreateUserEpochStats,
+  applyScheduledEpochTransitions,
   recordProtocolTransaction,
   refreshUserVotingPowerState,
   updateLifetimePoints,
 } from './shared';
 import {
   AUSD_ADDRESS,
-  BALANCER_AUTORANGE_V3_POOL_ADDRESS,
+  BALANCER_AUTORANGE_V3_FEE,
+  BALANCER_AUTORANGE_V3_POOL,
+  BALANCER_AUTORANGE_V3_TOKEN0,
+  BALANCER_AUTORANGE_V3_TOKEN1,
+  BALANCER_TO_V2_RESUME_TRANSITION,
   BALANCER_VAULT_ADDRESS,
   BASIS_POINTS,
-  LP_BALANCER_MAX_SETTLEMENTS_PER_SWAP,
+  DAYS_PER_YEAR,
+  DUST_TOKEN_ADDRESS,
+  FEE_UNITS_DENOMINATOR,
+  isPointAccrualBlacklisted,
+  LEGACY_V3_LP_FEE,
+  LEGACY_V3_LP_POOL,
+  LEGACY_V3_LP_POSITION_MANAGER,
+  LEGACY_V3_LP_START_BLOCK,
+  LEGACY_V3_LP_TOKEN0,
+  LEGACY_V3_LP_TOKEN1,
+  LEGACY_V3_TO_V2_TRANSITION,
   LP_BALANCER_AUTORANGE_CUTOVER_BLOCK,
   LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP,
-  LP_BALANCER_STALE_SETTLEMENT_SECONDS,
   LP_V2_CUTOVER_BLOCK,
   LP_V2_CUTOVER_TIMESTAMP,
   LP_V2_RESUME_CUTOVER_BLOCK,
@@ -38,48 +59,37 @@ import {
   POINTS_SCALE,
   SECONDS_PER_DAY,
   USDC_ADDRESS,
-  USDT0_ADDRESS,
+  V2_LP_FEE,
+  V2_LP_POOL,
+  V2_LP_POSITION_MANAGER,
+  V2_LP_TOKEN0,
+  V2_LP_TOKEN1,
+  V2_TICK_LOWER,
+  V2_TICK_UPPER,
+  V2_TO_BALANCER_TRANSITION,
+  VOLUME_BUCKET_SECONDS,
+  VOLUME_WINDOW_HOURS,
+  ZERO_ADDRESS,
 } from '../helpers/constants';
 import { pow10 } from '../helpers/math';
 import { getTestnetBonusBps } from '../helpers/testnetTiers';
 import { getAmountsForLiquidity } from '../helpers/uniswapV3';
-
+import { isPrefilledTimestamp, setUserEpochStats } from '../helpers/prefill';
 import {
-  BalancerAutoRangePool,
-  BalancerVault,
-  NonfungiblePositionManager,
-  UniswapV2Pair,
-  UniswapV3Pool,
-} from '../../generated';
-import type { LPPoolConfig, handlerContext } from '../../generated';
+  getLPPoolTokenDecimals as getPoolTokenDecimals,
+  isFungibleLPPoolConfig as isV2PoolConfig,
+  isStableUsdToken,
+} from './lpEntityHelpers';
+import {
+  advanceLPPoolGrowth,
+  lpPoolEpochGrowthId,
+  resetLPPositionGrowthBaseline,
+  settleLPPositionGrowthAfterPoolAdvance,
+} from './lpGrowth';
 
-const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
-const DUST_DECIMALS = 18;
-const AUSD_DECIMALS_FALLBACK = 6;
-const FEE_UNITS_DENOMINATOR = 1_000_000n;
-const VOLUME_BUCKET_SECONDS = 3600;
-const VOLUME_WINDOW_HOURS = 24;
-const DAYS_PER_YEAR = 365n;
-const LEGACY_V3_LP_POOL = normalizeAddress('0xd15965968fe8bf2babbe39b2fc5de1ab6749141f');
-const LEGACY_V3_LP_POSITION_MANAGER = normalizeAddress(
-  '0x7197e214c0b767cfb76fb734ab638e2c192f4e53'
-);
-const DUST_TOKEN_ADDRESS = normalizeAddress('0xad96c3dffcd6374294e2573a7fbba96097cc8d7c');
-const LEGACY_V3_LP_TOKEN0 = AUSD_ADDRESS;
-const LEGACY_V3_LP_TOKEN1 = DUST_TOKEN_ADDRESS;
-const LEGACY_V3_LP_FEE = 10000;
-const V2_LP_POOL = normalizeAddress('0x86dbf00485871c901c5129bd525348db96c2eb2d');
-const V2_LP_POSITION_MANAGER = V2_LP_POOL;
-const V2_LP_TOKEN0 = USDC_ADDRESS;
-const V2_LP_TOKEN1 = DUST_TOKEN_ADDRESS;
-const V2_LP_FEE = 3000;
-const V2_TICK_LOWER = -887272;
-const V2_TICK_UPPER = 887272;
-const LEGACY_V3_LP_START_BLOCK = 41231451n;
-const BALANCER_AUTORANGE_V3_POOL = normalizeAddress(BALANCER_AUTORANGE_V3_POOL_ADDRESS);
-const BALANCER_AUTORANGE_V3_TOKEN0 = USDC_ADDRESS;
-const BALANCER_AUTORANGE_V3_TOKEN1 = DUST_TOKEN_ADDRESS;
-const BALANCER_AUTORANGE_V3_FEE = 10000;
+import type { LPStaticTransitionRecord } from '../helpers/constants';
+import type { LPPoolConfig, UserLPPosition, handlerContext } from '../../generated';
+
 const WAD = 10n ** 18n;
 // Loop-invariant: a 193-bit exponentiation that was rebuilt on every price update.
 const Q192 = 2n ** 192n;
@@ -114,6 +124,28 @@ type LPPoolRegistryRecord = {
 
 type LPPoolConfigRecord = LPPoolConfig;
 
+function assertCanonicalStaticTransitionMarker(
+  marker: LPStaticTransitionRecord | undefined,
+  expected: LPStaticTransitionRecord
+): void {
+  if (!marker) return;
+  const isCanonical =
+    marker.id === expected.id &&
+    normalizeAddress(marker.outgoingPool) === expected.outgoingPool &&
+    normalizeAddress(marker.incomingPool) === expected.incomingPool &&
+    marker.blockNumber === expected.blockNumber &&
+    marker.timestamp === expected.timestamp;
+  if (isCanonical) return;
+
+  throw new Error(
+    `invalid LP static transition marker ${expected.id}: ` +
+      `expected ${expected.outgoingPool}->${expected.incomingPool} ` +
+      `at block ${expected.blockNumber} timestamp ${expected.timestamp}; ` +
+      `received ${marker.outgoingPool}->${marker.incomingPool} ` +
+      `at block ${marker.blockNumber} timestamp ${marker.timestamp}`
+  );
+}
+
 type LPPoolStatsRecord = {
   id: string;
   pool: string;
@@ -141,14 +173,6 @@ type LPPoolFeeStatsRecord = {
   lastUpdate: number;
 };
 
-type LPPoolSettlementCursorRecord = {
-  id: string;
-  pool: string;
-  cursorIndex: number;
-  lastSweepTimestamp: number;
-  lastUpdate: number;
-};
-
 type CutoverStores = {
   LPPoolConfig?: {
     get: (id: string) => Promise<LPPoolConfigRecord | undefined>;
@@ -165,6 +189,10 @@ type CutoverStores = {
   LPPoolV2State?: {
     get: (id: string) => Promise<unknown>;
     set: (value: unknown) => void;
+  };
+  LPStaticTransition?: {
+    get: (id: string) => Promise<LPStaticTransitionRecord | undefined>;
+    set: (value: LPStaticTransitionRecord) => void;
   };
 };
 
@@ -199,21 +227,8 @@ async function getSingleActiveLPPoolConfig(context: handlerContext) {
   return configs.length === 1 ? configs[0] : null;
 }
 
-function isV2PoolConfig(poolConfig: { pool: string; positionManager: string }): boolean {
-  return normalizeAddress(poolConfig.positionManager) === normalizeAddress(poolConfig.pool);
-}
-
 function isBalancerAutoRangePool(pool: string): boolean {
   return normalizeAddress(pool) === BALANCER_AUTORANGE_V3_POOL;
-}
-
-function isStableUsdToken(token: string): boolean {
-  const normalizedToken = normalizeAddress(token);
-  return (
-    normalizedToken === AUSD_ADDRESS ||
-    normalizedToken === USDC_ADDRESS ||
-    normalizedToken === USDT0_ADDRESS
-  );
 }
 
 function isPastLpV2Cutover(timestamp: number, blockNumber?: bigint): boolean {
@@ -235,6 +250,110 @@ function isPastLpV2ResumeCutover(timestamp: number, blockNumber?: bigint): boole
     return blockNumber >= BigInt(LP_V2_RESUME_CUTOVER_BLOCK);
   }
   return timestamp >= LP_V2_RESUME_CUTOVER_TIMESTAMP;
+}
+
+export type StaticLPPoolEraState = {
+  isActive: boolean;
+  enabledAtTimestamp: number;
+  disabledAtTimestamp?: number;
+};
+
+/** Canonical event-time ownership for pools whose points eras are static. */
+export function getStaticLPPoolEraState(
+  pool: string,
+  timestamp: number,
+  blockNumber?: bigint
+): StaticLPPoolEraState | undefined {
+  const poolId = normalizeAddress(pool);
+  if (poolId === LEGACY_V3_LP_POOL) {
+    if (blockNumber !== undefined && blockNumber < LEGACY_V3_LP_START_BLOCK) {
+      return;
+    }
+    return isPastLpV2Cutover(timestamp, blockNumber)
+      ? {
+          isActive: false,
+          enabledAtTimestamp: timestamp,
+          disabledAtTimestamp: LP_V2_CUTOVER_TIMESTAMP,
+        }
+      : {
+          isActive: true,
+          enabledAtTimestamp: timestamp,
+        };
+  }
+  if (poolId === BALANCER_AUTORANGE_V3_POOL) {
+    if (!isPastBalancerAutoRangeCutover(timestamp, blockNumber)) {
+      return {
+        isActive: false,
+        enabledAtTimestamp: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP,
+      };
+    }
+    if (isPastLpV2ResumeCutover(timestamp, blockNumber)) {
+      return {
+        isActive: false,
+        enabledAtTimestamp: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP,
+        disabledAtTimestamp: LP_V2_RESUME_CUTOVER_TIMESTAMP,
+      };
+    }
+    return {
+      isActive: true,
+      enabledAtTimestamp: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP,
+    };
+  }
+  if (poolId !== V2_LP_POOL) return;
+  if (!isPastLpV2Cutover(timestamp, blockNumber)) {
+    return {
+      isActive: false,
+      enabledAtTimestamp: LP_V2_CUTOVER_TIMESTAMP,
+    };
+  }
+  if (isPastLpV2ResumeCutover(timestamp, blockNumber)) {
+    return {
+      isActive: true,
+      enabledAtTimestamp: LP_V2_RESUME_CUTOVER_TIMESTAMP,
+    };
+  }
+  if (isPastBalancerAutoRangeCutover(timestamp, blockNumber)) {
+    return {
+      isActive: false,
+      enabledAtTimestamp: LP_V2_CUTOVER_TIMESTAMP,
+      disabledAtTimestamp: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP,
+    };
+  }
+  return {
+    isActive: true,
+    enabledAtTimestamp: LP_V2_CUTOVER_TIMESTAMP,
+  };
+}
+
+/** Preload reads needed when same-event static bootstrap writes are intentionally no-op. */
+export async function preloadStaticLPPoolFreezeProjection(
+  context: handlerContext,
+  epochNumbers: readonly bigint[]
+): Promise<void> {
+  const staticPools = [LEGACY_V3_LP_POOL, V2_LP_POOL, BALANCER_AUTORANGE_V3_POOL];
+  const staticTokens = [AUSD_ADDRESS, USDC_ADDRESS, DUST_TOKEN_ADDRESS];
+  const uniqueEpochNumbers = [...new Set(epochNumbers)];
+  // advanceLPPoolGrowthForEpoch reads LPPoolState for fungible pools too, so these
+  // reads must stay in the preload set or the preload and ordered read-sets diverge.
+  await Promise.all(staticPools.map(pool => context.LPPoolState.get(pool)));
+
+  // A single event can apply several static boundaries before its final Tide
+  // projection. Envio preload discards the config/registry writes between
+  // those boundaries, so final-event era ownership cannot identify which
+  // static pool ordered processing freezes for an earlier Tide. Preload the
+  // complete constant-size static dependency set for each projected close:
+  // three pools and at most five Tides.
+  await Promise.all([
+    ...uniqueEpochNumbers.map(epochNumber => context.LeaderboardEpoch.get(epochNumber.toString())),
+    ...staticTokens.map(token => context.TokenInfo.get(token)),
+    ...staticPools.flatMap(pool => [
+      context.LPPoolConfig.get(pool),
+      context.LPPoolV2State.get(pool),
+      ...uniqueEpochNumbers.map(epochNumber =>
+        context.LPPoolEpochGrowth.get(lpPoolEpochGrowthId(pool, epochNumber))
+      ),
+    ]),
+  ]);
 }
 
 // The accrual window for a pool is derived from its OWN persisted LPPoolConfig
@@ -271,16 +390,6 @@ function isV2PoolTrackingOnly(pool: string, timestamp: number, blockNumber?: big
 // LP points bounce back to V2.
 function isBalancerPoolHardStopped(timestamp: number, blockNumber?: bigint): boolean {
   return isPastLpV2ResumeCutover(timestamp, blockNumber);
-}
-
-async function isBalancerResumeTransitionComplete(
-  context: handlerContext,
-  timestamp: number,
-  blockNumber?: bigint
-): Promise<boolean> {
-  if (!isBalancerPoolHardStopped(timestamp, blockNumber)) return false;
-  const config = await context.LPPoolConfig.get(BALANCER_AUTORANGE_V3_POOL);
-  return config?.isActive === false;
 }
 
 // Balancer AutoRange is the active LP points pool only between the Balancer
@@ -377,7 +486,11 @@ async function getOrCreateLPPoolV2State(context: handlerContext, pool: string, t
   return state;
 }
 
-async function ensureLegacyV3PoolConfigEntity(context: handlerContext, timestamp: number) {
+async function ensureLegacyV3PoolConfigEntity(
+  context: handlerContext,
+  timestamp: number,
+  isActive = true
+) {
   let config = await context.LPPoolConfig.get(LEGACY_V3_LP_POOL);
   if (config) return config;
 
@@ -394,11 +507,11 @@ async function ensureLegacyV3PoolConfigEntity(context: handlerContext, timestamp
     token1: LEGACY_V3_LP_TOKEN1,
     fee: LEGACY_V3_LP_FEE,
     lpRateBps,
-    isActive: true,
+    isActive,
     enabledAtEpoch: currentEpoch,
     enabledAtTimestamp: timestamp,
-    disabledAtEpoch: undefined,
-    disabledAtTimestamp: undefined,
+    disabledAtEpoch: isActive ? undefined : currentEpoch,
+    disabledAtTimestamp: isActive ? undefined : LP_V2_CUTOVER_TIMESTAMP,
     lastUpdate: timestamp,
   };
   context.LPPoolConfig.set(config);
@@ -444,7 +557,8 @@ function lpPoolConfigChanged(
 async function ensureV2PoolConfigEntity(
   context: handlerContext,
   timestamp: number,
-  isActive: boolean
+  isActive: boolean,
+  enabledAtTimestamp?: number
 ) {
   const leaderboardState = await context.LeaderboardState.get('current');
   const currentEpoch = leaderboardState?.currentEpochNumber ?? 1n;
@@ -461,8 +575,14 @@ async function ensureV2PoolConfigEntity(
     fee: V2_LP_FEE,
     lpRateBps: existing?.lpRateBps ?? lpRateBps,
     isActive,
-    enabledAtEpoch: existing?.enabledAtEpoch ?? currentEpoch,
-    enabledAtTimestamp: existing?.enabledAtTimestamp ?? LP_V2_CUTOVER_TIMESTAMP,
+    enabledAtEpoch:
+      isActive && enabledAtTimestamp !== undefined
+        ? currentEpoch
+        : (existing?.enabledAtEpoch ?? currentEpoch),
+    enabledAtTimestamp:
+      isActive && enabledAtTimestamp !== undefined
+        ? enabledAtTimestamp
+        : (existing?.enabledAtTimestamp ?? LP_V2_CUTOVER_TIMESTAMP),
     disabledAtEpoch: isActive ? undefined : (existing?.disabledAtEpoch ?? currentEpoch),
     disabledAtTimestamp: isActive
       ? undefined
@@ -489,7 +609,8 @@ async function ensureV2PoolConfigEntity(
 async function ensureBalancerAutoRangePoolConfigEntity(
   context: handlerContext,
   timestamp: number,
-  isActive: boolean
+  isActive: boolean,
+  enabledAtTimestamp?: number
 ) {
   const leaderboardState = await context.LeaderboardState.get('current');
   const currentEpoch = leaderboardState?.currentEpochNumber ?? 1n;
@@ -506,8 +627,14 @@ async function ensureBalancerAutoRangePoolConfigEntity(
     fee: BALANCER_AUTORANGE_V3_FEE,
     lpRateBps: existing?.lpRateBps ?? lpRateBps,
     isActive,
-    enabledAtEpoch: existing?.enabledAtEpoch ?? currentEpoch,
-    enabledAtTimestamp: existing?.enabledAtTimestamp ?? LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP,
+    enabledAtEpoch:
+      isActive && enabledAtTimestamp !== undefined
+        ? currentEpoch
+        : (existing?.enabledAtEpoch ?? currentEpoch),
+    enabledAtTimestamp:
+      isActive && enabledAtTimestamp !== undefined
+        ? enabledAtTimestamp
+        : (existing?.enabledAtTimestamp ?? LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP),
     disabledAtEpoch: isActive ? undefined : existing?.disabledAtEpoch,
     disabledAtTimestamp: isActive ? undefined : existing?.disabledAtTimestamp,
     lastUpdate: timestamp,
@@ -529,6 +656,108 @@ async function ensureBalancerAutoRangePoolConfigEntity(
   return stored;
 }
 
+async function disableStaticLPPoolAt(
+  context: handlerContext,
+  config: LPPoolConfigRecord,
+  disabledAtTimestamp: number,
+  timestamp: number
+): Promise<LPPoolConfigRecord> {
+  if (!config.isActive) return config;
+  const leaderboardState = await context.LeaderboardState.get('current');
+  const next = {
+    ...config,
+    isActive: false,
+    disabledAtEpoch: leaderboardState?.currentEpochNumber ?? 1n,
+    disabledAtTimestamp,
+    lastUpdate: timestamp,
+  };
+  if (!lpPoolConfigChanged(config, next)) return config;
+  context.LPPoolConfig.set(next);
+  return next;
+}
+
+function prepareExactBoundaryOutgoingPool(
+  context: handlerContext,
+  config: LPPoolConfigRecord,
+  boundaryTimestamp: number,
+  timestamp: number
+): LPPoolConfigRecord {
+  if (config.isActive || config.disabledAtTimestamp !== boundaryTimestamp) {
+    return config;
+  }
+  const active = {
+    ...config,
+    isActive: true,
+    disabledAtEpoch: undefined,
+    disabledAtTimestamp: undefined,
+    lastUpdate: timestamp,
+  };
+  context.LPPoolConfig.set(active);
+  return active;
+}
+
+async function getCurrentLPPoolGrowth(context: handlerContext, pool: string) {
+  const state = await context.LeaderboardState.get('current');
+  if (!state?.isActive || state.currentEpochNumber === 0n) return;
+  return await context.LPPoolEpochGrowth.get(lpPoolEpochGrowthId(pool, state.currentEpochNumber));
+}
+
+async function assertFirstActivationGrowthIsEmpty(
+  context: handlerContext,
+  pool: string
+): Promise<void> {
+  const growth = await getCurrentLPPoolGrowth(context, pool);
+  if (!growth) return;
+  if (growth.scalarGrowthX128 !== 0n) {
+    throw new Error(
+      `cannot activate LP pool with nonzero pre-era LP growth: pool=${normalizeAddress(pool)} scalar=${growth.scalarGrowthX128.toString()}`
+    );
+  }
+}
+
+async function hideIncomingPoolBeforeBoundary(
+  context: handlerContext,
+  config: LPPoolConfigRecord | undefined,
+  boundaryTimestamp: number
+): Promise<LPPoolConfigRecord | undefined> {
+  if (!config?.isActive) return config;
+  const inactive = {
+    ...config,
+    isActive: false,
+    enabledAtTimestamp: boundaryTimestamp,
+    disabledAtEpoch: undefined,
+    disabledAtTimestamp: undefined,
+    lastUpdate: boundaryTimestamp,
+  };
+  context.LPPoolConfig.set(inactive);
+  return inactive;
+}
+
+async function rebaseEmptyGrowthForFirstActivation(
+  context: handlerContext,
+  pool: string,
+  boundaryTimestamp: number
+): Promise<void> {
+  const state = await context.LeaderboardState.get('current');
+  if (!state?.isActive || state.currentEpochNumber === 0n) return;
+  const growth = await context.LPPoolEpochGrowth.get(
+    lpPoolEpochGrowthId(pool, state.currentEpochNumber)
+  );
+  if (!growth) return;
+  await assertFirstActivationGrowthIsEmpty(context, pool);
+  const epoch = await context.LeaderboardEpoch.get(state.currentEpochNumber.toString());
+  const effectiveStart = Math.max(epoch?.startTime ?? boundaryTimestamp, boundaryTimestamp);
+  context.LPPoolEpochGrowth.set({
+    ...growth,
+    startTimestamp: effectiveStart,
+    lastTimestamp: effectiveStart,
+    scalarGrowthX128: 0n,
+    isFrozen: false,
+    frozenAt: undefined,
+    lastUpdate: effectiveStart,
+  });
+}
+
 export async function applyStaticLPPoolCutover(
   context: handlerContext,
   timestamp: number,
@@ -548,6 +777,15 @@ export async function applyStaticLPPoolCutover(
     return;
   }
 
+  const legacyV3ToV2Marker = await stores.LPStaticTransition?.get(LEGACY_V3_TO_V2_TRANSITION.id);
+  assertCanonicalStaticTransitionMarker(legacyV3ToV2Marker, LEGACY_V3_TO_V2_TRANSITION);
+  const v2ToBalancerMarker = await stores.LPStaticTransition?.get(V2_TO_BALANCER_TRANSITION.id);
+  assertCanonicalStaticTransitionMarker(v2ToBalancerMarker, V2_TO_BALANCER_TRANSITION);
+  const balancerToV2ResumeMarker = await stores.LPStaticTransition?.get(
+    BALANCER_TO_V2_RESUME_TRANSITION.id
+  );
+  assertCanonicalStaticTransitionMarker(balancerToV2ResumeMarker, BALANCER_TO_V2_RESUME_TRANSITION);
+
   const registry = await stores.LPPoolRegistry.get('global');
   const trackedPoolIds = registry?.poolIds ?? [];
   const hasTrackedPools = trackedPoolIds.length > 0;
@@ -556,8 +794,8 @@ export async function applyStaticLPPoolCutover(
     trackedPoolIds.includes(V2_LP_POOL) ||
     trackedPoolIds.includes(BALANCER_AUTORANGE_V3_POOL);
   const legacyConfig = await stores.LPPoolConfig.get(LEGACY_V3_LP_POOL);
-  const v2Config = await stores.LPPoolConfig.get(V2_LP_POOL);
-  const balancerConfig = await stores.LPPoolConfig.get(BALANCER_AUTORANGE_V3_POOL);
+  let v2Config = await stores.LPPoolConfig.get(V2_LP_POOL);
+  let balancerConfig = await stores.LPPoolConfig.get(BALANCER_AUTORANGE_V3_POOL);
   const shouldBootstrapStaticPools =
     blockNumber !== undefined ||
     !hasTrackedPools ||
@@ -569,119 +807,187 @@ export async function applyStaticLPPoolCutover(
   if (!shouldBootstrapStaticPools) {
     return;
   }
-  const ensuredLegacyConfig = await ensureLegacyV3PoolConfigEntity(context, timestamp);
+
+  // Existing databases predate explicit transition rows. Backfill a missing
+  // marker only from exact evidence on both sides of that boundary. Current
+  // activity and later admin-disable timestamps are deliberately irrelevant:
+  // they are mutable live policy, not historical completion proof.
+  const v2ResumeTransitionConfigEvidence =
+    balancerConfig?.enabledAtTimestamp === LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP &&
+    balancerConfig.disabledAtTimestamp === LP_V2_RESUME_CUTOVER_TIMESTAMP &&
+    v2Config?.enabledAtTimestamp === LP_V2_RESUME_CUTOVER_TIMESTAMP;
+  const balancerTransitionConfigEvidence =
+    balancerConfig?.enabledAtTimestamp === LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP &&
+    ((v2Config?.enabledAtTimestamp === LP_V2_CUTOVER_TIMESTAMP &&
+      v2Config.disabledAtTimestamp === LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP) ||
+      v2ResumeTransitionConfigEvidence);
+  const v2TransitionConfigEvidence =
+    (legacyConfig?.disabledAtTimestamp === LP_V2_CUTOVER_TIMESTAMP &&
+      (v2Config?.enabledAtTimestamp === LP_V2_CUTOVER_TIMESTAMP ||
+        balancerTransitionConfigEvidence ||
+        v2ResumeTransitionConfigEvidence)) ||
+    // A missing legacy row plus a complete later two-sided boundary is safe
+    // migration evidence: later chronology cannot exist before first entry.
+    // A present active/unclosed legacy row remains contradictory and forces
+    // the first transition to run rather than trusting the later state.
+    (legacyConfig === undefined &&
+      (balancerTransitionConfigEvidence || v2ResumeTransitionConfigEvidence));
+  const v2TransitionComplete = legacyV3ToV2Marker !== undefined || v2TransitionConfigEvidence;
+  const balancerTransitionComplete =
+    v2TransitionComplete && (v2ToBalancerMarker !== undefined || balancerTransitionConfigEvidence);
+  const v2ResumeTransitionComplete =
+    balancerTransitionComplete &&
+    (balancerToV2ResumeMarker !== undefined || v2ResumeTransitionConfigEvidence);
+  if (!legacyV3ToV2Marker && v2TransitionConfigEvidence) {
+    stores.LPStaticTransition?.set({ ...LEGACY_V3_TO_V2_TRANSITION });
+  }
+  if (!v2ToBalancerMarker && balancerTransitionComplete && balancerTransitionConfigEvidence) {
+    stores.LPStaticTransition?.set({ ...V2_TO_BALANCER_TRANSITION });
+  }
+  if (!balancerToV2ResumeMarker && v2ResumeTransitionComplete && v2ResumeTransitionConfigEvidence) {
+    stores.LPStaticTransition?.set({ ...BALANCER_TO_V2_RESUME_TRANSITION });
+  }
   const hasPassedV2Cutover = isPastLpV2Cutover(timestamp, blockNumber);
   const hasPassedBalancerCutover = isPastBalancerAutoRangeCutover(timestamp, blockNumber);
   const hasPassedV2ResumeCutover = isPastLpV2ResumeCutover(timestamp, blockNumber);
+  if (!hasPassedV2Cutover && v2Config?.isActive) {
+    await assertFirstActivationGrowthIsEmpty(context, V2_LP_POOL);
+    v2Config = await hideIncomingPoolBeforeBoundary(context, v2Config, LP_V2_CUTOVER_TIMESTAMP);
+  }
+  if (!hasPassedBalancerCutover && balancerConfig?.isActive) {
+    await assertFirstActivationGrowthIsEmpty(context, BALANCER_AUTORANGE_V3_POOL);
+    balancerConfig = await hideIncomingPoolBeforeBoundary(
+      context,
+      balancerConfig,
+      LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP
+    );
+  }
+  if (hasPassedV2Cutover && !v2TransitionComplete) {
+    await assertFirstActivationGrowthIsEmpty(context, V2_LP_POOL);
+  }
+  if (hasPassedBalancerCutover && !balancerTransitionComplete) {
+    await assertFirstActivationGrowthIsEmpty(context, BALANCER_AUTORANGE_V3_POOL);
+  }
+  let ensuredLegacyConfig = await ensureLegacyV3PoolConfigEntity(
+    context,
+    timestamp,
+    !v2TransitionComplete
+  );
   if (!hasPassedV2Cutover) {
-    if (!ensuredLegacyConfig.isActive) {
-      context.LPPoolConfig.set({
-        ...ensuredLegacyConfig,
-        isActive: true,
-        disabledAtEpoch: undefined,
-        disabledAtTimestamp: undefined,
-        lastUpdate: timestamp,
-      });
-    }
     return;
   }
 
-  // V2 is active in its original era (pre-Balancer) and again once resumed;
-  // it's only inactive while Balancer AutoRange is the active pool.
-  const v2ShouldBeActive =
-    !hasPassedBalancerCutover || hasPassedV2ResumeCutover || v2Config?.isActive !== false;
-  const ensuredV2Config = await ensureV2PoolConfigEntity(context, timestamp, v2ShouldBeActive);
-
-  // On reactivation, bump enabledAtTimestamp to the resume boundary. Positions
-  // left over from the pre-Balancer era keep whatever stale lastInRangeTimestamp
-  // they were frozen at when V2 was disabled; settleLPPosition floors accrual at
-  // Math.max(..., poolConfig.enabledAtTimestamp), so without this bump those
-  // positions would silently accrue phantom points for the entire paused window.
-  if (hasPassedV2ResumeCutover && v2Config?.isActive === false && ensuredV2Config.isActive) {
-    const leaderboardState = await context.LeaderboardState.get('current');
-    const currentEpoch = leaderboardState?.currentEpochNumber ?? 1n;
-    context.LPPoolConfig.set({
-      ...ensuredV2Config,
-      enabledAtEpoch: currentEpoch,
-      enabledAtTimestamp: LP_V2_RESUME_CUTOVER_TIMESTAMP,
-      disabledAtEpoch: undefined,
-      disabledAtTimestamp: undefined,
-      lastUpdate: timestamp,
-    });
-  }
-
-  if (ensuredLegacyConfig.isActive) {
+  // Every historical transition is applied at its own boundary. Tide changes
+  // run first so epoch freeze sees only the outgoing era; the incoming pool is
+  // activated only after outgoing growth has been advanced and disabled.
+  if (!v2TransitionComplete) {
+    ensuredLegacyConfig = prepareExactBoundaryOutgoingPool(
+      context,
+      ensuredLegacyConfig,
+      LP_V2_CUTOVER_TIMESTAMP,
+      timestamp
+    );
+    v2Config = await hideIncomingPoolBeforeBoundary(context, v2Config, LP_V2_CUTOVER_TIMESTAMP);
+    await applyScheduledEpochTransitions(
+      context,
+      LP_V2_CUTOVER_TIMESTAMP,
+      BigInt(LP_V2_CUTOVER_BLOCK)
+    );
     await settleLPPoolPositions(context, LEGACY_V3_LP_POOL, LP_V2_CUTOVER_TIMESTAMP);
-    const leaderboardState = await context.LeaderboardState.get('current');
-    const currentEpoch = leaderboardState?.currentEpochNumber ?? 1n;
-    context.LPPoolConfig.set({
-      ...ensuredLegacyConfig,
-      isActive: false,
-      disabledAtEpoch: currentEpoch,
-      disabledAtTimestamp: LP_V2_CUTOVER_TIMESTAMP,
-      lastUpdate: timestamp,
-    });
+    await disableStaticLPPoolAt(context, ensuredLegacyConfig, LP_V2_CUTOVER_TIMESTAMP, timestamp);
+    await rebaseEmptyGrowthForFirstActivation(context, V2_LP_POOL, LP_V2_CUTOVER_TIMESTAMP);
+    v2Config = await ensureV2PoolConfigEntity(context, timestamp, true, LP_V2_CUTOVER_TIMESTAMP);
+    stores.LPStaticTransition?.set({ ...LEGACY_V3_TO_V2_TRANSITION });
   }
 
   if (!hasPassedBalancerCutover) {
     return;
   }
 
-  // V2 -> Balancer transition: settle and disable V2 exactly once. `v2ShouldBeActive`
-  // stays true on the first post-cutover call (bridged from the pre-transition state
-  // via the OR above), so this fires precisely then; it must NOT fire again once V2
-  // has resumed (era D), where `ensuredV2Config.isActive` is also true but for good.
-  if (ensuredV2Config.isActive && !hasPassedV2ResumeCutover) {
-    await settleLPPoolPositions(context, V2_LP_POOL, LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP);
-    const leaderboardState = await context.LeaderboardState.get('current');
-    const currentEpoch = leaderboardState?.currentEpochNumber ?? 1n;
-    context.LPPoolConfig.set({
-      ...ensuredV2Config,
-      isActive: false,
-      disabledAtEpoch: currentEpoch,
-      disabledAtTimestamp: LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP,
-      lastUpdate: timestamp,
-    });
+  if (!balancerTransitionComplete) {
+    if (v2Config) {
+      v2Config = prepareExactBoundaryOutgoingPool(
+        context,
+        v2Config,
+        LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP,
+        timestamp
+      );
+    }
+    balancerConfig = await hideIncomingPoolBeforeBoundary(
+      context,
+      balancerConfig,
+      LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP
+    );
+    await applyScheduledEpochTransitions(
+      context,
+      LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP,
+      BigInt(LP_BALANCER_AUTORANGE_CUTOVER_BLOCK)
+    );
+    await advanceLPPoolGrowth(context, V2_LP_POOL, LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP);
+    if (v2Config) {
+      v2Config = await disableStaticLPPoolAt(
+        context,
+        v2Config,
+        LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP,
+        timestamp
+      );
+    }
+    await rebaseEmptyGrowthForFirstActivation(
+      context,
+      BALANCER_AUTORANGE_V3_POOL,
+      LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP
+    );
+    balancerConfig = await ensureBalancerAutoRangePoolConfigEntity(
+      context,
+      timestamp,
+      true,
+      LP_BALANCER_AUTORANGE_CUTOVER_TIMESTAMP
+    );
+    stores.LPStaticTransition?.set({ ...V2_TO_BALANCER_TRANSITION });
   }
-
-  // Balancer is active only between the Balancer cutover and the resume cutover.
-  // On the transition call this stays bridged to true (old persisted state) so
-  // the settle-on-disable below still sees an active pool; subsequent era-D
-  // calls see the persisted false and stay stable, same pattern as V2 above.
-  const balancerShouldBeActive = !hasPassedV2ResumeCutover || balancerConfig?.isActive !== false;
-  const ensuredBalancerConfig = await ensureBalancerAutoRangePoolConfigEntity(
-    context,
-    timestamp,
-    balancerShouldBeActive
-  );
 
   if (!hasPassedV2ResumeCutover) {
     return;
   }
 
-  // Balancer -> V2 (resume) transition: settle and disable Balancer exactly once,
-  // the moment it flips from active to inactive.
-  if (ensuredBalancerConfig.isActive) {
-    await settleLPPoolPositions(
+  if (!v2ResumeTransitionComplete) {
+    if (balancerConfig) {
+      balancerConfig = prepareExactBoundaryOutgoingPool(
+        context,
+        balancerConfig,
+        LP_V2_RESUME_CUTOVER_TIMESTAMP,
+        timestamp
+      );
+    }
+    await applyScheduledEpochTransitions(
       context,
-      BALANCER_AUTORANGE_V3_POOL,
-      LP_V2_RESUME_CUTOVER_TIMESTAMP
+      LP_V2_RESUME_CUTOVER_TIMESTAMP,
+      BigInt(LP_V2_RESUME_CUTOVER_BLOCK)
     );
-    const leaderboardState = await context.LeaderboardState.get('current');
-    const currentEpoch = leaderboardState?.currentEpochNumber ?? 1n;
-    context.LPPoolConfig.set({
-      ...ensuredBalancerConfig,
-      isActive: false,
-      disabledAtEpoch: currentEpoch,
-      disabledAtTimestamp: LP_V2_RESUME_CUTOVER_TIMESTAMP,
-      lastUpdate: timestamp,
-    });
+    await advanceLPPoolGrowth(context, BALANCER_AUTORANGE_V3_POOL, LP_V2_RESUME_CUTOVER_TIMESTAMP);
+    if (balancerConfig) {
+      balancerConfig = await disableStaticLPPoolAt(
+        context,
+        balancerConfig,
+        LP_V2_RESUME_CUTOVER_TIMESTAMP,
+        timestamp
+      );
+    }
+    await ensureV2PoolConfigEntity(context, timestamp, true, LP_V2_RESUME_CUTOVER_TIMESTAMP);
+    stores.LPStaticTransition?.set({ ...BALANCER_TO_V2_RESUME_TRANSITION });
   }
 }
 
 async function ensureHardcodedPoolConfig(context: handlerContext, timestamp: number) {
   const config = await ensureLegacyV3PoolConfigEntity(context, timestamp);
   return config.isActive ? config : null;
+}
+
+async function getKnownLPPoolConfig(context: handlerContext, pool: string, timestamp: number) {
+  const poolId = normalizeAddress(pool);
+  const config = await context.LPPoolConfig.get(poolId);
+  if (config) return config;
+  return poolId === LEGACY_V3_LP_POOL ? await ensureHardcodedPoolConfig(context, timestamp) : null;
 }
 
 async function getEffectiveLPPoolConfig(context: handlerContext, pool: string) {
@@ -768,6 +1074,19 @@ function buildTxMintKey(txHash: string, amount0: bigint, amount1: bigint, liquid
   return `tx:${txHash}:${amount0.toString()}:${amount1.toString()}:${liquidity.toString()}`;
 }
 
+function buildPoolMintKey(input: {
+  pool: string;
+  tickLower: number;
+  tickUpper: number;
+  txHash: string;
+}) {
+  return `${normalizeAddress(input.pool)}:${input.tickLower}:${input.tickUpper}:${input.txHash}`;
+}
+
+function buildPendingMintOwnerId(positionManager: string, tokenId: bigint) {
+  return `${normalizeAddress(positionManager)}:${tokenId.toString()}`;
+}
+
 async function getOrCreateLPPoolState(context: handlerContext, pool: string, timestamp: number) {
   const id = normalizeAddress(pool);
   let state = await context.LPPoolState.get(id);
@@ -786,6 +1105,18 @@ async function getOrCreateLPPoolState(context: handlerContext, pool: string, tim
     context.LPPoolState.set(state);
   }
   return state;
+}
+
+async function hasObservedFungiblePoolState(
+  context: handlerContext,
+  pool: string
+): Promise<boolean> {
+  const poolId = normalizeAddress(pool);
+  const [poolState, poolV2State] = await Promise.all([
+    context.LPPoolState.get(poolId),
+    context.LPPoolV2State.get(poolId),
+  ]);
+  return poolState !== undefined && poolV2State !== undefined;
 }
 
 function setPoolStats(
@@ -1078,49 +1409,6 @@ function isPositionInRange(tickLower: number, tickUpper: number, currentTick: nu
   return tickLower <= currentTick && currentTick < tickUpper;
 }
 
-async function getTokenDecimals(
-  context: handlerContext,
-  tokenAddress: string,
-  fallbackDecimals: number,
-  timestamp?: number
-): Promise<number> {
-  void timestamp;
-  const tokenId = normalizeAddress(tokenAddress);
-  const tokenInfo = await context.TokenInfo.get(tokenId);
-  if (tokenInfo?.decimals !== undefined && tokenInfo.decimals > 0) {
-    return tokenInfo.decimals;
-  }
-
-  return tokenInfo?.decimals ?? fallbackDecimals;
-}
-
-async function getPoolTokenDecimals(
-  context: handlerContext,
-  poolConfig: { token0: string; token1: string },
-  timestamp?: number
-): Promise<{ token0Decimals: number; token1Decimals: number }> {
-  const token0Fallback = isStableUsdToken(poolConfig.token0)
-    ? AUSD_DECIMALS_FALLBACK
-    : DUST_DECIMALS;
-  const token1Fallback = isStableUsdToken(poolConfig.token1)
-    ? AUSD_DECIMALS_FALLBACK
-    : DUST_DECIMALS;
-  const token0Decimals = await getTokenDecimals(
-    context,
-    poolConfig.token0,
-    token0Fallback,
-    timestamp
-  );
-  const token1Decimals = await getTokenDecimals(
-    context,
-    poolConfig.token1,
-    token1Fallback,
-    timestamp
-  );
-
-  return { token0Decimals, token1Decimals };
-}
-
 async function getOrCreateUserLPPositionIndex(
   context: handlerContext,
   userId: string,
@@ -1264,7 +1552,8 @@ async function listUserLPPositions(context: handlerContext, userId: string) {
 
   const index = await indexStore.get(normalizedUserId);
   if (!index || index.positionIds.length === 0) return [];
-  const positions = await Promise.all(index.positionIds.map(id => positionStore.get(id)));
+  const positionIds = [...new Set(index.positionIds)];
+  const positions = await Promise.all(positionIds.map(id => positionStore.get(id)));
   return positions.filter(
     (position): position is Exclude<typeof position, undefined> => position !== undefined
   );
@@ -1629,6 +1918,222 @@ async function applyBalancerAutoRangeSwapDelta(
  * Settle LP points for a position based on accumulated in-range time
  * Called before any position state change to capture earned points
  */
+// Restored from the pre-lazy-growth implementation. Uniswap V3 is historical-only (the pool
+// was disabled in Tide 2) and every Tide it touched is prefilled, so the lazy Fenwick path
+// bought nothing in production while carrying the most complex code in the indexer - and it
+// measurably drifted from production on Tides 1-2. Concentrated-liquidity pools therefore go
+// back to per-swap position revaluation, which is what production itself does. Fungible pools
+// (Uniswap V2, Balancer) keep the lazy scalar growth: proven exact and still the live path.
+/**
+ * Settles every position in a concentrated-range pool against the wall clock and
+ * republishes the pool's aggregate stats.
+ *
+ * This is a clock advance, not a range re-evaluation: `isInRange` is deliberately
+ * preserved, and `lastInRangeTimestamp` is only re-armed for positions already in
+ * range. Range flips are the Swap handler's job (updatePositionsInRangeStatus).
+ *
+ * Fungible pools return immediately -- Uniswap V2 and Balancer keep the lazy scalar
+ * growth clock, which advanceLPPoolGrowth settles in O(1) without walking the index.
+ */
+async function settleLPPoolPositions(
+  context: handlerContext,
+  pool: string,
+  timestamp: number
+): Promise<void> {
+  const poolConfig = await getEffectiveLPPoolConfig(context, pool);
+  if (!poolConfig) return;
+  if (isV2PoolConfig(poolConfig)) return;
+
+  const positions = await listPoolLPPositions(context, pool);
+  if (positions.length === 0) {
+    setPoolStats(context, normalizeAddress(pool), 0, 0, 0n, 0n, timestamp);
+    return;
+  }
+
+  const poolState = await getOrCreateLPPoolState(context, pool, timestamp);
+  const { token0Decimals, token1Decimals } = await getPoolTokenDecimals(
+    context,
+    poolConfig,
+    timestamp
+  );
+  const touchedUsers = new Set<string>();
+  let totalPositions = 0;
+  let inRangePositions = 0;
+  let totalValueUsd = 0n;
+  let inRangeValueUsd = 0n;
+
+  for (const position of positions) {
+    if (position.liquidity === 0n && position.amount0 === 0n && position.amount1 === 0n) continue;
+
+    const settlement = await settleLPPosition(context, position, timestamp);
+    const derivedAmounts = derivePositionAmounts(
+      position.liquidity,
+      position.tickLower,
+      position.tickUpper,
+      poolState.sqrtPriceX96,
+      position.amount0,
+      position.amount1
+    );
+    const valueUsd = calculatePositionValueUsd(
+      derivedAmounts.amount0,
+      derivedAmounts.amount1,
+      poolState.token0Price,
+      poolState.token1Price,
+      token0Decimals,
+      token1Decimals
+    );
+
+    context.UserLPPosition.set({
+      ...position,
+      amount0: derivedAmounts.amount0,
+      amount1: derivedAmounts.amount1,
+      valueUsd,
+      lastInRangeTimestamp: position.isInRange ? timestamp : 0,
+      accumulatedInRangeSeconds: settlement.newAccumulatedSeconds,
+      lastSettledAt: settlement.settledAt,
+      settledLpPoints: settlement.newSettledPoints,
+      lastUpdate: timestamp,
+    });
+
+    await updateUserEpochLPPoints(
+      context,
+      position.user_id,
+      settlement.pointsEarned,
+      timestamp,
+      settlement.pointsStartTimestamp,
+      settlement.pointsEndTimestamp
+    );
+    touchedUsers.add(position.user_id);
+
+    totalPositions += 1;
+    totalValueUsd += valueUsd;
+    if (position.isInRange) {
+      inRangePositions += 1;
+      inRangeValueUsd += valueUsd;
+    }
+  }
+
+  setPoolStats(
+    context,
+    normalizeAddress(pool),
+    totalPositions,
+    inRangePositions,
+    totalValueUsd,
+    inRangeValueUsd,
+    timestamp
+  );
+
+  for (const userId of touchedUsers) {
+    await updateUserLPStats(context, userId, timestamp);
+  }
+}
+
+async function updatePositionsInRangeStatus(
+  context: handlerContext,
+  pool: string,
+  currentTick: number,
+  timestamp: number,
+  token0Price: bigint,
+  token1Price: bigint,
+  sqrtPriceX96: bigint
+) {
+  const poolConfig = await getEffectiveLPPoolConfig(context, pool);
+  if (!poolConfig) return;
+
+  const positions = await listPoolLPPositions(context, pool);
+  if (positions.length === 0) {
+    setPoolStats(context, normalizeAddress(pool), 0, 0, 0n, 0n, timestamp);
+    return;
+  }
+
+  const { token0Decimals, token1Decimals } = await getPoolTokenDecimals(
+    context,
+    poolConfig,
+    timestamp
+  );
+  const touchedUsers = new Set<string>();
+  let totalPositions = 0;
+  let inRangePositions = 0;
+  let totalValueUsd = 0n;
+  let inRangeValueUsd = 0n;
+
+  for (const position of positions) {
+    if (position.liquidity === 0n && position.amount0 === 0n && position.amount1 === 0n) continue;
+
+    const wasInRange = position.isInRange;
+    const isNowInRange = isPositionInRange(position.tickLower, position.tickUpper, currentTick);
+    if (!wasInRange && !isNowInRange) {
+      totalPositions += 1;
+      totalValueUsd += position.valueUsd;
+      continue;
+    }
+
+    const settlement = await settleLPPosition(context, position, timestamp);
+    const derivedAmounts = derivePositionAmounts(
+      position.liquidity,
+      position.tickLower,
+      position.tickUpper,
+      sqrtPriceX96,
+      position.amount0,
+      position.amount1
+    );
+    const valueUsd = calculatePositionValueUsd(
+      derivedAmounts.amount0,
+      derivedAmounts.amount1,
+      token0Price,
+      token1Price,
+      token0Decimals,
+      token1Decimals
+    );
+
+    context.UserLPPosition.set({
+      ...position,
+      isInRange: isNowInRange,
+      amount0: derivedAmounts.amount0,
+      amount1: derivedAmounts.amount1,
+      valueUsd,
+      lastInRangeTimestamp: isNowInRange ? timestamp : 0,
+      accumulatedInRangeSeconds: settlement.newAccumulatedSeconds,
+      lastSettledAt: settlement.settledAt,
+      settledLpPoints: settlement.newSettledPoints,
+      lastUpdate: timestamp,
+    });
+
+    if (settlement.pointsEarned > 0n || wasInRange !== isNowInRange) {
+      await updateUserEpochLPPoints(
+        context,
+        position.user_id,
+        settlement.pointsEarned,
+        timestamp,
+        settlement.pointsStartTimestamp,
+        settlement.pointsEndTimestamp
+      );
+    }
+    touchedUsers.add(position.user_id);
+
+    totalPositions += 1;
+    totalValueUsd += valueUsd;
+    if (isNowInRange) {
+      inRangePositions += 1;
+      inRangeValueUsd += valueUsd;
+    }
+  }
+
+  setPoolStats(
+    context,
+    normalizeAddress(pool),
+    totalPositions,
+    inRangePositions,
+    totalValueUsd,
+    inRangeValueUsd,
+    timestamp
+  );
+
+  for (const userId of touchedUsers) {
+    await updateUserLPStats(context, userId, timestamp);
+  }
+}
+
 async function settleLPPosition(
   context: handlerContext,
   position: {
@@ -1766,169 +2271,126 @@ async function settleLPPosition(
   };
 }
 
-async function getOrCreateLPPoolSettlementCursor(
+// ============================================
+//     NonfungiblePositionManager Handlers
+// ============================================
+
+// Concentrated-liquidity positions settle on the pre-lazy-growth model: accumulated in-range
+// seconds against the position's own value snapshot. Uniswap V3 is historical-only and its
+// Tides are prefilled, so it does not use the lazy scalar growth that Uniswap V2 and Balancer
+// keep. Returned field names mirror the growth settlement so mutation call sites are shared.
+async function settleV3PositionBeforeMutation(
   context: handlerContext,
-  pool: string,
+  position: UserLPPosition,
   timestamp: number
 ) {
-  const cursorStore = (
-    context as unknown as {
-      LPPoolSettlementCursor?: {
-        get: (id: string) => Promise<LPPoolSettlementCursorRecord | undefined>;
-        set: (value: LPPoolSettlementCursorRecord) => void;
-      };
-    }
-  ).LPPoolSettlementCursor;
-  if (!cursorStore) return null;
-
-  const poolId = normalizeAddress(pool);
-  let cursor = await cursorStore.get(poolId);
-  if (!cursor) {
-    cursor = {
-      id: poolId,
-      pool: poolId,
-      cursorIndex: 0,
-      lastSweepTimestamp: timestamp,
-      lastUpdate: timestamp,
-    };
-    cursorStore.set(cursor);
+  const settled = await settleLPPosition(context, position, timestamp);
+  if (settled.pointsEarned > 0n) {
+    await updateUserEpochLPPoints(
+      context,
+      position.user_id,
+      settled.pointsEarned,
+      timestamp,
+      settled.pointsStartTimestamp,
+      settled.pointsEndTimestamp
+    );
   }
-  return cursor;
+  return {
+    pointsEarned: settled.pointsEarned,
+    settledAt: settled.settledAt,
+    accrualStartTimestamp: settled.pointsStartTimestamp,
+    accrualEndTimestamp: settled.pointsEndTimestamp,
+    newAccumulatedSeconds: settled.newAccumulatedSeconds,
+    newSettledPoints: settled.newSettledPoints,
+  };
 }
 
-async function settleBalancerAutoRangePoolPositionsClockwise(
+async function getCurrentV3PositionSnapshot(
   context: handlerContext,
-  pool: string,
+  position: UserLPPosition,
   timestamp: number
-): Promise<void> {
-  const poolId = normalizeAddress(pool);
-  if (!isBalancerAutoRangePool(poolId)) return;
-
-  const poolConfig = await getActiveLPPoolConfig(context, poolId);
-  if (!poolConfig) return;
-
-  const cursorStore = (
-    context as unknown as {
-      LPPoolSettlementCursor?: {
-        get: (id: string) => Promise<LPPoolSettlementCursorRecord | undefined>;
-        set: (value: LPPoolSettlementCursorRecord) => void;
-      };
-    }
-  ).LPPoolSettlementCursor;
-  if (!cursorStore) return;
-
-  const positions = await listPoolLPPositions(context, poolId);
-  if (positions.length === 0) {
-    cursorStore.set({
-      id: poolId,
-      pool: poolId,
-      cursorIndex: 0,
-      lastSweepTimestamp: timestamp,
-      lastUpdate: timestamp,
-    });
-    setPoolStats(context, poolId, 0, 0, 0n, 0n, timestamp);
-    return;
+) {
+  if (position.liquidity === 0n) {
+    return {
+      amount0: 0n,
+      amount1: 0n,
+      isInRange: false,
+      valueUsd: 0n,
+      lastInRangeTimestamp: 0,
+    };
   }
 
-  const cursor = await getOrCreateLPPoolSettlementCursor(context, poolId, timestamp);
-  if (!cursor) return;
+  const poolId = normalizeAddress(position.pool);
+  const [poolConfig, poolState] = await Promise.all([
+    context.LPPoolConfig.get(poolId),
+    context.LPPoolState.get(poolId),
+  ]);
+  if (!poolConfig || !poolState) {
+    return {
+      amount0: position.amount0,
+      amount1: position.amount1,
+      isInRange: position.isInRange,
+      valueUsd: position.valueUsd,
+      lastInRangeTimestamp: position.isInRange ? timestamp : 0,
+    };
+  }
 
-  const poolState = await getOrCreateLPPoolState(context, poolId, timestamp);
-  const poolV2State = await getOrCreateLPPoolV2State(context, poolId, timestamp);
+  const { amount0, amount1 } = derivePositionAmounts(
+    position.liquidity,
+    position.tickLower,
+    position.tickUpper,
+    poolState.sqrtPriceX96,
+    position.amount0,
+    position.amount1
+  );
   const { token0Decimals, token1Decimals } = await getPoolTokenDecimals(
     context,
     poolConfig,
     timestamp
   );
-  // Precompute the pool-local LP rate once for the whole sweep. Every swept
-  // position belongs to poolId, so the same canonical rate applies to each.
-  const effectiveLpRateBps = poolConfig.lpRateBps;
-  const startIndex = cursor.cursorIndex % positions.length;
-  const maxScans = Math.min(positions.length, LP_BALANCER_MAX_SETTLEMENTS_PER_SWAP);
-  let nextCursorIndex = startIndex;
-  const touchedUsers = new Set<string>();
-
-  for (let offset = 0; offset < maxScans; offset += 1) {
-    const index = (startIndex + offset) % positions.length;
-    nextCursorIndex = (index + 1) % positions.length;
-    const position = positions[index];
-    if (
-      !position ||
-      (position.liquidity === 0n && position.amount0 === 0n && position.amount1 === 0n)
-    ) {
-      continue;
-    }
-    if (timestamp - position.lastSettledAt < LP_BALANCER_STALE_SETTLEMENT_SECONDS) {
-      continue;
-    }
-
-    const settlement = await settleLPPosition(context, position, timestamp, effectiveLpRateBps);
-    const derivedAmounts = calculateV2PositionAmounts(
-      position.liquidity,
-      poolV2State.reserve0,
-      poolV2State.reserve1,
-      poolV2State.lpTotalSupply
-    );
-    const valueUsd = calculatePositionValueUsd(
-      derivedAmounts.amount0,
-      derivedAmounts.amount1,
+  const isInRange = isPositionInRange(
+    position.tickLower,
+    position.tickUpper,
+    poolState.currentTick
+  );
+  return {
+    amount0,
+    amount1,
+    isInRange,
+    valueUsd: calculatePositionValueUsd(
+      amount0,
+      amount1,
       poolState.token0Price,
       poolState.token1Price,
       token0Decimals,
       token1Decimals
-    );
-
-    context.UserLPPosition.set({
-      ...position,
-      amount0: derivedAmounts.amount0,
-      amount1: derivedAmounts.amount1,
-      valueUsd,
-      lastInRangeTimestamp: position.isInRange ? timestamp : 0,
-      accumulatedInRangeSeconds: settlement.newAccumulatedSeconds,
-      lastSettledAt: settlement.settledAt,
-      settledLpPoints: settlement.newSettledPoints,
-      lastUpdate: timestamp,
-    });
-
-    await updateUserEpochLPPoints(
-      context,
-      position.user_id,
-      settlement.pointsEarned,
-      timestamp,
-      settlement.pointsStartTimestamp,
-      settlement.pointsEndTimestamp
-    );
-    touchedUsers.add(position.user_id);
-  }
-
-  cursorStore.set({
-    ...cursor,
-    cursorIndex: nextCursorIndex,
-    lastSweepTimestamp: timestamp,
-    lastUpdate: timestamp,
-  });
-
-  for (const userId of touchedUsers) {
-    await updateUserLPStats(context, userId, timestamp);
-  }
-  await updatePoolLPStats(context, poolId, timestamp);
+    ),
+    lastInRangeTimestamp: isInRange ? timestamp : 0,
+  };
 }
-
-// ============================================
-//     NonfungiblePositionManager Handlers
-// ============================================
 
 NonfungiblePositionManager.IncreaseLiquidity.handler(async ({ event, context }) => {
   const timestamp = Number(event.block.timestamp);
   const blockNumber = BigInt(event.block.number);
   const positionManager = normalizeAddress(event.srcAddress);
-  if (isLegacyV3ManagerHardStopped(positionManager, timestamp, blockNumber)) return;
+  await applyStaticLPPoolCutover(context, timestamp, blockNumber);
+  if (isLegacyV3ManagerHardStopped(positionManager, timestamp, blockNumber)) {
+    await applyScheduledEpochTransitions(context, timestamp, blockNumber);
+    return;
+  }
 
   await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
 
   const tokenId = event.params.tokenId;
   const positionId = tokenId.toString();
   const liquidityDelta = BigInt(event.params.liquidity);
+  const txMintKey = buildTxMintKey(
+    event.transaction.hash,
+    event.params.amount0,
+    event.params.amount1,
+    liquidityDelta
+  );
+  const pendingOwnerId = buildPendingMintOwnerId(positionManager, tokenId);
   const isHardcodedManager = positionManager === LEGACY_V3_LP_POSITION_MANAGER;
   // For hardcoded manager, ensure config exists upfront
   const hardcodedConfig = isHardcodedManager
@@ -1939,16 +2401,31 @@ NonfungiblePositionManager.IncreaseLiquidity.handler(async ({ event, context }) 
     `[lp] IncreaseLiquidity tokenId=${positionId} manager=${positionManager} amount0=${event.params.amount0.toString()} amount1=${event.params.amount1.toString()} liquidity=${liquidityDelta.toString()}`
   );
 
-  let position = await context.UserLPPosition.get(positionId);
+  const [position, txMintData, pendingOwner] = await Promise.all([
+    context.UserLPPosition.get(positionId),
+    context.LPMintData.get(txMintKey),
+    context.LPPendingMintOwner.get(pendingOwnerId),
+  ]);
 
-  // If position doesn't exist, it will be created when we process the Transfer event
-  // The Transfer event sets the owner, and we update tick ranges here
+  // A new NFT can be observed in canonical Transfer-before-Increase order or
+  // through the legacy token-keyed compatibility row.
   if (!position) {
-    // Position not yet created - cache liquidity amounts for the Transfer handler.
+    // A token-keyed row is legacy compatibility state; canonical correlation
+    // uses the exact transaction mint plus the manager-scoped pending owner.
     const pendingKey = `pending:${tokenId.toString()}`;
     const existingMint = await context.LPMintData.get(pendingKey);
     if (existingMint) {
       return;
+    }
+    if (
+      pendingOwner &&
+      (pendingOwner.positionManager !== positionManager ||
+        pendingOwner.tokenId !== tokenId ||
+        pendingOwner.txHash !== event.transaction.hash)
+    ) {
+      throw new Error(
+        `pending LP mint owner mismatch: id=${pendingOwner.id} manager=${positionManager} tokenId=${tokenId.toString()} tx=${event.transaction.hash}`
+      );
     }
 
     let positionData = null as null | {
@@ -1970,22 +2447,12 @@ NonfungiblePositionManager.IncreaseLiquidity.handler(async ({ event, context }) 
           BigInt(event.block.number)
         )
       : hardcodedConfig;
-    const txMintKey = buildTxMintKey(
-      event.transaction.hash,
-      event.params.amount0,
-      event.params.amount1,
-      liquidityDelta
-    );
-    let mintData: Awaited<ReturnType<typeof context.LPMintData.get>>;
+    let mintData = txMintData;
 
     if (!positionData || !poolConfig) {
-      mintData = await context.LPMintData.get(txMintKey);
       if (mintData) {
         const mintPool = normalizeAddress(mintData.pool);
-        poolConfig =
-          mintPool === LEGACY_V3_LP_POOL
-            ? await ensureHardcodedPoolConfig(context, timestamp)
-            : await getActiveLPPoolConfig(context, mintPool);
+        poolConfig = await getKnownLPPoolConfig(context, mintPool, timestamp);
         if (poolConfig) {
           positionData = {
             token0: poolConfig.token0,
@@ -1999,10 +2466,19 @@ NonfungiblePositionManager.IncreaseLiquidity.handler(async ({ event, context }) 
       }
     }
 
-    if (!positionData || !poolConfig) return;
+    if (!positionData || !poolConfig) {
+      if (pendingOwner) {
+        context.LPPendingMintOwner.deleteUnsafe(pendingOwnerId);
+      }
+      return;
+    }
 
     // Create position directly - don't rely on Transfer event ordering
-    const owner = event.transaction.from ? normalizeAddress(event.transaction.from) : ZERO_ADDRESS;
+    const owner = pendingOwner
+      ? normalizeAddress(pendingOwner.owner)
+      : event.transaction.from
+        ? normalizeAddress(event.transaction.from)
+        : ZERO_ADDRESS;
     await getOrCreateUser(context, owner);
 
     const poolState = await seedPoolStateFromChain(
@@ -2056,7 +2532,7 @@ NonfungiblePositionManager.IncreaseLiquidity.handler(async ({ event, context }) 
       token1Decimals
     );
 
-    context.UserLPPosition.set({
+    const nextPosition: UserLPPosition = {
       id: positionId,
       tokenId,
       user_id: owner,
@@ -2075,7 +2551,8 @@ NonfungiblePositionManager.IncreaseLiquidity.handler(async ({ event, context }) 
       settledLpPoints: 0n,
       createdAt: timestamp,
       lastUpdate: timestamp,
-    });
+    };
+    context.UserLPPosition.set(nextPosition);
 
     await addPositionToPoolIndex(context, poolConfig.pool, positionId, timestamp);
     await addPositionToUserIndex(context, owner, positionId, timestamp);
@@ -2084,20 +2561,15 @@ NonfungiblePositionManager.IncreaseLiquidity.handler(async ({ event, context }) 
 
     // Clean up mint data
     if (mintData) {
-      const poolMintKey = `${mintData.pool}:${mintData.tickLower}:${mintData.tickUpper}:${mintData.txHash}`;
-      context.LPMintData.deleteUnsafe(poolMintKey);
-      context.LPMintData.deleteUnsafe(txMintKey);
-    } else {
-      context.LPMintData.deleteUnsafe(txMintKey);
+      context.LPMintData.deleteUnsafe(buildPoolMintKey(mintData));
     }
+    context.LPMintData.deleteUnsafe(txMintKey);
+    context.LPPendingMintOwner.deleteUnsafe(pendingOwnerId);
     return;
   }
 
   const existingPool = normalizeAddress(position.pool);
-  const poolConfig =
-    existingPool === LEGACY_V3_LP_POOL
-      ? await ensureHardcodedPoolConfig(context, timestamp)
-      : await getActiveLPPoolConfig(context, existingPool);
+  const poolConfig = await getKnownLPPoolConfig(context, existingPool, timestamp);
   if (!poolConfig) return;
 
   const poolState = await seedPoolStateFromChain(
@@ -2113,8 +2585,8 @@ NonfungiblePositionManager.IncreaseLiquidity.handler(async ({ event, context }) 
     poolState.currentTick
   );
 
-  // Settle any accumulated points before changing state
-  const settlement = await settleLPPosition(context, position, timestamp);
+  // Settle any accumulated points before changing state.
+  const settlement = await settleV3PositionBeforeMutation(context, position, timestamp);
 
   // Update position amounts
   const newLiquidity = position.liquidity + BigInt(event.params.liquidity);
@@ -2158,7 +2630,7 @@ NonfungiblePositionManager.IncreaseLiquidity.handler(async ({ event, context }) 
     newLastInRangeTimestamp = timestamp;
   }
 
-  context.UserLPPosition.set({
+  const nextPosition: UserLPPosition = {
     ...position,
     liquidity: newLiquidity,
     amount0: newAmount0,
@@ -2168,27 +2640,27 @@ NonfungiblePositionManager.IncreaseLiquidity.handler(async ({ event, context }) 
     lastInRangeTimestamp: newLastInRangeTimestamp,
     accumulatedInRangeSeconds: settlement.newAccumulatedSeconds,
     lastSettledAt: settlement.settledAt,
-    settledLpPoints: settlement.newSettledPoints,
+    settledLpPoints: position.settledLpPoints + settlement.pointsEarned,
     lastUpdate: timestamp,
-  });
-
-  await updateUserEpochLPPoints(
-    context,
-    position.user_id,
-    settlement.pointsEarned,
-    timestamp,
-    settlement.pointsStartTimestamp,
-    settlement.pointsEndTimestamp
-  );
+  };
+  context.UserLPPosition.set(nextPosition);
   await updateUserLPStats(context, position.user_id, timestamp);
   await updatePoolLPStats(context, position.pool, timestamp);
+  if (txMintData) {
+    context.LPMintData.deleteUnsafe(buildPoolMintKey(txMintData));
+    context.LPMintData.deleteUnsafe(txMintKey);
+  }
 });
 
 NonfungiblePositionManager.DecreaseLiquidity.handler(async ({ event, context }) => {
   const timestamp = Number(event.block.timestamp);
   const blockNumber = BigInt(event.block.number);
   const positionManager = normalizeAddress(event.srcAddress);
-  if (isLegacyV3ManagerHardStopped(positionManager, timestamp, blockNumber)) return;
+  await applyStaticLPPoolCutover(context, timestamp, blockNumber);
+  if (isLegacyV3ManagerHardStopped(positionManager, timestamp, blockNumber)) {
+    await applyScheduledEpochTransitions(context, timestamp, blockNumber);
+    return;
+  }
 
   await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
 
@@ -2199,10 +2671,7 @@ NonfungiblePositionManager.DecreaseLiquidity.handler(async ({ event, context }) 
   if (!position) return;
 
   const decreasePool = normalizeAddress(position.pool);
-  const poolConfig =
-    decreasePool === LEGACY_V3_LP_POOL
-      ? await ensureHardcodedPoolConfig(context, timestamp)
-      : await getActiveLPPoolConfig(context, decreasePool);
+  const poolConfig = await getKnownLPPoolConfig(context, decreasePool, timestamp);
   if (!poolConfig) return;
 
   const poolState = await seedPoolStateFromChain(
@@ -2212,31 +2681,39 @@ NonfungiblePositionManager.DecreaseLiquidity.handler(async ({ event, context }) 
     BigInt(event.block.number)
   );
   const wasInRange = position.isInRange;
-  const isNowInRange = isPositionInRange(
-    position.tickLower,
-    position.tickUpper,
-    poolState.currentTick
-  );
 
-  // Settle any accumulated points before changing state
-  const settlement = await settleLPPosition(context, position, timestamp);
+  const liquidityDelta = BigInt(event.params.liquidity);
+  if (liquidityDelta > position.liquidity) {
+    throw new Error(
+      `LP position liquidity underflow: position=${position.id} current=${position.liquidity.toString()} decrease=${liquidityDelta.toString()}`
+    );
+  }
+
+  // Settle any accumulated points before changing state.
+  const settlement = await settleV3PositionBeforeMutation(context, position, timestamp);
 
   // Update position amounts
-  const newLiquidity = position.liquidity - BigInt(event.params.liquidity);
+  const newLiquidity = position.liquidity - liquidityDelta;
   const fallbackAmount0 =
     position.amount0 > event.params.amount0 ? position.amount0 - event.params.amount0 : 0n;
   const fallbackAmount1 =
     position.amount1 > event.params.amount1 ? position.amount1 - event.params.amount1 : 0n;
-  const derivedAmounts = derivePositionAmounts(
-    newLiquidity,
-    position.tickLower,
-    position.tickUpper,
-    poolState.sqrtPriceX96,
-    fallbackAmount0,
-    fallbackAmount1
-  );
+  const derivedAmounts =
+    newLiquidity === 0n
+      ? { amount0: 0n, amount1: 0n }
+      : derivePositionAmounts(
+          newLiquidity,
+          position.tickLower,
+          position.tickUpper,
+          poolState.sqrtPriceX96,
+          fallbackAmount0,
+          fallbackAmount1
+        );
   const newAmount0 = derivedAmounts.amount0;
   const newAmount1 = derivedAmounts.amount1;
+  const isNowInRange =
+    newLiquidity > 0n &&
+    isPositionInRange(position.tickLower, position.tickUpper, poolState.currentTick);
 
   const { token0Decimals, token1Decimals } = await getPoolTokenDecimals(
     context,
@@ -2262,7 +2739,7 @@ NonfungiblePositionManager.DecreaseLiquidity.handler(async ({ event, context }) 
     newLastInRangeTimestamp = timestamp;
   }
 
-  context.UserLPPosition.set({
+  const nextPosition: UserLPPosition = {
     ...position,
     liquidity: newLiquidity,
     amount0: newAmount0,
@@ -2272,18 +2749,10 @@ NonfungiblePositionManager.DecreaseLiquidity.handler(async ({ event, context }) 
     lastInRangeTimestamp: newLastInRangeTimestamp,
     accumulatedInRangeSeconds: settlement.newAccumulatedSeconds,
     lastSettledAt: settlement.settledAt,
-    settledLpPoints: settlement.newSettledPoints,
+    settledLpPoints: position.settledLpPoints + settlement.pointsEarned,
     lastUpdate: timestamp,
-  });
-
-  await updateUserEpochLPPoints(
-    context,
-    position.user_id,
-    settlement.pointsEarned,
-    timestamp,
-    settlement.pointsStartTimestamp,
-    settlement.pointsEndTimestamp
-  );
+  };
+  context.UserLPPosition.set(nextPosition);
   await updateUserLPStats(context, position.user_id, timestamp);
   await updatePoolLPStats(context, position.pool, timestamp);
 });
@@ -2292,7 +2761,11 @@ NonfungiblePositionManager.Transfer.handler(async ({ event, context }) => {
   const timestamp = Number(event.block.timestamp);
   const blockNumber = BigInt(event.block.number);
   const positionManager = normalizeAddress(event.srcAddress);
-  if (isLegacyV3ManagerHardStopped(positionManager, timestamp, blockNumber)) return;
+  await applyStaticLPPoolCutover(context, timestamp, blockNumber);
+  if (isLegacyV3ManagerHardStopped(positionManager, timestamp, blockNumber)) {
+    await applyScheduledEpochTransitions(context, timestamp, blockNumber);
+    return;
+  }
 
   await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
 
@@ -2300,6 +2773,7 @@ NonfungiblePositionManager.Transfer.handler(async ({ event, context }) => {
   const positionId = tokenId.toString();
   const from = normalizeAddress(event.params.from);
   const to = normalizeAddress(event.params.to);
+  const pendingOwnerId = buildPendingMintOwnerId(positionManager, tokenId);
   const isHardcodedManager = positionManager === LEGACY_V3_LP_POSITION_MANAGER;
   // For hardcoded manager, ensure config exists upfront
   const hardcodedConfig = isHardcodedManager
@@ -2320,16 +2794,41 @@ NonfungiblePositionManager.Transfer.handler(async ({ event, context }) => {
       // Position exists - just update owner if different (Transfer has correct owner)
       if (existingPosition.user_id !== to) {
         const oldOwner = existingPosition.user_id;
-        context.UserLPPosition.set({
+        const settlement = await settleV3PositionBeforeMutation(
+          context,
+          existingPosition,
+          timestamp
+        );
+        const snapshot = await getCurrentV3PositionSnapshot(context, existingPosition, timestamp);
+        const nextPosition: UserLPPosition = {
           ...existingPosition,
+          ...snapshot,
           user_id: to,
+          accumulatedInRangeSeconds: settlement.newAccumulatedSeconds,
+          lastSettledAt: settlement.settledAt,
+          settledLpPoints: existingPosition.settledLpPoints + settlement.pointsEarned,
           lastUpdate: timestamp,
-        });
+        };
+        context.UserLPPosition.set(nextPosition);
         await removePositionFromUserIndex(context, oldOwner, positionId, timestamp);
         await addPositionToUserIndex(context, to, positionId, timestamp);
         await updateUserLPStats(context, oldOwner, timestamp);
         await updateUserLPStats(context, to, timestamp);
       }
+      return;
+    }
+
+    const pendingMintKey = `pending:${tokenId.toString()}`;
+    const mintData = await context.LPMintData.get(pendingMintKey);
+    if (!mintData) {
+      context.LPPendingMintOwner.set({
+        id: pendingOwnerId,
+        tokenId,
+        positionManager,
+        owner: to,
+        txHash: event.transaction.hash,
+        timestamp,
+      });
       return;
     }
 
@@ -2353,18 +2852,11 @@ NonfungiblePositionManager.Transfer.handler(async ({ event, context }) => {
         )
       : hardcodedConfig;
 
-    // The IncreaseLiquidity handler caches this data keyed by tokenId.
-    const pendingMintKey = `pending:${tokenId.toString()}`;
-    let mintData = await context.LPMintData.get(pendingMintKey);
-
     if (!positionData || !poolConfig) {
       // Use LPMintData to reconstruct position data
       if (mintData) {
         const mintPool = normalizeAddress(mintData.pool);
-        poolConfig =
-          mintPool === LEGACY_V3_LP_POOL
-            ? await ensureHardcodedPoolConfig(context, timestamp)
-            : await getActiveLPPoolConfig(context, mintPool);
+        poolConfig = await getKnownLPPoolConfig(context, mintPool, timestamp);
         if (poolConfig) {
           positionData = {
             token0: poolConfig.token0,
@@ -2423,7 +2915,7 @@ NonfungiblePositionManager.Transfer.handler(async ({ event, context }) => {
       token1Price = isAusdToken0 ? pairedTokenPrice : ausdPrice;
     }
 
-    // Use amounts from LPMintData (IncreaseLiquidity fires before Transfer and caches this)
+    // Legacy token-keyed mint data carries the fallback event amounts.
     const fallbackAmount0 = mintData?.amount0 ?? 0n;
     const fallbackAmount1 = mintData?.amount1 ?? 0n;
     const derivedAmounts = derivePositionAmounts(
@@ -2451,7 +2943,7 @@ NonfungiblePositionManager.Transfer.handler(async ({ event, context }) => {
       `[lp] mint position=${positionId} pool=${pool} tickLower=${positionData.tickLower} tickUpper=${positionData.tickUpper} currentTick=${poolState.currentTick} isInRange=${isInRange} valueUsd=${valueUsd.toString()}`
     );
 
-    context.UserLPPosition.set({
+    const nextPosition: UserLPPosition = {
       id: positionId,
       tokenId,
       user_id: to,
@@ -2470,12 +2962,16 @@ NonfungiblePositionManager.Transfer.handler(async ({ event, context }) => {
       settledLpPoints: 0n,
       createdAt: timestamp,
       lastUpdate: timestamp,
-    });
+    };
+    context.UserLPPosition.set(nextPosition);
 
     // Clean up mint data after use
-    if (mintData) {
-      context.LPMintData.deleteUnsafe(pendingMintKey);
-    }
+    context.LPMintData.deleteUnsafe(pendingMintKey);
+    context.LPMintData.deleteUnsafe(buildPoolMintKey(mintData));
+    context.LPMintData.deleteUnsafe(
+      buildTxMintKey(mintData.txHash, mintData.amount0, mintData.amount1, mintData.liquidity)
+    );
+    context.LPPendingMintOwner.deleteUnsafe(pendingOwnerId);
 
     await addPositionToPoolIndex(context, pool, positionId, timestamp);
     await addPositionToUserIndex(context, to, positionId, timestamp);
@@ -2500,31 +2996,23 @@ NonfungiblePositionManager.Transfer.handler(async ({ event, context }) => {
     const position = await context.UserLPPosition.get(positionId);
     if (position) {
       // Settle any remaining points before removing
-      const settlement = await settleLPPosition(context, position, timestamp);
-
-      // Update user's epoch stats with settled LP points
-      await updateUserEpochLPPoints(
-        context,
-        position.user_id,
-        settlement.pointsEarned,
-        timestamp,
-        settlement.pointsStartTimestamp,
-        settlement.pointsEndTimestamp
-      );
+      const settlement = await settleV3PositionBeforeMutation(context, position, timestamp);
 
       // Mark position as removed
-      context.UserLPPosition.set({
+      const nextPosition: UserLPPosition = {
         ...position,
         liquidity: 0n,
         amount0: 0n,
         amount1: 0n,
         isInRange: false,
         valueUsd: 0n,
+        lastInRangeTimestamp: 0,
         accumulatedInRangeSeconds: settlement.newAccumulatedSeconds,
-        settledLpPoints: settlement.newSettledPoints,
+        settledLpPoints: position.settledLpPoints + settlement.pointsEarned,
         lastSettledAt: settlement.settledAt,
         lastUpdate: timestamp,
-      });
+      };
+      context.UserLPPosition.set(nextPosition);
 
       await removePositionFromUserIndex(context, position.user_id, positionId, timestamp);
       await removePositionFromPoolIndex(context, position.pool, positionId, timestamp);
@@ -2541,27 +3029,21 @@ NonfungiblePositionManager.Transfer.handler(async ({ event, context }) => {
     const oldOwner = position.user_id;
 
     // Settle points for old owner before transfer
-    const settlement = await settleLPPosition(context, position, timestamp);
-    await updateUserEpochLPPoints(
-      context,
-      oldOwner,
-      settlement.pointsEarned,
-      timestamp,
-      settlement.pointsStartTimestamp,
-      settlement.pointsEndTimestamp
-    );
+    const settlement = await settleV3PositionBeforeMutation(context, position, timestamp);
+    const snapshot = await getCurrentV3PositionSnapshot(context, position, timestamp);
 
     // Update position owner
     await getOrCreateUser(context, to);
-    context.UserLPPosition.set({
+    const nextPosition: UserLPPosition = {
       ...position,
+      ...snapshot,
       user_id: to,
       accumulatedInRangeSeconds: settlement.newAccumulatedSeconds,
-      settledLpPoints: settlement.newSettledPoints,
-      lastInRangeTimestamp: position.isInRange ? timestamp : 0, // Reset for new owner
+      settledLpPoints: position.settledLpPoints + settlement.pointsEarned,
       lastSettledAt: settlement.settledAt,
       lastUpdate: timestamp,
-    });
+    };
+    context.UserLPPosition.set(nextPosition);
 
     await removePositionFromUserIndex(context, oldOwner, positionId, timestamp);
     await addPositionToUserIndex(context, to, positionId, timestamp);
@@ -2580,17 +3062,20 @@ UniswapV3Pool.Initialize.handler(async ({ event, context }) => {
   const pool = normalizeAddress(event.srcAddress);
   const timestamp = Number(event.block.timestamp);
   const blockNumber = BigInt(event.block.number);
-  if (isLegacyV3PoolHardStopped(pool, timestamp, blockNumber)) return;
   await applyStaticLPPoolCutover(context, timestamp, blockNumber);
+  if (isLegacyV3PoolHardStopped(pool, timestamp, blockNumber)) {
+    await applyScheduledEpochTransitions(context, timestamp, blockNumber);
+    return;
+  }
   const poolConfig =
     pool === LEGACY_V3_LP_POOL
       ? await ensureHardcodedPoolConfig(context, timestamp)
       : await getActiveLPPoolConfig(context, pool);
   if (!poolConfig) return;
+  await applyScheduledEpochTransitions(context, timestamp, blockNumber);
 
   const currentTick = Number(event.params.tick);
   const sqrtPriceX96 = event.params.sqrtPriceX96;
-
   const { token0Decimals, token1Decimals } = await getPoolTokenDecimals(
     context,
     poolConfig,
@@ -2598,19 +3083,19 @@ UniswapV3Pool.Initialize.handler(async ({ event, context }) => {
   );
   let token0Price = 0n;
   let token1Price = 0n;
-  const isAusdToken0 = poolConfig.token0 === AUSD_ADDRESS;
-  const isAusdToken1 = poolConfig.token1 === AUSD_ADDRESS;
-  if (isAusdToken0 || isAusdToken1) {
-    const ausdPrice = getAusdPrice();
+  const isStableToken0 = isStableUsdToken(poolConfig.token0);
+  const isStableToken1 = isStableUsdToken(poolConfig.token1);
+  if (isStableToken0 !== isStableToken1) {
+    const stablePriceE8 = getAusdPrice();
     const pairedTokenPrice = calculateDustPriceFromPool(
       sqrtPriceX96,
-      ausdPrice,
-      isAusdToken0,
+      stablePriceE8,
+      isStableToken0,
       token0Decimals,
       token1Decimals
     );
-    token0Price = isAusdToken0 ? ausdPrice : pairedTokenPrice;
-    token1Price = isAusdToken0 ? pairedTokenPrice : ausdPrice;
+    token0Price = isStableToken0 ? stablePriceE8 : pairedTokenPrice;
+    token1Price = isStableToken0 ? pairedTokenPrice : stablePriceE8;
   }
 
   context.LPPoolState.set({
@@ -2630,8 +3115,11 @@ UniswapV3Pool.Swap.handler(async ({ event, context }) => {
   const pool = normalizeAddress(event.srcAddress);
   const timestamp = Number(event.block.timestamp);
   const blockNumber = BigInt(event.block.number);
-  if (isLegacyV3PoolHardStopped(pool, timestamp, blockNumber)) return;
   await applyStaticLPPoolCutover(context, timestamp, blockNumber);
+  if (isLegacyV3PoolHardStopped(pool, timestamp, blockNumber)) {
+    await applyScheduledEpochTransitions(context, timestamp, blockNumber);
+    return;
+  }
 
   // Check if this pool is tracked
   const poolConfig =
@@ -2639,53 +3127,47 @@ UniswapV3Pool.Swap.handler(async ({ event, context }) => {
       ? await ensureHardcodedPoolConfig(context, timestamp)
       : await getActiveLPPoolConfig(context, pool);
   if (!poolConfig) return;
+  await applyScheduledEpochTransitions(context, timestamp, blockNumber);
   const currentTick = Number(event.params.tick);
   const sqrtPriceX96 = event.params.sqrtPriceX96;
+  const oldState = await context.LPPoolState.get(pool);
+  const oldTick = oldState?.currentTick ?? 0;
 
-  // Update pool state
-  let poolState = await context.LPPoolState.get(pool);
-  const oldTick = poolState?.currentTick ?? 0;
-
-  // Update token prices for AUSD-paired pools using sqrtPriceX96
   const { token0Decimals, token1Decimals } = await getPoolTokenDecimals(
     context,
     poolConfig,
     timestamp
   );
-  let token0Price = poolState?.token0Price ?? 0n;
-  let token1Price = poolState?.token1Price ?? 0n;
-  const isAusdToken0 = poolConfig.token0 === AUSD_ADDRESS;
-  const isAusdToken1 = poolConfig.token1 === AUSD_ADDRESS;
-  if (isAusdToken0 || isAusdToken1) {
-    const ausdPrice = getAusdPrice();
+  let token0Price = oldState?.token0Price ?? 0n;
+  let token1Price = oldState?.token1Price ?? 0n;
+  const isStableToken0 = isStableUsdToken(poolConfig.token0);
+  const isStableToken1 = isStableUsdToken(poolConfig.token1);
+  if (isStableToken0 !== isStableToken1) {
+    const stablePriceE8 = getAusdPrice();
     const pairedTokenPrice = calculateDustPriceFromPool(
       sqrtPriceX96,
-      ausdPrice,
-      isAusdToken0,
+      stablePriceE8,
+      isStableToken0,
       token0Decimals,
       token1Decimals
     );
-    token0Price = isAusdToken0 ? ausdPrice : pairedTokenPrice;
-    token1Price = isAusdToken0 ? pairedTokenPrice : ausdPrice;
+    token0Price = isStableToken0 ? stablePriceE8 : pairedTokenPrice;
+    token1Price = isStableToken0 ? pairedTokenPrice : stablePriceE8;
   }
 
-  const prevFeeProtocol0 = poolState?.feeProtocol0 ?? 0;
-  const prevFeeProtocol1 = poolState?.feeProtocol1 ?? 0;
   context.LPPoolState.set({
+    ...oldState,
     id: pool,
     pool,
     currentTick,
     sqrtPriceX96,
     token0Price,
     token1Price,
-    feeProtocol0: prevFeeProtocol0,
-    feeProtocol1: prevFeeProtocol1,
+    feeProtocol0: oldState?.feeProtocol0 ?? 0,
+    feeProtocol1: oldState?.feeProtocol1 ?? 0,
     lastUpdate: timestamp,
   });
-
-  // If tick changed significantly, update in-range status for affected positions
-  // This is expensive, so we only do it on significant tick changes
-  if (Math.abs(currentTick - oldTick) > 0) {
+  if (currentTick !== oldTick) {
     await updatePositionsInRangeStatus(
       context,
       pool,
@@ -2712,8 +3194,11 @@ UniswapV3Pool.SetFeeProtocol.handler(async ({ event, context }) => {
   const pool = normalizeAddress(event.srcAddress);
   const timestamp = Number(event.block.timestamp);
   const blockNumber = BigInt(event.block.number);
-  if (isLegacyV3PoolHardStopped(pool, timestamp, blockNumber)) return;
   await applyStaticLPPoolCutover(context, timestamp, blockNumber);
+  if (isLegacyV3PoolHardStopped(pool, timestamp, blockNumber)) {
+    await applyScheduledEpochTransitions(context, timestamp, blockNumber);
+    return;
+  }
 
   const poolConfig =
     pool === LEGACY_V3_LP_POOL
@@ -2739,21 +3224,21 @@ UniswapV3Pool.Mint.handler(async ({ event, context }) => {
   const timestamp = Number(event.block.timestamp);
   const blockNumber = BigInt(event.block.number);
   const pool = normalizeAddress(event.srcAddress);
-  if (isLegacyV3PoolHardStopped(pool, timestamp, blockNumber)) return;
+  await applyStaticLPPoolCutover(context, timestamp, blockNumber);
+  if (isLegacyV3PoolHardStopped(pool, timestamp, blockNumber)) {
+    await applyScheduledEpochTransitions(context, timestamp, blockNumber);
+    return;
+  }
 
   await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
 
-  let poolConfig: Awaited<ReturnType<typeof getActiveLPPoolConfig>> = null;
-  if (pool === LEGACY_V3_LP_POOL) {
-    poolConfig = await ensureHardcodedPoolConfig(context, timestamp);
-  } else {
-    poolConfig = await getActiveLPPoolConfig(context, pool);
-  }
+  const poolConfig = await getKnownLPPoolConfig(context, pool, timestamp);
   if (!poolConfig) return;
 
   const tickLower = Number(event.params.tickLower);
   const tickUpper = Number(event.params.tickUpper);
   const owner = normalizeAddress(event.params.owner);
+  if (owner !== normalizeAddress(poolConfig.positionManager)) return;
 
   // Pool Mint event gives us tick ranges but not tokenId
   // Store this data for correlation with IncreaseLiquidity
@@ -2804,7 +3289,11 @@ UniswapV3Pool.Burn.handler(async ({ event, context }) => {
   const timestamp = Number(event.block.timestamp);
   const blockNumber = BigInt(event.block.number);
   const pool = normalizeAddress(event.srcAddress);
-  if (isLegacyV3PoolHardStopped(pool, timestamp, blockNumber)) return;
+  await applyStaticLPPoolCutover(context, timestamp, blockNumber);
+  if (isLegacyV3PoolHardStopped(pool, timestamp, blockNumber)) {
+    await applyScheduledEpochTransitions(context, timestamp, blockNumber);
+    return;
+  }
 
   await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
 
@@ -2815,171 +3304,96 @@ UniswapV3Pool.Burn.handler(async ({ event, context }) => {
 //     UniswapV2Pair Handlers
 // ============================================
 
-function getV2TrackingSettlement(
-  position: { accumulatedInRangeSeconds: bigint; settledLpPoints: bigint } | undefined,
-  timestamp: number
-) {
-  return {
-    newAccumulatedSeconds: position?.accumulatedInRangeSeconds ?? 0n,
-    newSettledPoints: position?.settledLpPoints ?? 0n,
-    pointsEarned: 0n,
-    settledAt: timestamp,
-    pointsStartTimestamp: 0,
-    pointsEndTimestamp: timestamp,
-  };
-}
-
-async function applyV2LiquidityDelta(
+async function applyFungibleShareTransfer(
   context: handlerContext,
   poolConfig: LPPoolConfig,
-  userId: string,
-  delta: bigint,
+  from: string,
+  to: string,
+  amount: bigint,
   timestamp: number,
   poolState: Awaited<ReturnType<typeof getOrCreateLPPoolState>>,
-  poolV2State: Awaited<ReturnType<typeof getOrCreateLPPoolV2State>>,
-  token0Decimals: number,
-  token1Decimals: number
-): Promise<boolean> {
-  const normalizedUserId = normalizeAddress(userId);
-  if (normalizedUserId === ZERO_ADDRESS || delta === 0n) return false;
-
+  poolV2State: Awaited<ReturnType<typeof getOrCreateLPPoolV2State>>
+): Promise<void> {
   const pool = normalizeAddress(poolConfig.pool);
-  const positionId = getV2PositionId(pool, normalizedUserId);
-  const existing = await context.UserLPPosition.get(positionId);
-  const isInactiveV2Tracking = pool === V2_LP_POOL && !poolConfig.isActive;
-  if (!isInactiveV2Tracking) {
-    await getOrCreateUser(context, normalizedUserId);
+  const normalizedFrom = normalizeAddress(from);
+  const normalizedTo = normalizeAddress(to);
+  const touchedUsers = [normalizedFrom, normalizedTo].filter(
+    (userId, index, users) => userId !== ZERO_ADDRESS && users.indexOf(userId) === index
+  );
+  const existingPositions = new Map<string, UserLPPosition | undefined>();
+  for (const userId of touchedUsers) {
+    const positionId = getV2PositionId(pool, userId);
+    existingPositions.set(userId, await context.UserLPPosition.get(positionId));
   }
 
-  const settlement =
-    existing && poolConfig.isActive
-      ? await settleLPPosition(context, existing, timestamp)
-      : getV2TrackingSettlement(existing, timestamp);
-
-  if (poolConfig.isActive && existing && settlement.pointsEarned > 0n) {
-    await updateUserEpochLPPoints(
-      context,
-      normalizedUserId,
-      settlement.pointsEarned,
-      timestamp,
-      settlement.pointsStartTimestamp,
-      settlement.pointsEndTimestamp
-    );
+  const settlements = new Map<
+    string,
+    Awaited<ReturnType<typeof settleLPPositionGrowthAfterPoolAdvance>>
+  >();
+  for (const userId of touchedUsers) {
+    const existing = existingPositions.get(userId);
+    if (!existing) continue;
+    const settlement = await settleLPPositionGrowthAfterPoolAdvance(context, existing, timestamp);
+    settlements.set(userId, settlement);
+    if (settlement.pointsEarned > 0n) {
+      await updateUserEpochLPPoints(
+        context,
+        userId,
+        settlement.pointsEarned,
+        timestamp,
+        settlement.accrualStartTimestamp,
+        settlement.accrualEndTimestamp
+      );
+    }
   }
 
-  const previousLiquidity = existing?.liquidity ?? 0n;
-  let liquidity = previousLiquidity + delta;
-  if (liquidity < 0n) liquidity = 0n;
-
-  const reserve0 = poolV2State.reserve0;
-  const reserve1 = poolV2State.reserve1;
-  const totalSupply = poolV2State.lpTotalSupply;
-  const { amount0, amount1 } = calculateV2PositionAmounts(
-    liquidity,
-    reserve0,
-    reserve1,
-    totalSupply
-  );
-  const valueUsd = calculatePositionValueUsd(
-    amount0,
-    amount1,
-    poolState.token0Price,
-    poolState.token1Price,
-    token0Decimals,
-    token1Decimals
-  );
-  const isActive = liquidity > 0n;
-
-  context.UserLPPosition.set({
-    id: positionId,
-    tokenId: getSyntheticTokenIdFromAddress(normalizedUserId),
-    user_id: normalizedUserId,
-    pool,
-    positionManager: pool,
-    tickLower: V2_TICK_LOWER,
-    tickUpper: V2_TICK_UPPER,
-    liquidity,
-    amount0,
-    amount1,
-    isInRange: isActive,
-    valueUsd,
-    lastInRangeTimestamp: isActive ? timestamp : 0,
-    accumulatedInRangeSeconds: settlement.newAccumulatedSeconds,
-    lastSettledAt: settlement.settledAt,
-    settledLpPoints: settlement.newSettledPoints,
-    createdAt: existing?.createdAt ?? timestamp,
+  let nextTotalSupply = poolV2State.lpTotalSupply;
+  if (normalizedFrom === ZERO_ADDRESS) {
+    nextTotalSupply += amount;
+  } else if (normalizedTo === ZERO_ADDRESS) {
+    // A pool bootstrapped mid-life - the UniswapV2 pair is deliberately indexed from
+    // LP_V2_CUTOVER_BLOCK - never observed the mints that created its outstanding supply and
+    // holder balances, so a legitimate burn/transfer can exceed what this indexer has
+    // tracked. Production clamps at zero here (see the pre-rewrite lp.ts); failing closed
+    // instead makes real mainnet history unindexable. Clamp to match production.
+    nextTotalSupply = nextTotalSupply > amount ? nextTotalSupply - amount : 0n;
+  }
+  const nextPoolV2State = {
+    ...poolV2State,
+    lpTotalSupply: nextTotalSupply,
+    lastUpdate: timestamp,
+  };
+  context.LPPoolV2State.set(nextPoolV2State);
+  context.LPPoolState.set({
+    ...poolState,
     lastUpdate: timestamp,
   });
 
-  if (isActive) {
-    await addPositionToUserIndex(context, normalizedUserId, positionId, timestamp);
-    await addPositionToPoolIndex(context, pool, positionId, timestamp);
-  } else {
-    await removePositionFromUserIndex(context, normalizedUserId, positionId, timestamp);
-    await removePositionFromPoolIndex(context, pool, positionId, timestamp);
-  }
-
-  return true;
-}
-
-async function settleV2PoolPositions(
-  context: handlerContext,
-  pool: string,
-  timestamp: number
-): Promise<void> {
-  const poolId = normalizeAddress(pool);
-  const poolConfig = await context.LPPoolConfig.get(poolId);
-  if (!poolConfig || !isV2PoolConfig(poolConfig)) return;
-
-  const poolState = await getOrCreateLPPoolState(context, poolId, timestamp);
-  const poolV2State = await getOrCreateLPPoolV2State(context, poolId, timestamp);
-  const reserve0 = poolV2State.reserve0;
-  const reserve1 = poolV2State.reserve1;
-  const totalSupply = poolV2State.lpTotalSupply;
   const { token0Decimals, token1Decimals } = await getPoolTokenDecimals(
     context,
     poolConfig,
     timestamp
   );
-
-  const positions = await listPoolLPPositions(context, poolId);
-  if (positions.length === 0) {
-    await updatePoolLPStats(context, poolId, timestamp);
-    return;
-  }
-
-  // Every V2 position in this sweep belongs to poolId, so the pool-local rate is
-  // loop-invariant. Tracking-only eras explicitly use zero to suppress points.
-  const effectiveLpRateBps = poolConfig.isActive ? poolConfig.lpRateBps : 0n;
-
-  const touchedUsers = new Set<string>();
-  for (const position of positions) {
-    if (!position.id.startsWith('v2:')) continue;
-    if (position.liquidity <= 0n) continue;
-
+  const leaderboardState = await context.LeaderboardState.get('current');
+  const epochNumber = leaderboardState?.currentEpochNumber ?? 0n;
+  for (const userId of touchedUsers) {
+    const existing = existingPositions.get(userId);
+    const outgoing = userId === normalizedFrom ? amount : 0n;
+    const incoming = userId === normalizedTo ? amount : 0n;
+    // Same mid-life bootstrap case as the supply clamp above: a holder can burn or send
+    // shares this indexer never saw minted. Production clamps the balance at zero rather
+    // than failing, so replay stays consistent with the deployed indexer.
+    const rawLiquidity = (existing?.liquidity ?? 0n) - outgoing + incoming;
+    const liquidity = rawLiquidity < 0n ? 0n : rawLiquidity;
     if (poolConfig.isActive) {
-      await getOrCreateUser(context, position.user_id);
-    }
-
-    const settlement = poolConfig.isActive
-      ? await settleLPPosition(context, position, timestamp, effectiveLpRateBps)
-      : getV2TrackingSettlement(position, timestamp);
-    if (poolConfig.isActive && settlement.pointsEarned > 0n) {
-      await updateUserEpochLPPoints(
-        context,
-        position.user_id,
-        settlement.pointsEarned,
-        timestamp,
-        settlement.pointsStartTimestamp,
-        settlement.pointsEndTimestamp
-      );
+      await getOrCreateUser(context, userId);
     }
 
     const { amount0, amount1 } = calculateV2PositionAmounts(
-      position.liquidity,
-      reserve0,
-      reserve1,
-      totalSupply
+      liquidity,
+      nextPoolV2State.reserve0,
+      nextPoolV2State.reserve1,
+      nextPoolV2State.lpTotalSupply
     );
     const valueUsd = calculatePositionValueUsd(
       amount0,
@@ -2989,32 +3403,51 @@ async function settleV2PoolPositions(
       token0Decimals,
       token1Decimals
     );
-
-    context.UserLPPosition.set({
-      ...position,
+    const settlement = settlements.get(userId);
+    const nextPosition: UserLPPosition = {
+      id: getV2PositionId(pool, userId),
+      tokenId: getSyntheticTokenIdFromAddress(userId),
+      user_id: userId,
+      pool,
+      positionManager: pool,
+      tickLower: V2_TICK_LOWER,
+      tickUpper: V2_TICK_UPPER,
+      liquidity,
       amount0,
       amount1,
-      isInRange: true,
+      isInRange: liquidity > 0n,
       valueUsd,
-      lastInRangeTimestamp: timestamp,
-      accumulatedInRangeSeconds: settlement.newAccumulatedSeconds,
-      lastSettledAt: settlement.settledAt,
-      settledLpPoints: settlement.newSettledPoints,
+      lastInRangeTimestamp: liquidity > 0n ? timestamp : 0,
+      accumulatedInRangeSeconds: existing?.accumulatedInRangeSeconds ?? 0n,
+      lastSettledAt: settlement?.settledAt ?? timestamp,
+      settledLpPoints: (existing?.settledLpPoints ?? 0n) + (settlement?.pointsEarned ?? 0n),
+      createdAt: existing?.createdAt ?? timestamp,
       lastUpdate: timestamp,
-    });
-    touchedUsers.add(position.user_id);
+    };
+    context.UserLPPosition.set(nextPosition);
+
+    if (liquidity > 0n) {
+      await addPositionToUserIndex(context, userId, nextPosition.id, timestamp);
+      await addPositionToPoolIndex(context, pool, nextPosition.id, timestamp);
+    } else {
+      await removePositionFromUserIndex(context, userId, nextPosition.id, timestamp);
+      await removePositionFromPoolIndex(context, pool, nextPosition.id, timestamp);
+    }
+    if (epochNumber > 0n) {
+      await resetLPPositionGrowthBaseline(context, nextPosition, epochNumber, timestamp);
+    }
   }
 
   for (const userId of touchedUsers) {
     await updateUserLPStats(context, userId, timestamp);
   }
-  await updatePoolLPStats(context, poolId, timestamp);
 }
 
 UniswapV2Pair.Transfer.handler(async ({ event, context }) => {
   const pool = normalizeAddress(event.srcAddress);
   const timestamp = Number(event.block.timestamp);
   const blockNumber = BigInt(event.block.number);
+  const hadFungibleState = await hasObservedFungiblePoolState(context, pool);
   await applyStaticLPPoolCutover(context, timestamp, blockNumber);
   const isTrackingOnly = isV2PoolTrackingOnly(pool, timestamp, blockNumber);
 
@@ -3034,67 +3467,17 @@ UniswapV2Pair.Transfer.handler(async ({ event, context }) => {
   const to = normalizeAddress(event.params.to);
   const existingPoolState = await getOrCreateLPPoolState(context, pool, timestamp);
   const existingPoolV2State = await getOrCreateLPPoolV2State(context, pool, timestamp);
-
-  let nextTotalSupply = existingPoolV2State.lpTotalSupply;
-  if (from === ZERO_ADDRESS) {
-    nextTotalSupply += amount;
-  } else if (to === ZERO_ADDRESS) {
-    nextTotalSupply = nextTotalSupply > amount ? nextTotalSupply - amount : 0n;
-  }
-
-  const nextPoolV2State = {
-    ...existingPoolV2State,
-    lpTotalSupply: nextTotalSupply,
-    reserve0: existingPoolV2State.reserve0,
-    reserve1: existingPoolV2State.reserve1,
-    lastUpdate: timestamp,
-  };
-  context.LPPoolV2State.set(nextPoolV2State);
-  context.LPPoolState.set({
-    ...existingPoolState,
-    lastUpdate: timestamp,
-  });
-
-  const { token0Decimals, token1Decimals } = await getPoolTokenDecimals(
+  await advanceLPPoolGrowth(context, pool, timestamp, hadFungibleState ? undefined : timestamp);
+  await applyFungibleShareTransfer(
     context,
     poolConfig,
-    timestamp
+    from,
+    to,
+    amount,
+    timestamp,
+    existingPoolState,
+    existingPoolV2State
   );
-  const touchedUsers = new Set<string>();
-  if (from !== ZERO_ADDRESS) {
-    const changed = await applyV2LiquidityDelta(
-      context,
-      poolConfig,
-      from,
-      -amount,
-      timestamp,
-      existingPoolState,
-      nextPoolV2State,
-      token0Decimals,
-      token1Decimals
-    );
-    if (changed) touchedUsers.add(from);
-  }
-
-  if (to !== ZERO_ADDRESS) {
-    const changed = await applyV2LiquidityDelta(
-      context,
-      poolConfig,
-      to,
-      amount,
-      timestamp,
-      existingPoolState,
-      nextPoolV2State,
-      token0Decimals,
-      token1Decimals
-    );
-    if (changed) touchedUsers.add(to);
-  }
-
-  for (const userId of touchedUsers) {
-    await updateUserLPStats(context, userId, timestamp);
-  }
-  await updatePoolLPStats(context, pool, timestamp);
 });
 
 UniswapV2Pair.Swap.handler(async ({ event, context }) => {
@@ -3142,6 +3525,7 @@ UniswapV2Pair.Sync.handler(async ({ event, context }) => {
   const pool = normalizeAddress(event.srcAddress);
   const timestamp = Number(event.block.timestamp);
   const blockNumber = BigInt(event.block.number);
+  const hadFungibleState = await hasObservedFungiblePoolState(context, pool);
   await applyStaticLPPoolCutover(context, timestamp, blockNumber);
   const isTrackingOnly = isV2PoolTrackingOnly(pool, timestamp, blockNumber);
 
@@ -3158,6 +3542,10 @@ UniswapV2Pair.Sync.handler(async ({ event, context }) => {
   const reserve1 = BigInt(event.params.reserve1);
   const poolState = await getOrCreateLPPoolState(context, pool, timestamp);
   const poolV2State = await getOrCreateLPPoolV2State(context, pool, timestamp);
+  // Attribute the elapsed interval to the pre-Sync reserves and prices. This
+  // is deliberately pool-only: holders consume the scalar growth lazily on
+  // their next explicit touch.
+  await advanceLPPoolGrowth(context, pool, timestamp, hadFungibleState ? undefined : timestamp);
   const { token0Decimals, token1Decimals } = await getPoolTokenDecimals(
     context,
     poolConfig,
@@ -3189,8 +3577,6 @@ UniswapV2Pair.Sync.handler(async ({ event, context }) => {
     lpTotalSupply: poolV2State.lpTotalSupply,
     lastUpdate: timestamp,
   });
-
-  await settleV2PoolPositions(context, pool, timestamp);
 });
 
 // ============================================
@@ -3203,9 +3589,12 @@ BalancerAutoRangePool.Transfer.handler(async ({ event, context }) => {
 
   const timestamp = Number(event.block.timestamp);
   const blockNumber = BigInt(event.block.number);
-  if (await isBalancerResumeTransitionComplete(context, timestamp, blockNumber)) return;
+  const hadFungibleState = await hasObservedFungiblePoolState(context, pool);
   await applyStaticLPPoolCutover(context, timestamp, blockNumber);
-  if (isBalancerPoolHardStopped(timestamp, blockNumber)) return;
+  if (isBalancerPoolHardStopped(timestamp, blockNumber)) {
+    await applyScheduledEpochTransitions(context, timestamp, blockNumber);
+    return;
+  }
   await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
 
   const poolConfig = await ensureBalancerAutoRangePoolConfigEntity(
@@ -3219,73 +3608,23 @@ BalancerAutoRangePool.Transfer.handler(async ({ event, context }) => {
   const from = normalizeAddress(event.params.from);
   const to = normalizeAddress(event.params.to);
   const poolState = await getOrCreateLPPoolState(context, pool, timestamp);
-  let poolV2State = await getOrCreateLPPoolV2State(context, pool, timestamp);
-
-  let nextTotalSupply = poolV2State.lpTotalSupply;
-  if (from === ZERO_ADDRESS) {
-    nextTotalSupply += amount;
-  } else if (to === ZERO_ADDRESS) {
-    nextTotalSupply = safeSubtract(nextTotalSupply, amount);
-  }
-  poolV2State = {
-    ...poolV2State,
-    lpTotalSupply: nextTotalSupply,
-    lastUpdate: timestamp,
-  };
-  context.LPPoolV2State.set(poolV2State);
-  context.LPPoolState.set({
-    ...poolState,
-    lastUpdate: timestamp,
-  });
-
-  const { token0Decimals, token1Decimals } = await getPoolTokenDecimals(
+  const poolV2State = await getOrCreateLPPoolV2State(context, pool, timestamp);
+  await advanceLPPoolGrowth(context, pool, timestamp, hadFungibleState ? undefined : timestamp);
+  await applyFungibleShareTransfer(
     context,
     poolConfig,
-    timestamp
+    from,
+    to,
+    amount,
+    timestamp,
+    poolState,
+    poolV2State
   );
-  const touchedUsers = new Set<string>();
-  if (from !== ZERO_ADDRESS) {
-    const changed = await applyV2LiquidityDelta(
-      context,
-      poolConfig,
-      from,
-      -amount,
-      timestamp,
-      poolState,
-      poolV2State,
-      token0Decimals,
-      token1Decimals
-    );
-    if (changed) touchedUsers.add(from);
-  }
-
-  if (to !== ZERO_ADDRESS) {
-    const changed = await applyV2LiquidityDelta(
-      context,
-      poolConfig,
-      to,
-      amount,
-      timestamp,
-      poolState,
-      poolV2State,
-      token0Decimals,
-      token1Decimals
-    );
-    if (changed) touchedUsers.add(to);
-  }
-
-  for (const userId of touchedUsers) {
-    await updateUserLPStats(context, userId, timestamp);
-  }
-  await updatePoolLPStats(context, pool, timestamp);
 });
 
-// The Vault is a singleton emitting for EVERY Balancer V3 pool on Monad. Registering
-// it wildcard (no address in config) makes the indexed `pool` topic filter part of the
-// HyperSync query itself, so only the DUST AutoRange pool's events are FETCHED — not
-// fetched-then-discarded. Envio only pushes topic filters server-side for wildcard
-// events; an addressed contract filters client-side and still pays for every pool.
-// The in-handler guards below stay as defense-in-depth.
+// The Vault is an addressed singleton so it shares the main address partition.
+// The indexed `pool` topic filter keeps unrelated Balancer pools out of the query;
+// the in-handler guards remain as defense-in-depth.
 BalancerVault.LiquidityAdded.handler(
   async ({ event, context }) => {
     if (!isBalancerVault(event.srcAddress)) return;
@@ -3295,13 +3634,17 @@ BalancerVault.LiquidityAdded.handler(
 
     const timestamp = Number(event.block.timestamp);
     const blockNumber = BigInt(event.block.number);
-    if (await isBalancerResumeTransitionComplete(context, timestamp, blockNumber)) return;
+    const hadFungibleState = await hasObservedFungiblePoolState(context, pool);
     await applyStaticLPPoolCutover(context, timestamp, blockNumber);
-    if (isBalancerPoolHardStopped(timestamp, blockNumber)) return;
+    if (isBalancerPoolHardStopped(timestamp, blockNumber)) {
+      await applyScheduledEpochTransitions(context, timestamp, blockNumber);
+      return;
+    }
     await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
 
     const isActive = isBalancerAutoRangeActiveEra(timestamp, blockNumber);
     const poolConfig = await ensureBalancerAutoRangePoolConfigEntity(context, timestamp, isActive);
+    await advanceLPPoolGrowth(context, pool, timestamp, hadFungibleState ? undefined : timestamp);
     await applyBalancerAutoRangeLiquidityDelta(
       context,
       poolConfig,
@@ -3310,7 +3653,6 @@ BalancerVault.LiquidityAdded.handler(
       event.params.totalSupply,
       true
     );
-    await settleBalancerAutoRangePoolPositionsClockwise(context, pool, timestamp);
   },
   { eventFilters: { pool: BALANCER_AUTORANGE_V3_POOL } }
 );
@@ -3324,13 +3666,17 @@ BalancerVault.LiquidityRemoved.handler(
 
     const timestamp = Number(event.block.timestamp);
     const blockNumber = BigInt(event.block.number);
-    if (await isBalancerResumeTransitionComplete(context, timestamp, blockNumber)) return;
+    const hadFungibleState = await hasObservedFungiblePoolState(context, pool);
     await applyStaticLPPoolCutover(context, timestamp, blockNumber);
-    if (isBalancerPoolHardStopped(timestamp, blockNumber)) return;
+    if (isBalancerPoolHardStopped(timestamp, blockNumber)) {
+      await applyScheduledEpochTransitions(context, timestamp, blockNumber);
+      return;
+    }
     await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
 
     const isActive = isBalancerAutoRangeActiveEra(timestamp, blockNumber);
     const poolConfig = await ensureBalancerAutoRangePoolConfigEntity(context, timestamp, isActive);
+    await advanceLPPoolGrowth(context, pool, timestamp, hadFungibleState ? undefined : timestamp);
     await applyBalancerAutoRangeLiquidityDelta(
       context,
       poolConfig,
@@ -3339,7 +3685,6 @@ BalancerVault.LiquidityRemoved.handler(
       event.params.totalSupply,
       false
     );
-    await settleBalancerAutoRangePoolPositionsClockwise(context, pool, timestamp);
   },
   { eventFilters: { pool: BALANCER_AUTORANGE_V3_POOL } }
 );
@@ -3353,13 +3698,17 @@ BalancerVault.Swap.handler(
 
     const timestamp = Number(event.block.timestamp);
     const blockNumber = BigInt(event.block.number);
-    if (await isBalancerResumeTransitionComplete(context, timestamp, blockNumber)) return;
+    const hadFungibleState = await hasObservedFungiblePoolState(context, pool);
     await applyStaticLPPoolCutover(context, timestamp, blockNumber);
-    if (isBalancerPoolHardStopped(timestamp, blockNumber)) return;
+    if (isBalancerPoolHardStopped(timestamp, blockNumber)) {
+      await applyScheduledEpochTransitions(context, timestamp, blockNumber);
+      return;
+    }
     await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
 
     const isActive = isBalancerAutoRangeActiveEra(timestamp, blockNumber);
     const poolConfig = await ensureBalancerAutoRangePoolConfigEntity(context, timestamp, isActive);
+    await advanceLPPoolGrowth(context, pool, timestamp, hadFungibleState ? undefined : timestamp);
     const updatedState = await applyBalancerAutoRangeSwapDelta(
       context,
       poolConfig,
@@ -3403,8 +3752,6 @@ BalancerVault.Swap.handler(
         );
       }
     }
-
-    await settleBalancerAutoRangePoolPositionsClockwise(context, pool, timestamp);
   },
   { eventFilters: { pool: BALANCER_AUTORANGE_V3_POOL } }
 );
@@ -3414,8 +3761,16 @@ BalancerVault.Swap.handler(
 // ============================================
 
 async function updateUserLPStats(context: handlerContext, userId: string, timestamp: number) {
-  const stats = await getOrCreateUserLPStats(context, userId, timestamp);
   const positions = await listUserLPPositions(context, userId);
+  updateUserLPStatsFromPositions(context, userId, positions, timestamp);
+}
+
+function updateUserLPStatsFromPositions(
+  context: handlerContext,
+  userId: string,
+  positions: Awaited<ReturnType<typeof listUserLPPositions>>,
+  timestamp: number
+) {
   let totalPositions = 0;
   let inRangePositions = 0;
   let totalValueUsd = 0n;
@@ -3435,8 +3790,10 @@ async function updateUserLPStats(context: handlerContext, userId: string, timest
     }
   }
 
+  const normalizedUserId = normalizeAddress(userId);
   context.UserLPStats.set({
-    ...stats,
+    id: normalizedUserId,
+    user_id: normalizedUserId,
     totalPositions,
     inRangePositions,
     totalValueUsd,
@@ -3458,6 +3815,8 @@ async function updateUserEpochLPPoints(
   accrualEndTimestamp: number
 ) {
   if (pointsEarned === 0n) return;
+  if (isPointAccrualBlacklisted(normalizeAddress(userId), timestamp)) return;
+  if (isPrefilledTimestamp(timestamp)) return;
 
   const leaderboardState = await context.LeaderboardState.get('current');
   if (!leaderboardState || leaderboardState.currentEpochNumber === 0n) return;
@@ -3518,12 +3877,64 @@ async function updateUserEpochLPPoints(
     lastUpdatedAt: timestamp,
   };
 
-  context.UserEpochStats.set(updatedStats);
+  setUserEpochStats(context, updatedStats);
   await updateLifetimePoints(context, userId, updatedStats);
 
   const finalPoints = Number(updatedStats.totalPointsWithMultiplier) / 1e18;
-  const { updateLeaderboard } = await import('../helpers/leaderboard');
+  const { updateLeaderboard } =
+    require('../helpers/leaderboard') as typeof import('../helpers/leaderboard');
   await updateLeaderboard(context, userId, finalPoints, timestamp);
+}
+
+/**
+ * The two LP settlement engines return differently-named fields; settleUserLPPositions
+ * consumes both, so each is normalized to this one shape. `newAccumulatedSeconds` is
+ * absent for fungible pools, which track no per-position in-range clock.
+ */
+interface UserLPPositionSettlement {
+  settledAt: number;
+  pointsEarned: bigint;
+  accrualStartTimestamp: number;
+  accrualEndTimestamp: number;
+  newAccumulatedSeconds?: bigint;
+}
+
+function emptyUserLPPositionSettlement(timestamp: number): UserLPPositionSettlement {
+  return {
+    settledAt: timestamp,
+    pointsEarned: 0n,
+    accrualStartTimestamp: timestamp,
+    accrualEndTimestamp: timestamp,
+  };
+}
+
+async function settleUserLPPositionScalar(
+  context: handlerContext,
+  position: UserLPPosition,
+  timestamp: number
+): Promise<UserLPPositionSettlement> {
+  const settlement = await settleLPPositionGrowthAfterPoolAdvance(context, position, timestamp);
+  return {
+    settledAt: settlement.settledAt,
+    pointsEarned: settlement.pointsEarned,
+    accrualStartTimestamp: settlement.accrualStartTimestamp,
+    accrualEndTimestamp: settlement.accrualEndTimestamp,
+  };
+}
+
+async function settleUserLPPositionRanged(
+  context: handlerContext,
+  position: UserLPPosition,
+  timestamp: number
+): Promise<UserLPPositionSettlement> {
+  const settlement = await settleLPPosition(context, position, timestamp);
+  return {
+    settledAt: settlement.settledAt,
+    pointsEarned: settlement.pointsEarned,
+    accrualStartTimestamp: settlement.pointsStartTimestamp,
+    accrualEndTimestamp: settlement.pointsEndTimestamp,
+    newAccumulatedSeconds: settlement.newAccumulatedSeconds,
+  };
 }
 
 export async function settleUserLPPositions(
@@ -3536,9 +3947,13 @@ export async function settleUserLPPositions(
   const normalizedUserId = normalizeAddress(userId);
   const positions = await listUserLPPositions(context, normalizedUserId);
   if (positions.length === 0) return;
+  const currentPositions = [...positions];
+  const positionOffsets = new Map(positions.map((position, index) => [position.id, index]));
 
   const positionsByPool = new Map<string, typeof positions>();
   for (const position of positions) {
+    if (position.liquidity === 0n && position.amount0 === 0n && position.amount1 === 0n) continue;
+
     const poolId = normalizeAddress(position.pool);
     const bucket = positionsByPool.get(poolId);
     if (bucket) {
@@ -3549,312 +3964,105 @@ export async function settleUserLPPositions(
   }
 
   for (const [poolId, poolPositions] of positionsByPool.entries()) {
-    const poolConfig = await getEffectiveLPPoolConfig(context, poolId);
-    if (!poolConfig) continue;
+    const poolConfig = await context.LPPoolConfig.get(poolId);
+    // Fungible pools advance one scalar growth clock for the whole pool, then read
+    // each position's share off it. Concentrated-range pools have no pool-wide clock
+    // to advance -- each position accrues only while the price sits inside its own
+    // tick range, so they settle individually through settleLPPosition.
+    const isFungiblePool = poolConfig ? isV2PoolConfig(poolConfig) : false;
+    if (poolConfig?.isActive && isFungiblePool) {
+      await advanceLPPoolGrowth(context, poolId, timestamp);
+    }
 
-    const poolState = isBalancerAutoRangePool(poolId)
+    const poolState = poolConfig
       ? await getOrCreateLPPoolState(context, poolId, timestamp)
-      : await seedPoolStateFromChain(context, poolId, timestamp, blockNumber);
-    const poolV2State = isV2PoolConfig(poolConfig)
-      ? await getOrCreateLPPoolV2State(context, poolId, timestamp)
-      : null;
-    const { token0Decimals, token1Decimals } = await getPoolTokenDecimals(
-      context,
-      poolConfig,
-      timestamp
-    );
+      : undefined;
+    const poolV2State =
+      poolConfig && isV2PoolConfig(poolConfig)
+        ? await getOrCreateLPPoolV2State(context, poolId, timestamp)
+        : null;
+    const poolTokenDecimals = poolConfig
+      ? await getPoolTokenDecimals(context, poolConfig, timestamp)
+      : undefined;
 
     for (const position of poolPositions) {
-      if (position.liquidity === 0n && position.amount0 === 0n && position.amount1 === 0n) {
-        continue;
+      // A pool with no LPPoolConfig of its own must not settle at all. The ranged engine
+      // resolves its rate through getEffectiveLPPoolConfig, which falls back to the single
+      // active pool when a pool is unconfigured -- scoring the position against an
+      // unrelated market. Advance the clock, credit nothing.
+      const settlement = !poolConfig
+        ? emptyUserLPPositionSettlement(timestamp)
+        : isFungiblePool
+          ? await settleUserLPPositionScalar(context, position, timestamp)
+          : await settleUserLPPositionRanged(context, position, timestamp);
+      let updatedPosition = {
+        ...position,
+        lastSettledAt: settlement.settledAt,
+        settledLpPoints: position.settledLpPoints + settlement.pointsEarned,
+        lastUpdate: timestamp,
+        ...(settlement.newAccumulatedSeconds === undefined
+          ? {}
+          : { accumulatedInRangeSeconds: settlement.newAccumulatedSeconds }),
+      };
+
+      if (poolConfig && poolState && poolTokenDecimals) {
+        const isNowInRange = poolV2State
+          ? position.liquidity > 0n
+          : isPositionInRange(position.tickLower, position.tickUpper, poolState.currentTick);
+        const derivedAmounts = poolV2State
+          ? {
+              ...calculateV2PositionAmounts(
+                position.liquidity,
+                poolV2State.reserve0,
+                poolV2State.reserve1,
+                poolV2State.lpTotalSupply
+              ),
+              usedLiquidity: false,
+            }
+          : derivePositionAmounts(
+              position.liquidity,
+              position.tickLower,
+              position.tickUpper,
+              poolState.sqrtPriceX96,
+              position.amount0,
+              position.amount1
+            );
+        const valueUsd = calculatePositionValueUsd(
+          derivedAmounts.amount0,
+          derivedAmounts.amount1,
+          poolState.token0Price,
+          poolState.token1Price,
+          poolTokenDecimals.token0Decimals,
+          poolTokenDecimals.token1Decimals
+        );
+        updatedPosition = {
+          ...updatedPosition,
+          isInRange: isNowInRange,
+          amount0: derivedAmounts.amount0,
+          amount1: derivedAmounts.amount1,
+          valueUsd,
+          lastInRangeTimestamp: isNowInRange ? settlement.settledAt : 0,
+        };
       }
 
-      const wasInRange = position.isInRange;
-      const isNowInRange = poolV2State
-        ? position.liquidity > 0n
-        : isPositionInRange(position.tickLower, position.tickUpper, poolState.currentTick);
+      context.UserLPPosition.set(updatedPosition);
+      const positionOffset = positionOffsets.get(position.id);
+      if (positionOffset !== undefined) currentPositions[positionOffset] = updatedPosition;
 
-      const settlement = await settleLPPosition(context, position, timestamp);
-      const derivedAmounts = poolV2State
-        ? {
-            ...calculateV2PositionAmounts(
-              position.liquidity,
-              poolV2State.reserve0,
-              poolV2State.reserve1,
-              poolV2State.lpTotalSupply
-            ),
-            usedLiquidity: false,
-          }
-        : derivePositionAmounts(
-            position.liquidity,
-            position.tickLower,
-            position.tickUpper,
-            poolState.sqrtPriceX96,
-            position.amount0,
-            position.amount1
-          );
-      const valueUsd = calculatePositionValueUsd(
-        derivedAmounts.amount0,
-        derivedAmounts.amount1,
-        poolState.token0Price,
-        poolState.token1Price,
-        token0Decimals,
-        token1Decimals
-      );
-
-      context.UserLPPosition.set({
-        ...position,
-        isInRange: isNowInRange,
-        amount0: derivedAmounts.amount0,
-        amount1: derivedAmounts.amount1,
-        valueUsd,
-        lastInRangeTimestamp: isNowInRange ? timestamp : 0,
-        accumulatedInRangeSeconds: settlement.newAccumulatedSeconds,
-        lastSettledAt: settlement.settledAt,
-        settledLpPoints: settlement.newSettledPoints,
-        lastUpdate: timestamp,
-      });
-
-      if (settlement.pointsEarned > 0n || wasInRange !== isNowInRange) {
+      if (settlement.pointsEarned > 0n) {
         await updateUserEpochLPPoints(
           context,
           position.user_id,
           settlement.pointsEarned,
           timestamp,
-          settlement.pointsStartTimestamp,
-          settlement.pointsEndTimestamp
+          settlement.accrualStartTimestamp,
+          settlement.accrualEndTimestamp
         );
       }
     }
   }
 
-  await updateUserLPStats(context, normalizedUserId, timestamp);
-}
-
-async function settleLPPoolPositions(
-  context: handlerContext,
-  pool: string,
-  timestamp: number
-): Promise<void> {
-  const poolConfig = await getEffectiveLPPoolConfig(context, pool);
-  if (!poolConfig) return;
-
-  const positions = await listPoolLPPositions(context, pool);
-  if (positions.length === 0) {
-    setPoolStats(context, normalizeAddress(pool), 0, 0, 0n, 0n, timestamp);
-    return;
-  }
-
-  const poolState = await getOrCreateLPPoolState(context, pool, timestamp);
-  const poolV2State = isV2PoolConfig(poolConfig)
-    ? await getOrCreateLPPoolV2State(context, pool, timestamp)
-    : null;
-  const { token0Decimals, token1Decimals } = await getPoolTokenDecimals(
-    context,
-    poolConfig,
-    timestamp
-  );
-  const touchedUsers = new Set<string>();
-  let totalPositions = 0;
-  let inRangePositions = 0;
-  let totalValueUsd = 0n;
-  let inRangeValueUsd = 0n;
-
-  for (const position of positions) {
-    if (position.liquidity === 0n && position.amount0 === 0n && position.amount1 === 0n) continue;
-
-    const settlement = await settleLPPosition(context, position, timestamp);
-    const derivedAmounts = poolV2State
-      ? {
-          ...calculateV2PositionAmounts(
-            position.liquidity,
-            poolV2State.reserve0,
-            poolV2State.reserve1,
-            poolV2State.lpTotalSupply
-          ),
-          usedLiquidity: false,
-        }
-      : derivePositionAmounts(
-          position.liquidity,
-          position.tickLower,
-          position.tickUpper,
-          poolState.sqrtPriceX96,
-          position.amount0,
-          position.amount1
-        );
-    const valueUsd = calculatePositionValueUsd(
-      derivedAmounts.amount0,
-      derivedAmounts.amount1,
-      poolState.token0Price,
-      poolState.token1Price,
-      token0Decimals,
-      token1Decimals
-    );
-
-    // Preserve current in-range status - don't reset it!
-    // Update lastInRangeTimestamp to current time if still in-range for next settlement
-    context.UserLPPosition.set({
-      ...position,
-      amount0: derivedAmounts.amount0,
-      amount1: derivedAmounts.amount1,
-      valueUsd,
-      lastInRangeTimestamp: position.isInRange ? timestamp : 0,
-      accumulatedInRangeSeconds: settlement.newAccumulatedSeconds,
-      lastSettledAt: settlement.settledAt,
-      settledLpPoints: settlement.newSettledPoints,
-      lastUpdate: timestamp,
-    });
-
-    await updateUserEpochLPPoints(
-      context,
-      position.user_id,
-      settlement.pointsEarned,
-      timestamp,
-      settlement.pointsStartTimestamp,
-      settlement.pointsEndTimestamp
-    );
-    touchedUsers.add(position.user_id);
-
-    totalPositions += 1;
-    totalValueUsd += valueUsd;
-    if (position.isInRange) {
-      inRangePositions += 1;
-      inRangeValueUsd += valueUsd;
-    }
-  }
-
-  setPoolStats(
-    context,
-    normalizeAddress(pool),
-    totalPositions,
-    inRangePositions,
-    totalValueUsd,
-    inRangeValueUsd,
-    timestamp
-  );
-
-  for (const userId of touchedUsers) {
-    await updateUserLPStats(context, userId, timestamp);
-  }
-}
-
-export async function settleAllLPPoolPositions(
-  context: handlerContext,
-  timestamp: number
-): Promise<void> {
-  await applyStaticLPPoolCutover(context, timestamp);
-  const configs = await listActiveLPPoolConfigs(context);
-  if (configs.length === 0) return;
-
-  for (const config of configs) {
-    await settleLPPoolPositions(context, config.pool, timestamp);
-  }
-}
-
-async function updatePositionsInRangeStatus(
-  context: handlerContext,
-  pool: string,
-  currentTick: number,
-  timestamp: number,
-  token0Price: bigint,
-  token1Price: bigint,
-  sqrtPriceX96: bigint
-) {
-  const poolConfig = await getEffectiveLPPoolConfig(context, pool);
-  if (!poolConfig) return;
-
-  const positions = await listPoolLPPositions(context, pool);
-  if (positions.length === 0) {
-    setPoolStats(context, normalizeAddress(pool), 0, 0, 0n, 0n, timestamp);
-    return;
-  }
-
-  const { token0Decimals, token1Decimals } = await getPoolTokenDecimals(
-    context,
-    poolConfig,
-    timestamp
-  );
-  const touchedUsers = new Set<string>();
-  let totalPositions = 0;
-  let inRangePositions = 0;
-  let totalValueUsd = 0n;
-  let inRangeValueUsd = 0n;
-
-  for (const position of positions) {
-    if (position.liquidity === 0n && position.amount0 === 0n && position.amount1 === 0n) continue;
-
-    const wasInRange = position.isInRange;
-    const isNowInRange = isPositionInRange(position.tickLower, position.tickUpper, currentTick);
-    if (!wasInRange && !isNowInRange) {
-      totalPositions += 1;
-      totalValueUsd += position.valueUsd;
-      continue;
-    }
-
-    const settlement = await settleLPPosition(context, position, timestamp);
-    const derivedAmounts = derivePositionAmounts(
-      position.liquidity,
-      position.tickLower,
-      position.tickUpper,
-      sqrtPriceX96,
-      position.amount0,
-      position.amount1
-    );
-    const valueUsd = calculatePositionValueUsd(
-      derivedAmounts.amount0,
-      derivedAmounts.amount1,
-      token0Price,
-      token1Price,
-      token0Decimals,
-      token1Decimals
-    );
-
-    context.UserLPPosition.set({
-      ...position,
-      isInRange: isNowInRange,
-      amount0: derivedAmounts.amount0,
-      amount1: derivedAmounts.amount1,
-      valueUsd,
-      lastInRangeTimestamp: isNowInRange ? timestamp : 0,
-      accumulatedInRangeSeconds: settlement.newAccumulatedSeconds,
-      lastSettledAt: settlement.settledAt,
-      settledLpPoints: settlement.newSettledPoints,
-      lastUpdate: timestamp,
-    });
-
-    if (settlement.pointsEarned > 0n || wasInRange !== isNowInRange) {
-      await updateUserEpochLPPoints(
-        context,
-        position.user_id,
-        settlement.pointsEarned,
-        timestamp,
-        settlement.pointsStartTimestamp,
-        settlement.pointsEndTimestamp
-      );
-    }
-    touchedUsers.add(position.user_id);
-
-    totalPositions += 1;
-    totalValueUsd += valueUsd;
-    if (isNowInRange) {
-      inRangePositions += 1;
-      inRangeValueUsd += valueUsd;
-    }
-  }
-
-  setPoolStats(
-    context,
-    normalizeAddress(pool),
-    totalPositions,
-    inRangePositions,
-    totalValueUsd,
-    inRangeValueUsd,
-    timestamp
-  );
-
-  for (const userId of touchedUsers) {
-    await updateUserLPStats(context, userId, timestamp);
-  }
+  updateUserLPStatsFromPositions(context, normalizedUserId, currentPositions, timestamp);
 }
 
 // ============================================
@@ -3870,8 +4078,6 @@ export {
   isPositionInRange,
   calculatePositionValueUsd,
   settleLPPosition,
-  settleLPPoolPositions,
-  settleV2PoolPositions,
   updatePoolFeeStats,
   updatePoolLPStats,
   updateUserLPStats,

@@ -76,11 +76,27 @@ services:
       - ENVIO_THROTTLE_PRUNE_STALE_DATA_INTERVAL_MILLIS=60000
       - ENVIO_THROTTLE_LIVE_METRICS_BENCHMARK_INTERVAL_MILLIS=5000
       - ENVIO_THROTTLE_JSON_FILE_BENCHMARK_INTERVAL_MILLIS=30000
+      # Defer head wake-ups by N ms so one query spans many blocks; 0 = stock behavior.
+      # Recommended 3000 (cuts head requests ~74%). See .env.example for measurements.
+      - ENVIO_HEAD_DEBOUNCE_MS=${ENVIO_HEAD_DEBOUNCE_MS:-0}
       - ENVIO_ENABLE_EXTERNAL_CALLS=${ENVIO_ENABLE_EXTERNAL_CALLS:-false}
       - ENVIO_ENABLE_ETH_CALLS=${ENVIO_ENABLE_ETH_CALLS:-false}
       - ENVIO_ENABLE_NFT_CHAIN_SYNC=${ENVIO_ENABLE_NFT_CHAIN_SYNC:-false}
       - ENVIO_ENABLE_LP_CHAIN_SYNC=${ENVIO_ENABLE_LP_CHAIN_SYNC:-false}
       - DEBUG_LP_POINTS=${DEBUG_LP_POINTS:-false}
+      # Prefill settled Tides from data/tide-<n>.json instead of recomputing them. ON by
+      # default: this is the normal operating mode. It exists for FIDELITY, not speed --
+      # recomputing tides 1-8 yields more correct numbers that are NOT the numbers that were
+      # distributed. A backfill is ~87% HyperSync fetch time, so prefill only removes a slice
+      # of the ~6 min handler budget; it does not meaningfully shorten a resync. data/ reaches
+      # the container through the `.:/app` bind mount below.
+      #
+      # PREFILL_DATA_DIR is pinned because `envio start` runs the indexer from the generated
+      # subproject, making the process cwd /app/generated -- a bare relative `data` would
+      # resolve to /app/generated/data and prefill would silently load nothing. Do not set it
+      # to an empty string: that is not nullish, so it would override the default.
+      - PREFILL_HISTORIC_EPOCHS=${PREFILL_HISTORIC_EPOCHS:-true}
+      - PREFILL_DATA_DIR=${PREFILL_DATA_DIR:-/app/data}
     volumes:
       - .:/app
       - node_modules:/app/node_modules
@@ -114,6 +130,10 @@ services:
     image: cloudflare/cloudflared:latest
     container_name: neverland-cloudflared
     restart: unless-stopped
+    # Opt-in only: a bare `docker compose up -d` must not open a public tunnel. Start it
+    # explicitly with `--profile tunnel` (or `pnpm run prod:up:tunnel`).
+    profiles:
+      - tunnel
     command: tunnel run
     environment:
       - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}

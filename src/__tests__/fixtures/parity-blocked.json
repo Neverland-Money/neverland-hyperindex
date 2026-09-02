@@ -1,0 +1,14 @@
+{
+  "exactScalarPrecision": true,
+  "nonLpDifferences": [
+    {
+      "user": "0x00000000000000000000000000000000000000a1",
+      "epochNumber": "8",
+      "field": "depositPoints",
+      "baseline": "10",
+      "candidate": "11"
+    }
+  ],
+  "lpDifferences": [],
+  "closedTideRankings": []
+}

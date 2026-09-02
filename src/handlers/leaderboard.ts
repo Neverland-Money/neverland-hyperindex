@@ -3,6 +3,7 @@
  * EpochManager, LeaderboardConfig, VotingPowerMultiplier
  */
 
+import { EpochManager, LeaderboardConfig, VotingPowerMultiplier } from '../../generated';
 import {
   addTierToIndex,
   computeTotalPointsWithMultiplier,
@@ -18,6 +19,7 @@ import {
   writeLeaderboardEpoch,
 } from './shared';
 import { getTestnetBonusBps } from '../helpers/testnetTiers';
+import { setUserEpochStats } from '../helpers/prefill';
 import {
   normalizeAddress,
   EPOCH_1_START_TIME_OVERRIDE,
@@ -25,9 +27,8 @@ import {
   BALANCER_AUTORANGE_V3_POOL_ADDRESS,
   getEpochDatesOverride,
 } from '../helpers/constants';
-import './lp';
+import { removeUserFromLeaderboards, updateLeaderboard } from '../helpers/leaderboard';
 
-import { EpochManager, LeaderboardConfig, VotingPowerMultiplier } from '../../generated';
 import type { handlerContext } from '../../generated';
 
 async function getOrInitLeaderboardConfig(context: handlerContext, timestamp: number) {
@@ -341,7 +342,6 @@ LeaderboardConfig.AddressBlacklisted.handler(async ({ event, context }) => {
     lastUpdate: timestamp,
   });
 
-  const { removeUserFromLeaderboards } = await import('../helpers/leaderboard');
   await removeUserFromLeaderboards(context, userId, timestamp);
 });
 
@@ -431,7 +431,7 @@ LeaderboardConfig.PointsAwarded.handler(async ({ event, context }) => {
   );
 
   const testnetBonusBps = epochNumber === 1n ? getTestnetBonusBps(userId) : 0n;
-  context.UserEpochStats.set({
+  setUserEpochStats(context, {
     ...updatedStats,
     totalPoints,
     totalPointsWithMultiplier,
@@ -448,7 +448,6 @@ LeaderboardConfig.PointsAwarded.handler(async ({ event, context }) => {
   const finalPoints = Number(totalPointsWithMultiplier) / 1e18;
 
   // Update leaderboard
-  const { updateLeaderboard } = await import('../helpers/leaderboard');
   await updateLeaderboard(context, userId, finalPoints, Number(event.params.timestamp));
 });
 
@@ -520,7 +519,7 @@ LeaderboardConfig.PointsRemoved.handler(async ({ event, context }) => {
   );
 
   const testnetBonusBps = epochNumber === 1n ? getTestnetBonusBps(userId) : 0n;
-  context.UserEpochStats.set({
+  setUserEpochStats(context, {
     ...updatedStats,
     totalPoints,
     totalPointsWithMultiplier,
@@ -537,7 +536,6 @@ LeaderboardConfig.PointsRemoved.handler(async ({ event, context }) => {
   const finalPoints = Number(totalPointsWithMultiplier) / 1e18;
 
   // Update leaderboard
-  const { updateLeaderboard } = await import('../helpers/leaderboard');
   await updateLeaderboard(context, userId, finalPoints, Number(event.params.timestamp));
 });
 
@@ -652,6 +650,13 @@ LeaderboardConfig.LPPoolConfigured.handler(async ({ event, context }) => {
   // Get current epoch
   const leaderboardState = await context.LeaderboardState.get('current');
   const currentEpoch = leaderboardState?.currentEpochNumber ?? 1n;
+  // Lazy require breaks the leaderboard <-> lp cycle; see loadLPModule in shared.ts.
+  const { getStaticLPPoolEraState } = require('./lp') as typeof import('./lp');
+  const staticEra = getStaticLPPoolEraState(
+    pool,
+    Number(event.block.timestamp),
+    BigInt(event.block.number)
+  );
 
   // Create or update LP pool config
   context.LPPoolConfig.set({
@@ -662,11 +667,11 @@ LeaderboardConfig.LPPoolConfigured.handler(async ({ event, context }) => {
     token1,
     fee,
     lpRateBps,
-    isActive: true,
+    isActive: staticEra?.isActive ?? true,
     enabledAtEpoch: currentEpoch,
-    enabledAtTimestamp: timestamp,
-    disabledAtEpoch: undefined,
-    disabledAtTimestamp: undefined,
+    enabledAtTimestamp: staticEra?.enabledAtTimestamp ?? timestamp,
+    disabledAtEpoch: staticEra?.disabledAtTimestamp === undefined ? undefined : currentEpoch,
+    disabledAtTimestamp: staticEra?.disabledAtTimestamp,
     lastUpdate: timestamp,
   });
 
@@ -694,13 +699,9 @@ LeaderboardConfig.LPPoolConfigured.handler(async ({ event, context }) => {
     lastUpdate: timestamp,
   });
 
-  // Update global LP rate in config
-  const config = await getOrInitLeaderboardConfig(context, timestamp);
-  writeLeaderboardConfig(context, {
-    ...config,
-    lpRateBps,
-    lastUpdate: timestamp,
-  });
+  // The global LP rate is only a bootstrap/default for newly discovered
+  // pools. Once a pool exists, its rate is owned by LPPoolConfig.
+  await getOrInitLeaderboardConfig(context, timestamp);
 });
 
 LeaderboardConfig.LPPoolDisabled.handler(async ({ event, context }) => {
@@ -715,21 +716,21 @@ LeaderboardConfig.LPPoolDisabled.handler(async ({ event, context }) => {
   const timestamp = Number(event.params.timestamp);
 
   const poolConfig = await context.LPPoolConfig.get(pool);
-  if (poolConfig) {
-    const { settleLPPoolPositions } = await import('./lp');
-    await settleLPPoolPositions(context, pool, timestamp);
+  if (!poolConfig?.isActive) return;
 
-    const leaderboardState = await context.LeaderboardState.get('current');
-    const currentEpoch = leaderboardState?.currentEpochNumber ?? 1n;
+  const { advanceLPPoolGrowth } = require('./lpGrowth') as typeof import('./lpGrowth');
+  await advanceLPPoolGrowth(context, pool, timestamp);
 
-    context.LPPoolConfig.set({
-      ...poolConfig,
-      isActive: false,
-      disabledAtEpoch: currentEpoch,
-      disabledAtTimestamp: timestamp,
-      lastUpdate: timestamp,
-    });
-  }
+  const leaderboardState = await context.LeaderboardState.get('current');
+  const currentEpoch = leaderboardState?.currentEpochNumber ?? 1n;
+
+  context.LPPoolConfig.set({
+    ...poolConfig,
+    isActive: false,
+    disabledAtEpoch: currentEpoch,
+    disabledAtTimestamp: timestamp,
+    lastUpdate: timestamp,
+  });
 });
 
 LeaderboardConfig.LPRateUpdated.handler(async ({ event, context }) => {
@@ -750,8 +751,8 @@ LeaderboardConfig.LPRateUpdated.handler(async ({ event, context }) => {
   // indexer's local isActive flag can also represent an off-chain points era.
   // Inactive local pools keep their next rate without accruing paused points.
   if (poolConfig.isActive) {
-    const { settleLPPoolPositions } = await import('./lp');
-    await settleLPPoolPositions(context, pool, timestamp);
+    const { advanceLPPoolGrowth } = require('./lpGrowth') as typeof import('./lpGrowth');
+    await advanceLPPoolGrowth(context, pool, timestamp);
   }
 
   context.LPPoolConfig.set({
