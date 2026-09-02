@@ -30,7 +30,14 @@ if docker ps --format '{{.Names}}' | grep -qx "$PG"; then
 else
   echo "  postgres $PG NOT running"
 fi
-# `grep -c` prints 0 AND exits 1 on no match, so `|| echo 0` would print a second 0.
-n=$(grep -ciE 'error|panic|fatal' "$OUT/sync.log" 2>/dev/null || true)
-echo "  errors in log: ${n:-0}"
+# `grep -c` prints the count and exits 1 when it is 0, so 1 is not a failure here. A log that is
+# absent is normal before the first launch and is said so; one that cannot be read is a failure.
+if [ ! -e "$OUT/sync.log" ]; then
+  echo "  errors in log: (no sync.log yet)"
+elif n=$(grep -ciE 'error|panic|fatal' "$OUT/sync.log" 2>/dev/null) || [ $? -eq 1 ]; then
+  echo "  errors in log: $n"
+else
+  echo "  errors in log: (cannot read $OUT/sync.log)"
+  rc=1
+fi
 exit "$rc"
