@@ -13,13 +13,7 @@
 # Env passed through from .env, with the database pointed at the throwaway container.
 set -euo pipefail
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT="${HEADSYNC_OUT:-$REPO/.headsync}"
-PG=nvl-head-pg
-HASURA=nvl-head-hasura
-PGPORT=15434
-HASURAPORT=18082
-INDEXERPORT=18083
+. "$(dirname "${BASH_SOURCE[0]}")/local-headsync-lib.sh"
 PGPASS="${HEADSYNC_PG_PASSWORD:-candidate}"
 
 mkdir -p "$OUT"
@@ -62,10 +56,10 @@ echo "prefill: ${PREFILL_HISTORIC_EPOCHS:-false}"
 
 # Refuse a second launch: both would bind ENVIO_INDEXER_PORT, the loser dies on EADDRINUSE and
 # the pid file would then name a dead process while the first indexer keeps running. The
-# cmdline check keeps a reused pid from an unrelated process from blocking a restart.
+# identity check keeps a reused pid from an unrelated process from blocking a restart.
 if [ -s "$OUT/indexer.pid" ]; then
   prev=$(cat "$OUT/indexer.pid")
-  if kill -0 "$prev" 2>/dev/null && ps -o args= -p "$prev" 2>/dev/null | grep -q 'pnpm run start'; then
+  if headsync_pid_alive "$prev"; then
     echo "local head sync already running (pid $prev); run 'pnpm run local:headsync:down' first" >&2
     exit 1
   fi

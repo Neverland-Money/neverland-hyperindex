@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # Stop the local head sync and remove its containers and volume.
 set -euo pipefail
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT="${HEADSYNC_OUT:-$REPO/.headsync}"
+. "$(dirname "${BASH_SOURCE[0]}")/local-headsync-lib.sh"
 pid=$(cat "$OUT/indexer.pid" 2>/dev/null || echo)
 # Signal only the indexer: after a reboot the recorded pid can belong to any process.
-if [ -n "$pid" ] && ps -o args= -p "$pid" 2>/dev/null | grep -q 'pnpm run start'; then
+if headsync_pid_alive "$pid"; then
   kill -TERM "$pid" 2>/dev/null || true
 elif [ -n "$pid" ]; then
   echo "pid $pid is not the head-sync indexer (stale pid file); not signaling it" >&2
