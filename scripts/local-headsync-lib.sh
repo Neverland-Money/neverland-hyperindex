@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Shared by the local-headsync scripts. Sourced, never executed.
+# shellcheck disable=SC2034  # every variable below is read by a sourcing script
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${HEADSYNC_OUT:-$REPO/.headsync}"
 PG=nvl-head-pg

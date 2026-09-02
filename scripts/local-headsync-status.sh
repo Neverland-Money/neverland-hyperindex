@@ -2,9 +2,19 @@
 # Progress and prefill state of the local head sync.
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/local-headsync-lib.sh"
-# `|| ...` keeps a not-yet-ready Postgres (container up, queries failing) from aborting the
-# script under `set -e` before the log summary below.
-Q() { docker exec "$PG" psql -U postgres -d envio -tAc "$1" 2>/dev/null || echo "  (query failed: postgres not ready)"; }
+# A failing query must not abort the script under `set -e` before the log summary below, but
+# it must not be mistaken for "not ready" either: the first line of psql's own error is shown
+# (connection refused, missing relation, bad role...) and the script exits non-zero at the end.
+rc=0
+Q() {
+  local out
+  if out=$(docker exec "$PG" psql -U postgres -d envio -tAc "$1" 2>&1); then
+    printf '%s\n' "$out"
+  else
+    echo "  (query failed: $(printf '%s\n' "$out" | head -n1))"
+    rc=1
+  fi
+}
 pid=$(cat "$OUT/indexer.pid" 2>/dev/null || echo)
 if headsync_pid_alive "$pid"; then
   echo "indexer pid $pid  up $(ps -o etime= -p "$pid" | tr -d ' ')"
@@ -20,4 +30,7 @@ if docker ps --format '{{.Names}}' | grep -qx "$PG"; then
 else
   echo "  postgres $PG NOT running"
 fi
-echo "  errors in log: $(grep -ciE 'error|panic|fatal' "$OUT/sync.log" 2>/dev/null || echo 0)"
+# `grep -c` prints 0 AND exits 1 on no match, so `|| echo 0` would print a second 0.
+n=$(grep -ciE 'error|panic|fatal' "$OUT/sync.log" 2>/dev/null || true)
+echo "  errors in log: ${n:-0}"
+exit "$rc"

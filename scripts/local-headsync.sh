@@ -56,7 +56,11 @@ echo "prefill: ${PREFILL_HISTORIC_EPOCHS:-false}"
 
 # Refuse a second launch: both would bind ENVIO_INDEXER_PORT, the loser dies on EADDRINUSE and
 # the pid file would then name a dead process while the first indexer keeps running. The
-# identity check keeps a reused pid from an unrelated process from blocking a restart.
+# identity check keeps a reused pid from an unrelated process from blocking a restart, and the
+# lock makes the check, the launch and the pid write one step, so two launches started at the
+# same moment cannot both pass the check. `down` takes the same lock.
+exec 9>"$OUT/launch.lock"
+flock -n 9 || { echo "another local:headsync launch or teardown is in progress" >&2; exit 1; }
 if [ -s "$OUT/indexer.pid" ]; then
   prev=$(cat "$OUT/indexer.pid")
   if headsync_pid_alive "$prev"; then
@@ -66,6 +70,7 @@ if [ -s "$OUT/indexer.pid" ]; then
   rm -f "$OUT/indexer.pid"
 fi
 
-nohup pnpm run start > "$OUT/sync.log" 2>&1 &
+# fd 9 is closed for the indexer so the lock ends with this script, not with the sync.
+nohup pnpm run start 9>&- > "$OUT/sync.log" 2>&1 &
 echo $! > "$OUT/indexer.pid"
 echo "started pid $(cat "$OUT/indexer.pid") -> $OUT/sync.log"
