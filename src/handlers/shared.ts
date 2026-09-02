@@ -794,16 +794,22 @@ export async function settleAllLPHolders(
   const registry = await context.LPPoolRegistry.get('global');
   if (!registry || registry.poolIds.length === 0) return;
 
+  // Both reads are issued as one wave each rather than chained awaits: the preload pass only
+  // batches reads registered in the same tick, so the chained form costs one query per pool
+  // and then one per indexed position on every keeper BatchComplete.
+  const poolIds = [...new Set(registry.poolIds.map(normalizeAddress))];
+  const indexes = await Promise.all(poolIds.map(poolId => context.LPPoolPositionIndex.get(poolId)));
   const positionIds = new Set<string>();
-  for (const poolId of new Set(registry.poolIds.map(normalizeAddress))) {
-    const index = await context.LPPoolPositionIndex.get(poolId);
+  for (const index of indexes) {
     for (const positionId of index?.positionIds ?? []) positionIds.add(positionId);
   }
   if (positionIds.size === 0) return;
 
+  const positions = await Promise.all(
+    [...positionIds].map(positionId => context.UserLPPosition.get(positionId))
+  );
   const holders = new Set<string>();
-  for (const positionId of positionIds) {
-    const position = await context.UserLPPosition.get(positionId);
+  for (const position of positions) {
     if (position && position.liquidity > 0n) holders.add(normalizeAddress(position.user_id));
   }
   if (holders.size === 0) return;

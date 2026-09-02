@@ -7,6 +7,8 @@ import './test-env-preload';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
+import { ZERO_ADDRESS } from '../helpers/constants';
+
 import {
   applyUserSpecialEditionDelta,
   calculateAverageSpecialEditionMultiplierBps,
@@ -284,5 +286,3 @@ test('special-edition delta saturates stale removals and fails closed without re
   const missing = { UserSpecialEditionState: store() } as unknown as handlerContext;
   await applyUserSpecialEditionDelta(missing, 'alice', 1n, 1n, 12, '0x03', 'MISSING', 3);
 });
-
-const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';

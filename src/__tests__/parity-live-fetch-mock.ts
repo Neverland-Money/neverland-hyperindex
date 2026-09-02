@@ -221,9 +221,14 @@ globalThis.fetch = async (input, init) => {
       if (entity === 'LeaderboardKeeperUserSettled' && record.isGap !== false) return false;
       return typeof record.id === 'string' && record.id > effectiveCursor;
     })
-    .sort((left, right) =>
-      String((left as { id: unknown }).id).localeCompare(String((right as { id: unknown }).id))
-    )
+    // Code-unit order: the same rule as the `>` cursor filter above, as fetchAll's
+    // strictly-increasing validator, and as the byte-ordered Postgres behind the real endpoint.
+    // localeCompare disagrees on case and on separator-vs-digit ids.
+    .sort((left, right) => {
+      const l = String((left as { id: unknown }).id);
+      const r = String((right as { id: unknown }).id);
+      return l < r ? -1 : l > r ? 1 : 0;
+    })
     .slice(0, applyFault && fault === 'oversized' ? limit + 1 : limit);
   rows = projectRows(entity, rows, fields);
 

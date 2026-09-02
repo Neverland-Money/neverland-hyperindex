@@ -43,7 +43,7 @@ pnpm run test:build && node --test dist-test/src/__tests__/pool-events.test.js
 pnpm run test:build && node --test --test-name-pattern="colliding" dist-test/src/__tests__/config-events.test.js
 ```
 
-Coverage is enforced at **100%** across the board, **except `src/handlers/lp.ts`**, which is excluded in the `c8` block of `package.json`. The **husky `pre-commit` hook** runs the full gate: `codegen` → git-diff check → `format:check` → `lint` → `type-check` → `test:coverage`. CI (`.github/workflows/ci.yml`) runs `format:check`, `lint`, and a source-cleanliness diff. Prod/staging Docker Compose lifecycle lives in the `prod:*` / `staging:*` npm scripts and the `README.md`.
+Coverage is enforced at **100%** across the board, **except `src/handlers/lp.ts`**, which is excluded in `.c8rc.json` (the only c8 config c8 reads). The **husky `pre-commit` hook** runs the full gate: `codegen` → git-diff check → `format:check` → `lint` → `type-check` → `test:coverage:check`. CI (`.github/workflows/ci.yml`) runs `format:check`, `lint`, and a source-cleanliness diff. Prod/staging Docker Compose lifecycle lives in the `prod:*` / `staging:*` npm scripts and the `README.md`.
 
 ## Architecture / concepts that span multiple files
 

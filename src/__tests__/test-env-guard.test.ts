@@ -58,16 +58,18 @@ test('the runner preload armed a safe environment', () => {
   assert.equal(isPrefillEnabled(), false, 'ordinary tests must run with prefill off');
 });
 
-test('the preload sentinel matches the one the guard compares against', () => {
-  // The preload is dependency-free by design, so the literal is duplicated. Pin them equal.
-  const preload = fs.readFileSync(
-    path.resolve(process.cwd(), 'src/__tests__/test-env-preload.ts'),
-    'utf8'
-  );
-  assert.ok(
-    preload.includes(`'${TEST_PREFILL_DIR_SENTINEL}'`),
-    'test-env-preload.ts and helpers/prefill.ts disagree on the sentinel value'
-  );
+test('every duplicated sentinel literal matches the one the guard compares against', () => {
+  // The preload and the seam are both dependency-free by design (they must run before the
+  // dist-test symlink exists), so the literal is duplicated in each. Pin every copy equal: a
+  // stale copy in the seam would turn the loud "still the sentinel" failure into a silent
+  // empty prefill.
+  for (const file of ['src/__tests__/test-env-preload.ts', 'src/__tests__/v3-test-helpers.ts']) {
+    const source = fs.readFileSync(path.resolve(process.cwd(), file), 'utf8');
+    assert.ok(
+      source.includes(`'${TEST_PREFILL_DIR_SENTINEL}'`),
+      `${file} and helpers/prefill.ts disagree on the sentinel value`
+    );
+  }
 });
 
 test('an un-overridden data directory fails loudly rather than loading anything', () => {

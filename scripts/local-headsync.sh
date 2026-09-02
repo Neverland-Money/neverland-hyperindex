@@ -32,6 +32,9 @@ if ! docker ps -a --format '{{.Names}}' | grep -qx "$PG"; then
     -p 127.0.0.1:$PGPORT:5432 -v nvl-head-pgdata:/var/lib/postgresql \
     postgres:18.3 >/dev/null
 fi
+# `docker ps -a` above also matches a stopped container (host or Docker Desktop restart);
+# start it instead of waiting 120 s on a pg_isready that can never succeed.
+docker ps --format '{{.Names}}' | grep -qx "$PG" || docker start "$PG" >/dev/null
 
 echo "waiting for postgres..."
 for _ in $(seq 1 60); do docker exec "$PG" pg_isready -U postgres >/dev/null 2>&1 && break; sleep 2; done
@@ -45,6 +48,7 @@ if ! docker ps -a --format '{{.Names}}' | grep -qx "$HASURA"; then
     -e HASURA_GRAPHQL_STRINGIFY_NUMERIC_TYPES=true -e HASURA_GRAPHQL_UNAUTHORIZED_ROLE=public \
     -p 127.0.0.1:$HASURAPORT:8080 hasura/graphql-engine:v2.43.0 >/dev/null
 fi
+docker ps --format '{{.Names}}' | grep -qx "$HASURA" || docker start "$HASURA" >/dev/null
 
 cd "$REPO"
 set -a; . "$REPO/.env"; set +a
@@ -55,6 +59,18 @@ export ENVIO_PG_HOST=127.0.0.1 ENVIO_PG_PORT=$PGPORT ENVIO_PG_DATABASE=envio \
 # Everything else -- PREFILL_HISTORIC_EPOCHS included -- comes from .env, so what runs here
 # is exactly what a deployment with the same .env would run.
 echo "prefill: ${PREFILL_HISTORIC_EPOCHS:-false}"
+
+# Refuse a second launch: both would bind ENVIO_INDEXER_PORT, the loser dies on EADDRINUSE and
+# the pid file would then name a dead process while the first indexer keeps running. The
+# cmdline check keeps a reused pid from an unrelated process from blocking a restart.
+if [ -s "$OUT/indexer.pid" ]; then
+  prev=$(cat "$OUT/indexer.pid")
+  if kill -0 "$prev" 2>/dev/null && ps -o args= -p "$prev" 2>/dev/null | grep -q 'pnpm run start'; then
+    echo "local head sync already running (pid $prev); run 'pnpm run local:headsync:down' first" >&2
+    exit 1
+  fi
+  rm -f "$OUT/indexer.pid"
+fi
 
 nohup pnpm run start > "$OUT/sync.log" 2>&1 &
 echo $! > "$OUT/indexer.pid"

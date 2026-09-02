@@ -17,6 +17,8 @@ contract and its five handlers, the `ReserveStableRateBorrowing` and `StableDebt
 events, both entities, 22 fields across `Reserve`, `UserReserve`, `Borrow`,
 `ReserveParamsHistoryItem`, `ReserveConfigurationHistoryItem` and `ReserveRateSnapshot`, the
 `sToken` `SubToken` row, and `abis/lending/StableDebtToken.json`.
+Registering the 18 sTokens had also put 90 of 542 address/topic pairs (17%) in front of
+HyperSync on every block, for data that cannot exist.
 
 `totalDebt` in settlement and protocol aggregation drops its stable term. `ReserveDataUpdated`
 keeps its `stableBorrowRate` parameter — it is an ABI field, simply no longer stored. The debt
@@ -190,17 +192,6 @@ measured run every tide converged back to precisely the value in `data/`, becaus
 on-chain timestamps agree with the export. They would not converge for a tide whose on-chain
 dates are wrong — the case `EPOCH_DATES_OVERRIDES` exists to correct — and the stored epoch
 envelope would then follow the chain rather than the file. Points are unaffected either way.
-
-### Stable-debt tokens are no longer registered
-
-`INDEX_STABLE_DEBT_TOKENS = false`. Stable-rate borrowing is disabled across this market —
-no reserve has `stableBorrowRateEnabled`, none carries stable debt, no user holds any — yet
-all 18 deployed sTokens were registered, putting **90 of 542 address/topic pairs (17%)** in
-front of HyperSync on every block for data that cannot exist. The handlers remain in place;
-flip the flag and resync to index stable debt again.
-
-Takes effect on a fresh sync only, since registrations already persisted in
-`envio_addresses` are not revoked.
 
 ### Maintenance
 

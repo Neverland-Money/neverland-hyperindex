@@ -7,7 +7,10 @@
  * written verbatim and the leaderboard does no settlement at all for the span they cover.
  *
  * Discovery is the file listing -- no separate config. Drop a tide file in, it is prefilled;
- * remove it, and that tide is indexed normally again.
+ * remove the LAST one, and that tide is indexed normally again. Only trailing tides can be
+ * removed: the covered span is a single timestamp bound, so a set with a gap, or one that does
+ * not start at Tide 1, would silence the missing tide without ever writing it. Such a set is
+ * refused at load.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -189,6 +192,16 @@ export function loadPrefilledTides(): PrefilledTide[] {
     })
     .filter(doc => typeof doc.tide === 'number' && Array.isArray(doc.userEpochStats))
     .sort((left, right) => left.tide - right.tide);
+  // The bound below is max(tide) + 1's start: every tide under it is suppressed whether or not
+  // its file exists. A gap, a duplicate, or a set not starting at 1 would therefore leave a tide
+  // both un-prefilled and un-accrued, silently. Refuse that outright.
+  tides.forEach((doc, index) => {
+    if (doc.tide !== index + 1) {
+      throw new Error(
+        `prefill: tide files must be contiguous from tide-1 (found ${tides.map(t => t.tide).join(', ')})`
+      );
+    }
+  });
   cached = tides;
   return cached;
 }
@@ -211,6 +224,9 @@ type SnapshotTable = {
 
 export type PrefillSnapshot = {
   readonly boundaryBlock: number;
+  /** The last settled Tide the image was captured after. Absent on artifacts exported before
+   *  the field existed; when present it must match the last prefilled tide file. */
+  readonly lastTide?: number;
   readonly exportedAt: string;
   readonly source: string;
   readonly tables: Readonly<Record<string, SnapshotTable>>;
@@ -347,7 +363,7 @@ export async function prefillHistoricEpochsIfNeeded(
     }
   }
 
-  writePrefillSnapshot(context);
+  writePrefillSnapshot(context, tides);
 }
 
 /**
@@ -392,9 +408,17 @@ async function isPrefillAlreadyApplied(
  * `data/prefill-snapshot.json` is optional -- absent, prefill restores only the tide files, the
  * behaviour that shipped before this existed.
  */
-function writePrefillSnapshot(context: handlerContext): void {
+function writePrefillSnapshot(context: handlerContext, tides: readonly PrefilledTide[]): void {
   const snapshot = loadPrefillSnapshot();
   if (!snapshot) return;
+  // An end-of-Tide-N image stamped at any other boundary corrupts the cumulative tables, and
+  // the trailing tide file is the one thing an operator is allowed to remove.
+  const lastTide = tides[tides.length - 1].tide;
+  if (snapshot.lastTide !== undefined && snapshot.lastTide !== lastTide) {
+    throw new Error(
+      `prefill snapshot: image is for Tide ${snapshot.lastTide} but the last prefilled tide is ${lastTide}`
+    );
+  }
 
   for (const [table, dump] of Object.entries(snapshot.tables)) {
     const store = (

@@ -13,6 +13,7 @@ import {
   buildCopySql,
   diffRows,
   encodeDocument,
+  normalizeEpochRow,
   parseCsv,
   rowsToObjects,
 } from '../../scripts/export-tides';
@@ -87,6 +88,56 @@ test('diffing reports mismatches, absences and extras', () => {
   assert.ok(diffs.some(d => d.includes('a.totalPoints: db=1 file=2')));
   assert.ok(diffs.some(d => d === 'b: missing from file'));
   assert.ok(diffs.some(d => d === 'c: only in file'));
+});
+
+test('the epoch record verifies field for field across the two representations', () => {
+  // Database side: COPY text (booleans t/f, digit strings, NULL as empty). File side: what
+  // parseTideDocument yields (booleans, numbers, quoted BigInts, null). Same record, no diff.
+  const db = {
+    duration: '2548800',
+    endBlock: '99797722',
+    endTime: '1787889600',
+    epochNumber: '8',
+    id: '8',
+    isActive: 'f',
+    scheduledEndTime: '1787889600',
+    scheduledStartTime: '1785340800',
+    startBlock: '91000000',
+    startTime: '1785340800',
+  };
+  const file: Record<string, unknown> = {
+    duration: 2548800,
+    endBlock: '99797722',
+    endTime: 1787889600,
+    epochNumber: '8',
+    id: '8',
+    isActive: false,
+    scheduledEndTime: 1787889600,
+    scheduledStartTime: 1785340800,
+    startBlock: '91000000',
+    startTime: 1785340800,
+  };
+  assert.deepEqual(diffRows([normalizeEpochRow(db)], [normalizeEpochRow(file)], EPOCH_FIELDS), []);
+  // A wrong endTime in the artifact is exactly what a stats-only verify let through.
+  const drifted = normalizeEpochRow({ ...file, endTime: 1787889601, isActive: true });
+  const diffs = diffRows([normalizeEpochRow(db)], [drifted], EPOCH_FIELDS);
+  assert.ok(
+    diffs.some(d => d === '8.endTime: db=1787889600 file=1787889601'),
+    diffs.join('; ')
+  );
+  assert.ok(
+    diffs.some(d => d === '8.isActive: db=false file=true'),
+    diffs.join('; ')
+  );
+  // NULL in the database and null in the file are the same absence.
+  assert.deepEqual(
+    diffRows(
+      [normalizeEpochRow({ ...db, duration: '' })],
+      [normalizeEpochRow({ ...file, duration: null })],
+      EPOCH_FIELDS
+    ),
+    []
+  );
 });
 
 test('identical data diffs to nothing', () => {

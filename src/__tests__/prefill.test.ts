@@ -243,20 +243,23 @@ test('a tide file with no endTime neither crashes nor extends coverage', async (
   });
 });
 
-test('closing a prefilled Tide neither sweeps holders nor freezes growth', async () => {
-  // Reaches the guard in freezeLPForEpochEnd: the close path for a Tide whose figures are
-  // already stored must not run the LP holder sweep or write a growth freeze, because both
-  // would overwrite settled values.
+test('closing a prefilled Tide still freezes LP growth but writes no points', async () => {
+  // There is deliberately no prefill guard on freezeLPForEpochEnd: shared.ts documents that
+  // skipping the sweep and the freeze for a prefilled Tide stranded LP-only holders. What the
+  // prefilled span suppresses is the POINT writes, so the close must leave a frozen growth row
+  // and an empty UserEpochStats. Epoch 2 is used because epoch 1 has a dates override that would
+  // keep it open past this event.
+  const POOL = '0x00000000000000000000000000000000000000c1';
   await withPrefill(FIXTURES, async () => {
     let mockDb = TestHelpers.MockDb.createMockDb();
     mockDb = mockDb.entities.LeaderboardState.set({
       id: 'current',
-      currentEpochNumber: 1n,
+      currentEpochNumber: 2n,
       isActive: true,
     });
     mockDb = mockDb.entities.LeaderboardEpoch.set({
-      id: '1',
-      epochNumber: 1n,
+      id: '2',
+      epochNumber: 2n,
       startBlock: 1n,
       startTime: 1000,
       endBlock: undefined,
@@ -266,22 +269,68 @@ test('closing a prefilled Tide neither sweeps holders nor freezes growth', async
       scheduledStartTime: 1000,
       scheduledEndTime: 2000,
     });
+    // An active fungible-share pool (positionManager === pool) so the close has growth to freeze.
+    mockDb = mockDb.entities.LPPoolRegistry.set({ id: 'global', poolIds: [POOL], lastUpdate: 0 });
+    mockDb = mockDb.entities.LPPoolConfig.set({
+      id: POOL,
+      pool: POOL,
+      positionManager: POOL,
+      token0: '0x00000000000000000000000000000000000000a0',
+      token1: '0x00000000000000000000000000000000000000a1',
+      fee: undefined,
+      lpRateBps: 100n,
+      isActive: true,
+      enabledAtEpoch: 1n,
+      enabledAtTimestamp: 0,
+      disabledAtEpoch: undefined,
+      disabledAtTimestamp: undefined,
+      lastUpdate: 0,
+    });
+    mockDb = mockDb.entities.LPPoolState.set({
+      id: POOL,
+      pool: POOL,
+      currentTick: 0,
+      sqrtPriceX96: 0n,
+      token0Price: 100_000_000n,
+      token1Price: 100_000_000n,
+      feeProtocol0: 0,
+      feeProtocol1: 0,
+      lastUpdate: 0,
+    });
+    mockDb = mockDb.entities.LPPoolV2State.set({
+      id: POOL,
+      pool: POOL,
+      reserve0: 1_000_000n,
+      reserve1: 1_000_000n,
+      lpTotalSupply: 1_000_000n,
+      lastUpdate: 0,
+    });
 
-    // endTime 2000 sits inside the prefilled span (fixtures run to 5000).
+    // endTime 2000 sits inside the prefilled span (fixtures run to 5000). Event metadata goes
+    // under mockEventData; the native mock ignores it at the top level.
     const epochEnd = TestHelpers.EpochManager.EpochEnd.createMockEvent({
-      epochNumber: 1n,
+      epochNumber: 2n,
       endTime: 2000n,
-      block: { number: 500, timestamp: 2000 },
-      logIndex: 1,
-      srcAddress: '0x0000000000000000000000000000000000009001',
-      transaction: { hash: `0x${'9'.repeat(64)}` },
+      mockEventData: {
+        block: { number: 500, timestamp: 2000 },
+        logIndex: 1,
+        srcAddress: '0x0000000000000000000000000000000000009001',
+        transaction: { hash: `0x${'9'.repeat(64)}` },
+      },
     });
     mockDb = await TestHelpers.EpochManager.EpochEnd.processEvent({ event: epochEnd, mockDb });
 
+    const closed = mockDb.entities.LeaderboardEpoch.get('2');
+    assert.equal(closed?.isActive, false, 'the Tide closed');
+    assert.equal(closed?.endTime, 2000);
+    const growth = mockDb.entities.LPPoolEpochGrowth.get(`${POOL}:2`);
+    assert.ok(growth, 'the close froze the growth clock');
+    assert.equal(growth?.isFrozen, true);
+    assert.equal(growth?.frozenAt, 2000);
     assert.deepEqual(
-      mockDb.entities.LPPoolEpochGrowth.getAll(),
+      mockDb.entities.UserEpochStats.getAll(),
       [],
-      'a prefilled Tide writes no growth freeze'
+      'a prefilled Tide writes no points'
     );
   });
 });
@@ -378,21 +427,46 @@ test('the preload pass writes nothing and revives no rows', async () => {
 test('the bound prefers the next tide declared start over the last tide end', async () => {
   // Tides do not abut. When the tide after the last prefilled one has a declared start, that
   // start is the bound, so the gap between them stays guarded.
-  await withPrefill(NEXT_OVERRIDE_FIXTURES, () => {
-    assert.equal(prefilledBeforeTimestamp(), 1787893200, "Tide 9's declared start");
-    assert.equal(isPrefilledTimestamp(1787889600), true, "Tide 8's end is still prefilled");
-    assert.equal(isPrefilledTimestamp(1787891000), true, 'the gap hour is guarded too');
-    assert.equal(isPrefilledTimestamp(1787893200), false, 'Tide 9 accrues normally');
+  await withScratchDir(async scratch => {
+    // Tides 1-7 are filler so the set is contiguous; tide-8 is the fixture under test.
+    writeTideDocs(
+      scratch,
+      Array.from({ length: 7 }, (_, i) => ({
+        tide: i + 1,
+        startTime: i * 100,
+        endTime: i * 100 + 50,
+      }))
+    );
+    fs.copyFileSync(
+      path.join(NEXT_OVERRIDE_FIXTURES, 'tide-8.json'),
+      path.join(scratch, 'tide-8.json')
+    );
+    await withPrefill(scratch, () => {
+      assert.equal(prefilledBeforeTimestamp(), 1787893200, "Tide 9's declared start");
+      assert.equal(isPrefilledTimestamp(1787889600), true, "Tide 8's end is still prefilled");
+      assert.equal(isPrefilledTimestamp(1787891000), true, 'the gap hour is guarded too');
+      assert.equal(isPrefilledTimestamp(1787893200), false, 'Tide 9 accrues normally');
+    });
   });
 });
 
 test('a prefilled set with no endTime anywhere covers nothing', async () => {
   // Neither an override for the next tide nor any endTime to fall back on: rather than
   // guess a bound, cover nothing and let the tide be indexed normally.
-  await withPrefill(NO_ENDTIME_FIXTURES, () => {
-    assert.equal(loadPrefilledTides().length, 1);
-    assert.equal(prefilledBeforeTimestamp(), 0);
-    assert.equal(isPrefilledTimestamp(6000), false);
+  await withScratchDir(async scratch => {
+    writeTideDocs(scratch, [
+      { tide: 1, startTime: 1000 },
+      { tide: 2, startTime: 3000 },
+    ]);
+    fs.copyFileSync(
+      path.join(NO_ENDTIME_FIXTURES, 'tide-3.json'),
+      path.join(scratch, 'tide-3.json')
+    );
+    await withPrefill(scratch, () => {
+      assert.equal(loadPrefilledTides().length, 3);
+      assert.equal(prefilledBeforeTimestamp(), 0);
+      assert.equal(isPrefilledTimestamp(6000), false);
+    });
   });
 });
 
@@ -401,6 +475,34 @@ test('a prefilled set with no endTime anywhere covers nothing', async () => {
 // throwaway directory: the tripwire admits any directory that is neither the sentinel nor the
 // real data/, and nothing here comes anywhere near the production artifacts.
 // ---------------------------------------------------------------------------------------------
+
+/** Writes minimal tide documents (no stats) so a scratch directory forms a contiguous set. */
+function writeTideDocs(
+  dir: string,
+  tides: readonly { tide: number; startTime: number; endTime?: number }[]
+): void {
+  for (const t of tides) {
+    const epoch: Record<string, unknown> = {
+      id: String(t.tide),
+      epochNumber: String(t.tide),
+      startTime: t.startTime,
+      isActive: false,
+    };
+    if (t.endTime !== undefined) epoch.endTime = t.endTime;
+    fs.writeFileSync(
+      path.join(dir, `tide-${t.tide}.json`),
+      JSON.stringify({
+        tide: t.tide,
+        epoch,
+        fields: [],
+        totalEntries: 0,
+        userEpochStats: [],
+        exportedAt: '2026-08-31T00:00:00Z',
+        source: 'test fixture (generated)',
+      })
+    );
+  }
+}
 
 /** A scratch directory for one test, removed on the way out. */
 async function withScratchDir<T>(run: (dir: string) => T | Promise<T>): Promise<T> {
@@ -553,5 +655,80 @@ test('a snapshot table with no entity store is a schema mismatch and throws', as
         /prefill snapshot: no entity store for "NoSuchEntity"/
       );
     });
+  });
+});
+
+test('a tide set with a gap is refused, because the bound would silence the missing tide', async () => {
+  await withScratchDir(async scratch => {
+    writeTideDocs(scratch, [
+      { tide: 1, startTime: 0, endTime: 100 },
+      { tide: 2, startTime: 200, endTime: 300 },
+      { tide: 4, startTime: 600, endTime: 700 },
+    ]);
+    await withPrefill(scratch, () => {
+      assert.throws(() => loadPrefilledTides(), /contiguous from tide-1 \(found 1, 2, 4\)/);
+    });
+  });
+});
+
+test('a tide set that does not start at tide-1 is refused for the same reason', async () => {
+  await withScratchDir(async scratch => {
+    writeTideDocs(scratch, [
+      { tide: 2, startTime: 200, endTime: 300 },
+      { tide: 3, startTime: 400, endTime: 500 },
+    ]);
+    await withPrefill(scratch, () => {
+      assert.throws(() => loadPrefilledTides(), /contiguous from tide-1 \(found 2, 3\)/);
+    });
+  });
+});
+
+test('a snapshot that names a different last tide than the files present is refused', async () => {
+  await withScratchDir(async scratch => {
+    fs.copyFileSync(path.join(FIXTURES, 'tide-1.json'), path.join(scratch, 'tide-1.json'));
+    fs.writeFileSync(
+      path.join(scratch, 'prefill-snapshot.json'),
+      JSON.stringify({
+        boundaryBlock: 99,
+        lastTide: 8,
+        exportedAt: 'x',
+        source: 'test',
+        tables: {},
+      })
+    );
+    const { context } = recordingContext();
+    await withPrefill(scratch, async () => {
+      await assert.rejects(
+        () => prefillHistoricEpochsIfNeeded(context, AFTER_BOUNDARY),
+        /image is for Tide 8 but the last prefilled tide is 1/
+      );
+    });
+  });
+});
+
+test('a snapshot that names the last tide present is applied', async () => {
+  await withScratchDir(async scratch => {
+    fs.copyFileSync(path.join(FIXTURES, 'tide-1.json'), path.join(scratch, 'tide-1.json'));
+    fs.writeFileSync(
+      path.join(scratch, 'prefill-snapshot.json'),
+      JSON.stringify({
+        boundaryBlock: 99,
+        lastTide: 1,
+        exportedAt: 'x',
+        source: 'test',
+        tables: {
+          UserIndex: { columns: [{ name: 'id', type: 'text' }], rowCount: 1, rows: [['u1']] },
+        },
+      })
+    );
+    const { context } = recordingContext();
+    const written: Record<string, unknown>[] = [];
+    (context as unknown as Record<string, unknown>).UserIndex = {
+      set: (row: Record<string, unknown>) => written.push(row),
+    };
+    await withPrefill(scratch, async () => {
+      await prefillHistoricEpochsIfNeeded(context, AFTER_BOUNDARY);
+    });
+    assert.deepEqual(written, [{ id: 'u1' }]);
   });
 });

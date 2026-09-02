@@ -153,11 +153,15 @@ export interface TableDump {
 export function encodeSnapshot(
   tables: Readonly<Record<string, TableDump>>,
   boundaryBlock: number,
+  lastTide: number,
   exportedAt: string
 ): string {
   const parts: string[] = [];
   parts.push('{');
   parts.push(`  "boundaryBlock": ${boundaryBlock},`);
+  // prefill refuses to apply the image unless this matches the last tide file present, so an
+  // end-of-Tide-N snapshot can never be stamped after a different tide has been removed or added.
+  parts.push(`  "lastTide": ${lastTide},`);
   parts.push(`  "exportedAt": ${JSON.stringify(exportedAt)},`);
   parts.push('  "source": "full resync with PREFILL_HISTORIC_EPOCHS=false, stopped at end_block",');
   parts.push('  "tables": {');
@@ -267,12 +271,21 @@ function main(): void {
   // append-only, and a tide closes monthly. Raw that is ~1.4 GB/year of unreclaimable history;
   // compressed it is ~200 MB/year. prefill reads .gz in preference to the plain file.
   const file = path.join(dir, 'prefill-snapshot.json.gz');
-  const json = encodeSnapshot(tables, boundaryBlock, stamp);
+  // The image is an end-of-Tide-N state; record N so prefill can refuse a mismatched tide set.
+  const lastTideRaw = psql(
+    `select coalesce(max("epochNumber"), 0)::text from "LeaderboardEpoch" where not "isActive"`,
+    container
+  ).trim();
+  const lastTide = Number(lastTideRaw);
+  if (!Number.isInteger(lastTide) || lastTide < 1) {
+    throw new Error(`cannot determine the last settled tide (got "${lastTideRaw}")`);
+  }
+  const json = encodeSnapshot(tables, boundaryBlock, lastTide, stamp);
   fs.writeFileSync(file, zlib.gzipSync(Buffer.from(json, 'utf8'), { level: 9 }));
   const bytes = fs.statSync(file).size;
   console.log(
     `wrote ${file} (${(bytes / 1024 / 1024).toFixed(1)} MB gz, ` +
-      `${(Buffer.byteLength(json) / 1024 / 1024).toFixed(1)} MB raw, boundary block ${boundaryBlock})`
+      `${(Buffer.byteLength(json) / 1024 / 1024).toFixed(1)} MB raw, boundary block ${boundaryBlock}, last tide ${lastTide})`
   );
   // A stale uncompressed copy would still be read when the .gz is removed, so drop it.
   const plain = path.join(dir, 'prefill-snapshot.json');

@@ -16,42 +16,43 @@ Three files are the source of truth, and they must stay in sync:
 - **`schema.graphql`** — the entity/enum definitions that become the DB tables and the GraphQL API.
 - **`src/handlers/*.ts`** — the event-handler logic.
 
-`pnpm run codegen` reads `config.yaml` + `schema.graphql` and refreshes V3's ignored `.envio/types.d.ts`, wired into the `envio` module by `envio-env.d.ts`. **Handlers import `indexer` from `envio` and entity aliases from `src/types/envio.ts`.** After editing `config.yaml` or `schema.graphql`, re-run codegen or types/handlers will be stale. `pnpm run type-check` runs `envio codegen` before `tsc --noEmit` for exactly this reason.
+`pnpm run codegen` reads `config.yaml` + `schema.graphql` and regenerates the ignored `generated/` package (and `.envio/types.d.ts`, wired into the `envio` module by `envio-env.d.ts`). **Handlers import their contract bindings and entity types from `'../../generated'`.** After editing `config.yaml` or `schema.graphql`, re-run codegen or types/handlers will be stale. `pnpm run type-check` runs `envio codegen` before `tsc --noEmit` for exactly this reason.
 
 ## Common commands
 
 ```bash
 pnpm install                       # install deps
 pnpm run local:docker:up           # start local Postgres (Docker Desktop required)
-pnpm run codegen                   # refresh V3 types after config.yaml or schema.graphql edits
+pnpm run codegen                   # regenerate generated/ after config.yaml or schema.graphql edits
 pnpm run dev                       # run local indexer with hot reload
 pnpm run dev:restart               # clear local state and reindex from scratch
 pnpm run type-check                # codegen + tsc --noEmit
 pnpm run format / lint / lint:fix  # prettier / eslint (see eslint.config.js)
 ```
 
-Testing (Node's built-in `node:test`, running TypeScript through `tsx`):
+Testing (Node's built-in `node:test`; the suite is compiled with `tsc` to `dist-test/` first and runs from there):
 
 ```bash
-pnpm run test                      # type-check, then run src/__tests__/*.test.ts
-pnpm run test:build                # type-check without emitting files
+pnpm run test                      # tsc -> dist-test, then run dist-test/src/__tests__/*.test.js
+pnpm run test:build                # compile handlers and tests to dist-test only
 pnpm run test:coverage             # c8 coverage report
 pnpm run test:coverage:check       # enforce 100% lines/functions/branches/statements
 
-# Run a single test file through the V3 simulator.
-# `--import ./src/__tests__/test-env-preload.ts` is REQUIRED: it pins the operator settings
-# (prefill off, fixture-only data dir) that `envio`'s dotenv would otherwise take from `.env`.
-# Without it a test can read the 31 MB production `data/` directory.
-ENVIO_TEST_HANDLER_WILDCARD=true node --import tsx --import ./src/__tests__/test-env-preload.ts --test src/__tests__/pool-events.test.ts
+# Run a single test file. Compile first: the tests load the COMPILED handlers from dist-test,
+# so stale output silently tests old code.
+# `--import ./dist-test/src/__tests__/test-env-preload.js` is REQUIRED: it pins the operator
+# settings (prefill off, fixture-only data dir) that `envio`'s dotenv would otherwise take from
+# `.env`. Without it a test can read the 119 MB production `data/` directory.
+pnpm run test:build && node --import ./dist-test/src/__tests__/test-env-preload.js --test dist-test/src/__tests__/pool-events.test.js
 # Filter by test name:
-ENVIO_TEST_HANDLER_WILDCARD=true node --import tsx --import ./src/__tests__/test-env-preload.ts --test --test-name-pattern="colliding" src/__tests__/config-events.test.ts
+node --import ./dist-test/src/__tests__/test-env-preload.js --test --test-name-pattern="colliding" dist-test/src/__tests__/config-events.test.js
 ```
 
 The **husky `pre-commit` hook** runs `codegen` → git-diff check → `format:check` → `lint` → `type-check` → enforcing `test:coverage:check`. Coverage is required to remain at 100% lines/functions/branches/statements. CI (`.github/workflows/ci.yml`) runs `format:check`, `lint`, and a source-cleanliness diff. Prod/staging Docker Compose lifecycle lives in the `prod:*` / `staging:*` npm scripts and the `README.md`.
 
 ## Architecture / concepts that span multiple files
 
-### V3 always-on two-phase preload execution
+### Always-on two-phase preload execution
 
 Every handler runs **twice per event**: first a concurrent _preload_ pass to discover and batch DB reads (writes are no-ops), then a sequential pass with in-memory data. Consequences when editing handlers:
 
@@ -60,7 +61,7 @@ Every handler runs **twice per event**: first a concurrent _preload_ pass to dis
 
 ### Dynamic contract registration is forward-only
 
-Handlers register newly discovered contracts via `indexer.contractRegister(...)` + `context.chain.<Contract>.add(address)` (e.g. `PoolAddressesProvider.ProxyCreated → Pool/PoolConfigurator`, `PoolConfigurator.ReserveInitialized → AToken/debt tokens`, `LeaderboardConfig.LPPoolConfigured → LP contracts`, `NFTPartnershipRegistry.PartnershipAdded → PartnerNFT`). A dynamically added contract is indexed **only from the triggering block onward — no backfill.** When history predates the registration event, statically bootstrap the address in `config.yaml`; Envio dedupes on `(contractName, address)`, so the later registration event becomes a harmless no-op. See `docs/isolated-pool-indexing.md`.
+Handlers register newly discovered contracts via `<Contract>.<Event>.contractRegister(({ event, context }) => context.add<Contract>(address))` (e.g. `PoolAddressesProvider.ProxyCreated → Pool/PoolConfigurator`, `PoolConfigurator.ReserveInitialized → AToken/debt tokens`, `LeaderboardConfig.LPPoolConfigured → LP contracts`, `NFTPartnershipRegistry.PartnershipAdded → PartnerNFT`). A dynamically added contract is indexed **only from the triggering block onward — no backfill.** When history predates the registration event, statically bootstrap the address in `config.yaml`; Envio dedupes on `(contractName, address)`, so the later registration event becomes a harmless no-op. See `docs/isolated-pool-indexing.md`.
 
 ⚠️ Envio does **not** dedupe across _different_ contract names. Statically-configured NFT collections (`STATIC_NFT_COLLECTION_ADDRESSES` in `helpers/constants.ts`) must never be re-registered as the dynamic `PartnerNFT`, or each `Transfer` fires two handlers and double-counts NFT balances. Keep that list in sync with the static NFT entries in `config.yaml`.
 
@@ -87,8 +88,8 @@ Two different accrual engines run side by side, chosen by pool shape (`isFungibl
 
 ## Handler map
 
-`src/handlers/`: `config.ts` (addresses-provider registry, pool/configurator/vault discovery, EMode), `pool.ts` (lending events), `tokenization.ts` (aToken/debt-token balances), `rewards.ts` (RewardsController, DustToken, RevenueReward), `dustlock.ts` (veDUST locks), `leaderboard.ts` + `leaderboardKeeper.ts` (epochs, config, settlement), `nft.ts` (partnership multipliers), `lp.ts` (LP positions/points), `profileShop.ts`, `specialEditions.ts`, and `shared.ts` (the shared engine: caching, settlement, multipliers, protocol aggregation glue). `src/helpers/` holds pure logic (`math.ts` ray/wad, `points.ts`, `leaderboard.ts`, `uniswapV3.ts`, `protocolAggregation.ts`, `constants.ts`, `entityHelpers.ts`, `viem.ts`, `testnetTiers.ts`).
+`src/handlers/`: `config.ts` (addresses-provider registry, pool/configurator/vault discovery, EMode), `pool.ts` (lending events), `tokenization.ts` (aToken/debt-token balances), `rewards.ts` (RewardsController, DustToken, RevenueReward), `dustlock.ts` (veDUST locks), `leaderboard.ts` + `leaderboardKeeper.ts` (epochs, config, settlement), `nft.ts` (partnership multipliers), `lp.ts` (LP positions/points), `lpGrowth.ts` + `lpEntityHelpers.ts` (fungible-share LP growth clocks), `profileShop.ts`, `specialEditions.ts`, and `shared.ts` (the shared engine: caching, settlement, multipliers, protocol aggregation glue). `src/helpers/` holds pure logic (`math.ts` ray/wad, `points.ts`, `leaderboard.ts`, `uniswapV3.ts`, `protocolAggregation.ts`, `constants.ts`, `entityHelpers.ts`, `lpGrowthMath.ts`, `prefill.ts` (historic Tide prefill), `viem.ts`, `testnetTiers.ts`).
 
 ## Testing pattern
 
-Tests use Envio V3's public `createTestIndexer()` through the compatibility seam `src/__tests__/v3-test-helpers.ts`. It preserves the suite's `TestHelpers.MockDb.createMockDb()` → `TestHelpers.<Contract>.<Event>.createMockEvent({...})` → `processEvent({ event, mockDb })` shape while routing events through the real V3 simulator. `ENVIO_TEST_HANDLER_WILDCARD=true` is test-only: it lets synthetic contract addresses reach handlers and suppresses dynamic registrations that would otherwise ask the one-event simulator to fetch another contract. Production leaves it unset. Tests run directly from TypeScript, so there is no `dist-test` output to refresh.
+Tests run against envio 2.32's native generated `TestHelpers` through the compatibility seam `src/__tests__/v3-test-helpers.ts`, which loads the compiled handlers from `dist-test/` and re-exports `TestHelpers.MockDb.createMockDb()` → `TestHelpers.<Contract>.<Event>.createMockEvent({...})` → `processEvent({ event, mockDb })`. Event metadata (`block`, `logIndex`, `srcAddress`, `transaction`) must be passed nested under `mockEventData`; the native mock ignores those fields at the top level. The MockDb is immutable: every `set`/`delete` returns a new instance, so thread the return value. A handler or its `contractRegister` can be driven directly with a hand-built context via `getRegisteredEventHandler` / `getRegisteredContractRegister`. Tests run from the compiled `dist-test/`, so run `pnpm run test:build` after any source change; stale output silently tests old code.

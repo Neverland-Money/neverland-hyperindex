@@ -1020,33 +1020,30 @@ test('keeper user settled records an unverified missing state as epoch zero acti
 });
 
 test('keeper user settled classifies the scheduled event-time Tide transition before its raw write', async () => {
-  try {
-    const endTime = 900;
-    let mockDb = seedKeeperPhase(TestHelpers.MockDb.createMockDb(), 8n, true, 100);
-    mockDb = mockDb.entities.LeaderboardEpoch.set({
-      ...mockDb.entities.LeaderboardEpoch.get('8')!,
-      scheduledEndTime: endTime,
-    });
-    const settled = TestHelpers.LeaderboardKeeper.UserSettled.createMockEvent({
-      user: ADDRESSES.user,
-      timestamp: 1_000n,
-      ...createEventDataFactory()(KEEPER_TEST_BLOCK - 5, 1_000, ADDRESSES.keeper),
-    });
-    mockDb = await TestHelpers.LeaderboardKeeper.UserSettled.processEvent({
-      event: settled,
-      mockDb,
-    });
+  const endTime = 900;
+  let mockDb = seedKeeperPhase(TestHelpers.MockDb.createMockDb(), 8n, true, 100);
+  mockDb = mockDb.entities.LeaderboardEpoch.set({
+    ...mockDb.entities.LeaderboardEpoch.get('8')!,
+    scheduledEndTime: endTime,
+  });
+  const settled = TestHelpers.LeaderboardKeeper.UserSettled.createMockEvent({
+    user: ADDRESSES.user,
+    timestamp: 1_000n,
+    ...createEventDataFactory()(KEEPER_TEST_BLOCK - 5, 1_000, ADDRESSES.keeper),
+  });
+  mockDb = await TestHelpers.LeaderboardKeeper.UserSettled.processEvent({
+    event: settled,
+    mockDb,
+  });
 
-    const raw = keeperRawPhase(mockDb, `${settled.transaction.hash}-${settled.logIndex}`);
-    assert.deepEqual([raw?.epochNumber, raw?.isGap], [8n, true]);
-    assert.equal(mockDb.entities.LeaderboardState.get('current')?.isActive, false);
-    assert.equal(mockDb.entities.LeaderboardEpoch.get('8')?.endTime, endTime);
-    assert.equal(
-      mockDb.entities.UserEpochFinalization.get(`${ADDRESSES.user}:8`)?.settledThrough,
-      endTime
-    );
-  } finally {
-  }
+  const raw = keeperRawPhase(mockDb, `${settled.transaction.hash}-${settled.logIndex}`);
+  assert.deepEqual([raw?.epochNumber, raw?.isGap], [8n, true]);
+  assert.equal(mockDb.entities.LeaderboardState.get('current')?.isActive, false);
+  assert.equal(mockDb.entities.LeaderboardEpoch.get('8')?.endTime, endTime);
+  assert.equal(
+    mockDb.entities.UserEpochFinalization.get(`${ADDRESSES.user}:8`)?.settledThrough,
+    endTime
+  );
 });
 
 test('keeper scheduled phase projection makes every ordered read preloadable', async t => {
@@ -1383,240 +1380,265 @@ function getTask7KeeperExports() {
 }
 
 test('keeper settlement classifier distinguishes live active and gap replay modes', async () => {
-  try {
-    const { classifyKeeperSettlement } = getTask7KeeperExports();
-    const userId = '0x000000000000000000000000000000000000B00A';
-    const normalizedUserId = userId.toLowerCase();
+  const { classifyKeeperSettlement } = getTask7KeeperExports();
+  const userId = '0x000000000000000000000000000000000000B00A';
+  const normalizedUserId = userId.toLowerCase();
 
-    const classify = async (
-      currentEpochNumber: bigint,
-      isActive: boolean,
-      hasCertificate = false
-    ) => {
-      const finalizationId = `${normalizedUserId}:${currentEpochNumber}`;
-      const context = {
-        LeaderboardState: {
-          get: async (id: string) =>
-            id === 'current' ? { id, currentEpochNumber, isActive } : undefined,
-        },
-        UserEpochFinalization: {
-          get: async (id: string) =>
-            hasCertificate && id === finalizationId
-              ? {
-                  id,
-                  user_id: normalizedUserId,
-                  epochNumber: currentEpochNumber,
-                  epochEndTime: 800,
-                  settledThrough: 800,
-                  finalizedAt: 900,
-                  blockNumber: 1n,
-                  txHash: '0x01',
-                  settlementEventId: '0x01-0',
-                }
-              : undefined,
-        },
-        LeaderboardEpoch: {
-          get: async (id: string) =>
-            hasCertificate && id === currentEpochNumber.toString()
-              ? {
-                  id,
-                  epochNumber: currentEpochNumber,
-                  startBlock: 1n,
-                  startTime: 100,
-                  endBlock: 2n,
-                  endTime: 800,
-                  isActive: false,
-                  duration: 700n,
-                  scheduledStartTime: 100,
-                  scheduledEndTime: 800,
-                }
-              : undefined,
-        },
-        LeaderboardKeeperUserSettled: {
-          get: async (id: string) =>
-            hasCertificate && id === '0x01-0'
-              ? {
-                  id,
-                  user_id: normalizedUserId,
-                  epochNumber: currentEpochNumber,
-                  isGap: true,
-                  timestamp: 900,
-                  txHash: '0x01',
-                }
-              : undefined,
-        },
-      } as unknown as handlerContext;
-      return classifyKeeperSettlement(context, userId);
-    };
-
-    assert.deepEqual(await classify(9n, true), {
-      mode: 'LIVE_OR_UNVERIFIED_ACTIVE',
-      epochNumber: 9n,
-      finalizationId: `${normalizedUserId}:9`,
-    });
-    // Historical active settlements are no longer final-only: the gate that produced that
-    // mode was removed after it was measured to corrupt closed-Tide points.
-    assert.equal((await classify(6n, true)).mode, 'LIVE_OR_UNVERIFIED_ACTIVE');
-    assert.deepEqual(await classify(6n, true), {
-      mode: 'LIVE_OR_UNVERIFIED_ACTIVE',
-      epochNumber: 6n,
-      finalizationId: `${normalizedUserId}:6`,
-    });
-    assert.deepEqual(await classify(8n, false), {
-      mode: 'GAP_FINALIZE',
-      epochNumber: 8n,
-      finalizationId: `${normalizedUserId}:8`,
-    });
-    assert.deepEqual(await classify(8n, false, true), {
-      mode: 'GAP_DUPLICATE',
-      epochNumber: 8n,
-      finalizationId: `${normalizedUserId}:8`,
-    });
-
-    assert.equal((await classify(8n, false)).mode, 'GAP_FINALIZE');
-    const missingStateContext = {
-      LeaderboardState: { get: async () => undefined },
-      UserEpochFinalization: { get: async () => undefined },
+  const classify = async (
+    currentEpochNumber: bigint,
+    isActive: boolean,
+    hasCertificate = false
+  ) => {
+    const finalizationId = `${normalizedUserId}:${currentEpochNumber}`;
+    const context = {
+      LeaderboardState: {
+        get: async (id: string) =>
+          id === 'current' ? { id, currentEpochNumber, isActive } : undefined,
+      },
+      UserEpochFinalization: {
+        get: async (id: string) =>
+          hasCertificate && id === finalizationId
+            ? {
+                id,
+                user_id: normalizedUserId,
+                epochNumber: currentEpochNumber,
+                epochEndTime: 800,
+                settledThrough: 800,
+                finalizedAt: 900,
+                blockNumber: 1n,
+                txHash: '0x01',
+                settlementEventId: '0x01-0',
+              }
+            : undefined,
+      },
+      LeaderboardEpoch: {
+        get: async (id: string) =>
+          hasCertificate && id === currentEpochNumber.toString()
+            ? {
+                id,
+                epochNumber: currentEpochNumber,
+                startBlock: 1n,
+                startTime: 100,
+                endBlock: 2n,
+                endTime: 800,
+                isActive: false,
+                duration: 700n,
+                scheduledStartTime: 100,
+                scheduledEndTime: 800,
+              }
+            : undefined,
+      },
+      LeaderboardKeeperUserSettled: {
+        get: async (id: string) =>
+          hasCertificate && id === '0x01-0'
+            ? {
+                id,
+                user_id: normalizedUserId,
+                epochNumber: currentEpochNumber,
+                isGap: true,
+                timestamp: 900,
+                txHash: '0x01',
+              }
+            : undefined,
+      },
     } as unknown as handlerContext;
-    assert.deepEqual(await classifyKeeperSettlement(missingStateContext, userId), {
-      mode: 'LIVE_OR_UNVERIFIED_ACTIVE',
-      epochNumber: 0n,
-      finalizationId: `${normalizedUserId}:0`,
-    });
-  } finally {
-  }
+    return classifyKeeperSettlement(context, userId);
+  };
+
+  assert.deepEqual(await classify(9n, true), {
+    mode: 'LIVE_OR_UNVERIFIED_ACTIVE',
+    epochNumber: 9n,
+    finalizationId: `${normalizedUserId}:9`,
+  });
+  // Historical active settlements are no longer final-only: the gate that produced that
+  // mode was removed after it was measured to corrupt closed-Tide points.
+  assert.equal((await classify(6n, true)).mode, 'LIVE_OR_UNVERIFIED_ACTIVE');
+  assert.deepEqual(await classify(6n, true), {
+    mode: 'LIVE_OR_UNVERIFIED_ACTIVE',
+    epochNumber: 6n,
+    finalizationId: `${normalizedUserId}:6`,
+  });
+  assert.deepEqual(await classify(8n, false), {
+    mode: 'GAP_FINALIZE',
+    epochNumber: 8n,
+    finalizationId: `${normalizedUserId}:8`,
+  });
+  assert.deepEqual(await classify(8n, false, true), {
+    mode: 'GAP_DUPLICATE',
+    epochNumber: 8n,
+    finalizationId: `${normalizedUserId}:8`,
+  });
+
+  assert.equal((await classify(8n, false)).mode, 'GAP_FINALIZE');
+  const missingStateContext = {
+    LeaderboardState: { get: async () => undefined },
+    UserEpochFinalization: { get: async () => undefined },
+  } as unknown as handlerContext;
+  assert.deepEqual(await classifyKeeperSettlement(missingStateContext, userId), {
+    mode: 'LIVE_OR_UNVERIFIED_ACTIVE',
+    epochNumber: 0n,
+    finalizationId: `${normalizedUserId}:0`,
+  });
 });
 
 test('keeper live active settlement records phase and settles LP, VP, and reserve accounting', async () => {
-  try {
-    const startTime = 100;
-    const settlementEnd = startTime + ONE_DAY;
-    const blockNumber = KEEPER_TEST_BLOCK;
-    const eventData = createEventDataFactory();
-    let mockDb = TestHelpers.MockDb.createMockDb();
-    const seeded = seedUnifiedKeeperFixture(mockDb, {
-      epochNumber: 9n,
-      isActive: true,
-      startTime,
-      settlementEnd,
-    });
-    mockDb = seeded.mockDb;
+  const startTime = 100;
+  const settlementEnd = startTime + ONE_DAY;
+  const blockNumber = KEEPER_TEST_BLOCK;
+  const eventData = createEventDataFactory();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const seeded = seedUnifiedKeeperFixture(mockDb, {
+    epochNumber: 9n,
+    isActive: true,
+    startTime,
+    settlementEnd,
+  });
+  mockDb = seeded.mockDb;
 
-    const settled = TestHelpers.LeaderboardKeeper.UserSettled.createMockEvent({
-      user: KEEPER_PHASE.unifiedUser,
-      timestamp: BigInt(settlementEnd),
-      ...eventData(blockNumber, settlementEnd, ADDRESSES.keeper),
-    });
-    mockDb = await TestHelpers.LeaderboardKeeper.UserSettled.processEvent({
-      event: settled,
-      mockDb,
-    });
+  const settled = TestHelpers.LeaderboardKeeper.UserSettled.createMockEvent({
+    user: KEEPER_PHASE.unifiedUser,
+    timestamp: BigInt(settlementEnd),
+    ...eventData(blockNumber, settlementEnd, ADDRESSES.keeper),
+  });
+  mockDb = await TestHelpers.LeaderboardKeeper.UserSettled.processEvent({
+    event: settled,
+    mockDb,
+  });
 
-    const settlementId = `${settled.transaction.hash}-${settled.logIndex}`;
-    const raw = keeperRawPhase(mockDb, settlementId);
-    assert.deepEqual(
-      [raw?.epochNumber, raw?.isGap, raw?.timestamp, raw?.txHash],
-      [9n, false, settlementEnd, settled.transaction.hash]
-    );
-    const stats = mockDb.entities.UserEpochStats.get(`${KEEPER_PHASE.unifiedUser}:9`);
-    assert.equal(stats?.lpPoints, 10n ** 18n, 'one independently seeded LP point is consumed');
-    assert.equal(
-      stats?.depositPoints,
-      10n ** 18n,
-      'one $1 reserve held for one day earns exactly one point'
-    );
-    assert.equal(
-      stats?.dailyVPPoints,
-      10n ** 18n,
-      'one permanent VP unit held for one day earns exactly one point'
-    );
-    assert.equal(stats?.totalPoints, 3n * 10n ** 18n);
-    assert.equal(
-      mockDb.entities.UserLPEpochCursor.get(`${seeded.positionId}:9`)?.lastSettledAt,
-      settlementEnd
-    );
-    assert.equal(
-      mockDb.entities.UserReservePoints.get(`${KEEPER_PHASE.unifiedUser}:${seeded.reserveId}`)
-        ?.depositPoints,
-      10n ** 18n
-    );
-    assert.equal(
-      mockDb.entities.UserEpochFinalization.get(`${KEEPER_PHASE.unifiedUser}:9`),
-      undefined,
-      'active settlement never creates a gap certificate'
-    );
-  } finally {
-  }
+  const settlementId = `${settled.transaction.hash}-${settled.logIndex}`;
+  const raw = keeperRawPhase(mockDb, settlementId);
+  assert.deepEqual(
+    [raw?.epochNumber, raw?.isGap, raw?.timestamp, raw?.txHash],
+    [9n, false, settlementEnd, settled.transaction.hash]
+  );
+  const stats = mockDb.entities.UserEpochStats.get(`${KEEPER_PHASE.unifiedUser}:9`);
+  assert.equal(stats?.lpPoints, 10n ** 18n, 'one independently seeded LP point is consumed');
+  assert.equal(
+    stats?.depositPoints,
+    10n ** 18n,
+    'one $1 reserve held for one day earns exactly one point'
+  );
+  assert.equal(
+    stats?.dailyVPPoints,
+    10n ** 18n,
+    'one permanent VP unit held for one day earns exactly one point'
+  );
+  assert.equal(stats?.totalPoints, 3n * 10n ** 18n);
+  assert.equal(
+    mockDb.entities.UserLPEpochCursor.get(`${seeded.positionId}:9`)?.lastSettledAt,
+    settlementEnd
+  );
+  assert.equal(
+    mockDb.entities.UserReservePoints.get(`${KEEPER_PHASE.unifiedUser}:${seeded.reserveId}`)
+      ?.depositPoints,
+    10n ** 18n
+  );
+  assert.equal(
+    mockDb.entities.UserEpochFinalization.get(`${KEEPER_PHASE.unifiedUser}:9`),
+    undefined,
+    'active settlement never creates a gap certificate'
+  );
 });
 
 test('keeper first gap settles LP, VP, and reserve once through Tide end, then certificates replay', async () => {
-  try {
-    const startTime = 100;
-    const epochEndTime = startTime + ONE_DAY;
-    const firstEventTime = epochEndTime + ONE_DAY;
-    const firstBlockNumber = KEEPER_TEST_BLOCK + 300;
-    const eventData = createEventDataFactory();
-    let mockDb = TestHelpers.MockDb.createMockDb();
-    const seeded = seedUnifiedKeeperFixture(mockDb, {
-      epochNumber: 8n,
-      isActive: false,
-      startTime,
-      settlementEnd: epochEndTime,
-    });
-    mockDb = seeded.mockDb;
+  const startTime = 100;
+  const epochEndTime = startTime + ONE_DAY;
+  const firstEventTime = epochEndTime + ONE_DAY;
+  const firstBlockNumber = KEEPER_TEST_BLOCK + 300;
+  const eventData = createEventDataFactory();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const seeded = seedUnifiedKeeperFixture(mockDb, {
+    epochNumber: 8n,
+    isActive: false,
+    startTime,
+    settlementEnd: epochEndTime,
+  });
+  mockDb = seeded.mockDb;
 
-    const first = TestHelpers.LeaderboardKeeper.UserSettled.createMockEvent({
-      user: KEEPER_PHASE.unifiedUser,
-      timestamp: BigInt(firstEventTime),
-      ...eventData(firstBlockNumber, firstEventTime, ADDRESSES.keeper),
-    });
-    mockDb = await TestHelpers.LeaderboardKeeper.UserSettled.processEvent({
-      event: first,
-      mockDb,
-    });
+  const first = TestHelpers.LeaderboardKeeper.UserSettled.createMockEvent({
+    user: KEEPER_PHASE.unifiedUser,
+    timestamp: BigInt(firstEventTime),
+    ...eventData(firstBlockNumber, firstEventTime, ADDRESSES.keeper),
+  });
+  mockDb = await TestHelpers.LeaderboardKeeper.UserSettled.processEvent({
+    event: first,
+    mockDb,
+  });
 
-    const firstSettlementId = `${first.transaction.hash}-${first.logIndex}`;
-    const firstRaw = keeperRawPhase(mockDb, firstSettlementId);
-    assert.deepEqual(firstRaw, {
-      id: firstSettlementId,
-      user_id: KEEPER_PHASE.unifiedUser,
-      epochNumber: 8n,
-      isGap: true,
-      timestamp: firstEventTime,
-      txHash: first.transaction.hash,
-    });
+  const firstSettlementId = `${first.transaction.hash}-${first.logIndex}`;
+  const firstRaw = keeperRawPhase(mockDb, firstSettlementId);
+  assert.deepEqual(firstRaw, {
+    id: firstSettlementId,
+    user_id: KEEPER_PHASE.unifiedUser,
+    epochNumber: 8n,
+    isGap: true,
+    timestamp: firstEventTime,
+    txHash: first.transaction.hash,
+  });
 
-    const statsId = `${KEEPER_PHASE.unifiedUser}:8`;
-    const lpCursorId = `${seeded.positionId}:8`;
-    const reserveCursorId = `${KEEPER_PHASE.unifiedUser}:${seeded.reserveId}`;
-    const stats = mockDb.entities.UserEpochStats.get(statsId);
-    assert.equal(stats?.lpPoints, 10n ** 18n);
-    assert.equal(stats?.depositPoints, 10n ** 18n);
-    assert.equal(stats?.dailyVPPoints, 10n ** 18n);
-    assert.equal(stats?.totalPoints, 3n * 10n ** 18n);
-    assert.equal(mockDb.entities.UserLPEpochCursor.get(lpCursorId)?.lastSettledAt, epochEndTime);
-    assert.equal(
-      mockDb.entities.UserLPEpochCursor.get(lpCursorId)?.growthBaselineX128,
-      ONE_POINT_GROWTH_X128
-    );
-    assert.equal(mockDb.entities.UserReservePoints.get(reserveCursorId)?.depositPoints, 10n ** 18n);
-    assert.equal(stats?.lastVPAccrualTimestamp, epochEndTime);
+  const statsId = `${KEEPER_PHASE.unifiedUser}:8`;
+  const lpCursorId = `${seeded.positionId}:8`;
+  const reserveCursorId = `${KEEPER_PHASE.unifiedUser}:${seeded.reserveId}`;
+  const stats = mockDb.entities.UserEpochStats.get(statsId);
+  assert.equal(stats?.lpPoints, 10n ** 18n);
+  assert.equal(stats?.depositPoints, 10n ** 18n);
+  assert.equal(stats?.dailyVPPoints, 10n ** 18n);
+  assert.equal(stats?.totalPoints, 3n * 10n ** 18n);
+  assert.equal(mockDb.entities.UserLPEpochCursor.get(lpCursorId)?.lastSettledAt, epochEndTime);
+  assert.equal(
+    mockDb.entities.UserLPEpochCursor.get(lpCursorId)?.growthBaselineX128,
+    ONE_POINT_GROWTH_X128
+  );
+  assert.equal(mockDb.entities.UserReservePoints.get(reserveCursorId)?.depositPoints, 10n ** 18n);
+  assert.equal(stats?.lastVPAccrualTimestamp, epochEndTime);
 
-    const finalizationId = `${KEEPER_PHASE.unifiedUser}:8`;
-    const firstCertificate = mockDb.entities.UserEpochFinalization.get(finalizationId);
-    assert.deepEqual(firstCertificate, {
-      id: finalizationId,
-      user_id: KEEPER_PHASE.unifiedUser,
-      epochNumber: 8n,
-      epochEndTime,
-      settledThrough: epochEndTime,
-      finalizedAt: firstEventTime,
-      blockNumber: BigInt(first.block.number),
-      txHash: first.transaction.hash,
-      settlementEventId: firstSettlementId,
-    });
+  const finalizationId = `${KEEPER_PHASE.unifiedUser}:8`;
+  const firstCertificate = mockDb.entities.UserEpochFinalization.get(finalizationId);
+  assert.deepEqual(firstCertificate, {
+    id: finalizationId,
+    user_id: KEEPER_PHASE.unifiedUser,
+    epochNumber: 8n,
+    epochEndTime,
+    settledThrough: epochEndTime,
+    finalizedAt: firstEventTime,
+    blockNumber: BigInt(first.block.number),
+    txHash: first.transaction.hash,
+    settlementEventId: firstSettlementId,
+  });
 
-    const accountingAfterFirst = {
+  const accountingAfterFirst = {
+    stats: mockDb.entities.UserEpochStats.get(statsId),
+    lpCursor: mockDb.entities.UserLPEpochCursor.get(lpCursorId),
+    reserveCursor: mockDb.entities.UserReservePoints.get(reserveCursorId),
+    lpPosition: mockDb.entities.UserLPPosition.get(seeded.positionId),
+    lpStats: mockDb.entities.UserLPStats.get(KEEPER_PHASE.unifiedUser),
+    userPoints: mockDb.entities.UserPoints.get(KEEPER_PHASE.unifiedUser),
+    userState: mockDb.entities.UserLeaderboardState.get(KEEPER_PHASE.unifiedUser),
+    price: mockDb.entities.PriceOracleAsset.get(KEEPER_PHASE.asset),
+  };
+
+  const secondEventTime = firstEventTime + 123;
+  const second = TestHelpers.LeaderboardKeeper.UserSettled.createMockEvent({
+    user: KEEPER_PHASE.unifiedUser,
+    timestamp: BigInt(secondEventTime),
+    ...eventData(firstBlockNumber + 1, secondEventTime, ADDRESSES.keeper),
+  });
+  mockDb = await TestHelpers.LeaderboardKeeper.UserSettled.processEvent({
+    event: second,
+    mockDb,
+  });
+
+  const secondSettlementId = `${second.transaction.hash}-${second.logIndex}`;
+  assert.deepEqual(keeperRawPhase(mockDb, secondSettlementId), {
+    id: secondSettlementId,
+    user_id: KEEPER_PHASE.unifiedUser,
+    epochNumber: 8n,
+    isGap: true,
+    timestamp: secondEventTime,
+    txHash: second.transaction.hash,
+  });
+  assert.deepEqual(
+    {
       stats: mockDb.entities.UserEpochStats.get(statsId),
       lpCursor: mockDb.entities.UserLPEpochCursor.get(lpCursorId),
       reserveCursor: mockDb.entities.UserReservePoints.get(reserveCursorId),
@@ -1625,49 +1647,15 @@ test('keeper first gap settles LP, VP, and reserve once through Tide end, then c
       userPoints: mockDb.entities.UserPoints.get(KEEPER_PHASE.unifiedUser),
       userState: mockDb.entities.UserLeaderboardState.get(KEEPER_PHASE.unifiedUser),
       price: mockDb.entities.PriceOracleAsset.get(KEEPER_PHASE.asset),
-    };
-
-    const secondEventTime = firstEventTime + 123;
-    const second = TestHelpers.LeaderboardKeeper.UserSettled.createMockEvent({
-      user: KEEPER_PHASE.unifiedUser,
-      timestamp: BigInt(secondEventTime),
-      ...eventData(firstBlockNumber + 1, secondEventTime, ADDRESSES.keeper),
-    });
-    mockDb = await TestHelpers.LeaderboardKeeper.UserSettled.processEvent({
-      event: second,
-      mockDb,
-    });
-
-    const secondSettlementId = `${second.transaction.hash}-${second.logIndex}`;
-    assert.deepEqual(keeperRawPhase(mockDb, secondSettlementId), {
-      id: secondSettlementId,
-      user_id: KEEPER_PHASE.unifiedUser,
-      epochNumber: 8n,
-      isGap: true,
-      timestamp: secondEventTime,
-      txHash: second.transaction.hash,
-    });
-    assert.deepEqual(
-      {
-        stats: mockDb.entities.UserEpochStats.get(statsId),
-        lpCursor: mockDb.entities.UserLPEpochCursor.get(lpCursorId),
-        reserveCursor: mockDb.entities.UserReservePoints.get(reserveCursorId),
-        lpPosition: mockDb.entities.UserLPPosition.get(seeded.positionId),
-        lpStats: mockDb.entities.UserLPStats.get(KEEPER_PHASE.unifiedUser),
-        userPoints: mockDb.entities.UserPoints.get(KEEPER_PHASE.unifiedUser),
-        userState: mockDb.entities.UserLeaderboardState.get(KEEPER_PHASE.unifiedUser),
-        price: mockDb.entities.PriceOracleAsset.get(KEEPER_PHASE.asset),
-      },
-      accountingAfterFirst,
-      'duplicate gap does not readvance any user accounting cursor or total'
-    );
-    assert.deepEqual(
-      mockDb.entities.UserEpochFinalization.get(finalizationId),
-      firstCertificate,
-      'duplicate gap preserves the first certificate byte-for-byte'
-    );
-  } finally {
-  }
+    },
+    accountingAfterFirst,
+    'duplicate gap does not readvance any user accounting cursor or total'
+  );
+  assert.deepEqual(
+    mockDb.entities.UserEpochFinalization.get(finalizationId),
+    firstCertificate,
+    'duplicate gap preserves the first certificate byte-for-byte'
+  );
 });
 
 test('keeper duplicate gap rejects every malformed certificate or referenced raw proof in preload and ordered processing', async t => {
@@ -1875,252 +1863,243 @@ test('keeper malformed duplicate proof rejects atomically without accounting or 
 });
 
 test('keeper same-batch first gap and duplicate write two raw rows and one immutable first proof', async () => {
-  try {
-    const startTime = 100;
-    const epochEndTime = startTime + ONE_DAY;
-    const eventTimestamp = epochEndTime + ONE_DAY;
-    const seeded = seedUnifiedKeeperFixture(TestHelpers.MockDb.createMockDb(), {
-      epochNumber: 8n,
-      isActive: false,
-      startTime,
-      settlementEnd: epochEndTime,
-    });
-    const eventData = createEventDataFactory();
-    const first = TestHelpers.LeaderboardKeeper.UserSettled.createMockEvent({
-      user: KEEPER_PHASE.unifiedUser,
-      timestamp: BigInt(eventTimestamp),
-      ...eventData(KEEPER_TEST_BLOCK + 500, eventTimestamp, ADDRESSES.keeper),
-    });
-    const second = TestHelpers.LeaderboardKeeper.UserSettled.createMockEvent({
-      user: KEEPER_PHASE.unifiedUser,
-      timestamp: BigInt(eventTimestamp),
-      ...eventData(KEEPER_TEST_BLOCK + 500, eventTimestamp, ADDRESSES.keeper),
-    });
+  const startTime = 100;
+  const epochEndTime = startTime + ONE_DAY;
+  const eventTimestamp = epochEndTime + ONE_DAY;
+  const seeded = seedUnifiedKeeperFixture(TestHelpers.MockDb.createMockDb(), {
+    epochNumber: 8n,
+    isActive: false,
+    startTime,
+    settlementEnd: epochEndTime,
+  });
+  const eventData = createEventDataFactory();
+  const first = TestHelpers.LeaderboardKeeper.UserSettled.createMockEvent({
+    user: KEEPER_PHASE.unifiedUser,
+    timestamp: BigInt(eventTimestamp),
+    ...eventData(KEEPER_TEST_BLOCK + 500, eventTimestamp, ADDRESSES.keeper),
+  });
+  const second = TestHelpers.LeaderboardKeeper.UserSettled.createMockEvent({
+    user: KEEPER_PHASE.unifiedUser,
+    timestamp: BigInt(eventTimestamp),
+    ...eventData(KEEPER_TEST_BLOCK + 500, eventTimestamp, ADDRESSES.keeper),
+  });
 
-    const batch = await processEvents({ events: [first, second], mockDb: seeded.mockDb });
-    const firstId = `${first.transaction.hash}-${first.logIndex}`;
-    const secondId = `${second.transaction.hash}-${second.logIndex}`;
-    const certificate = batch.mockDb.entities.UserEpochFinalization.get(
-      `${KEEPER_PHASE.unifiedUser}:8`
-    );
-    assert.ok(keeperRawPhase(batch.mockDb, firstId));
-    assert.ok(keeperRawPhase(batch.mockDb, secondId));
-    assert.deepEqual(
-      [certificate?.settlementEventId, certificate?.txHash, certificate?.finalizedAt],
-      [firstId, first.transaction.hash, eventTimestamp]
-    );
-    assert.equal(
-      batch.mockDb.entities.UserEpochStats.get(`${KEEPER_PHASE.unifiedUser}:8`)?.totalPoints,
-      3n * 10n ** 18n
-    );
-  } finally {
-  }
+  const batch = await processEvents({ events: [first, second], mockDb: seeded.mockDb });
+  const firstId = `${first.transaction.hash}-${first.logIndex}`;
+  const secondId = `${second.transaction.hash}-${second.logIndex}`;
+  const certificate = batch.mockDb.entities.UserEpochFinalization.get(
+    `${KEEPER_PHASE.unifiedUser}:8`
+  );
+  assert.ok(keeperRawPhase(batch.mockDb, firstId));
+  assert.ok(keeperRawPhase(batch.mockDb, secondId));
+  assert.deepEqual(
+    [certificate?.settlementEventId, certificate?.txHash, certificate?.finalizedAt],
+    [firstId, first.transaction.hash, eventTimestamp]
+  );
+  assert.equal(
+    batch.mockDb.entities.UserEpochStats.get(`${KEEPER_PHASE.unifiedUser}:8`)?.totalPoints,
+    3n * 10n ** 18n
+  );
 });
 
 test('keeper gap finalization fails closed without an exact usable closed Tide', async () => {
-  try {
-    const invalidEpochs = [
-      { label: 'missing epoch', epoch: undefined },
-      {
-        label: 'open epoch row',
-        epoch: {
-          id: '8',
-          epochNumber: 8n,
-          startBlock: BigInt(LEADERBOARD_START_BLOCK),
-          startTime: 100,
-          endBlock: undefined,
-          endTime: undefined,
-          isActive: true,
-          duration: undefined,
-          scheduledStartTime: 100,
-          scheduledEndTime: 0,
-        },
+  const invalidEpochs = [
+    { label: 'missing epoch', epoch: undefined },
+    {
+      label: 'open epoch row',
+      epoch: {
+        id: '8',
+        epochNumber: 8n,
+        startBlock: BigInt(LEADERBOARD_START_BLOCK),
+        startTime: 100,
+        endBlock: undefined,
+        endTime: undefined,
+        isActive: true,
+        duration: undefined,
+        scheduledStartTime: 100,
+        scheduledEndTime: 0,
       },
-      {
-        label: 'wrong epoch payload',
-        epoch: {
-          id: '8',
-          epochNumber: 7n,
-          startBlock: BigInt(LEADERBOARD_START_BLOCK),
-          startTime: 100,
-          endBlock: BigInt(LEADERBOARD_START_BLOCK + 1),
-          endTime: 200,
-          isActive: false,
-          duration: 100n,
-          scheduledStartTime: 100,
-          scheduledEndTime: 200,
-        },
-      },
-      {
-        label: 'inactive row without an end',
-        epoch: {
-          id: '8',
-          epochNumber: 8n,
-          startBlock: BigInt(LEADERBOARD_START_BLOCK),
-          startTime: 100,
-          endBlock: undefined,
-          endTime: undefined,
-          isActive: false,
-          duration: undefined,
-          scheduledStartTime: 100,
-          scheduledEndTime: 0,
-        },
-      },
-      {
-        label: 'zero end time',
-        epoch: {
-          id: '8',
-          epochNumber: 8n,
-          startBlock: BigInt(LEADERBOARD_START_BLOCK),
-          startTime: 0,
-          endBlock: BigInt(LEADERBOARD_START_BLOCK + 1),
-          endTime: 0,
-          isActive: false,
-          duration: 0n,
-          scheduledStartTime: 0,
-          scheduledEndTime: 0,
-        },
-      },
-      {
-        label: 'end before start',
-        epoch: {
-          id: '8',
-          epochNumber: 8n,
-          startBlock: BigInt(LEADERBOARD_START_BLOCK),
-          startTime: 200,
-          endBlock: BigInt(LEADERBOARD_START_BLOCK + 1),
-          endTime: 100,
-          isActive: false,
-          duration: undefined,
-          scheduledStartTime: 200,
-          scheduledEndTime: 100,
-        },
-      },
-    ];
-
-    for (const [index, entry] of invalidEpochs.entries()) {
-      let mockDb = TestHelpers.MockDb.createMockDb().entities.LeaderboardState.set({
-        id: 'current',
-        currentEpochNumber: 8n,
+    },
+    {
+      label: 'wrong epoch payload',
+      epoch: {
+        id: '8',
+        epochNumber: 7n,
+        startBlock: BigInt(LEADERBOARD_START_BLOCK),
+        startTime: 100,
+        endBlock: BigInt(LEADERBOARD_START_BLOCK + 1),
+        endTime: 200,
         isActive: false,
-      });
-      if (entry.epoch) mockDb = mockDb.entities.LeaderboardEpoch.set(entry.epoch);
-      const timestamp = 300 + index;
-      const event = TestHelpers.LeaderboardKeeper.UserSettled.createMockEvent({
-        user: KEEPER_PHASE.unifiedUser,
-        timestamp: BigInt(timestamp),
-        ...createEventDataFactory()(KEEPER_TEST_BLOCK + 400 + index, timestamp, ADDRESSES.keeper),
-      });
-      await assert.rejects(
-        () => TestHelpers.LeaderboardKeeper.UserSettled.processEvent({ event, mockDb }),
-        /closed LeaderboardEpoch/,
-        entry.label
-      );
-      assert.equal(
-        mockDb.entities.UserEpochFinalization.get(`${KEEPER_PHASE.unifiedUser}:8`),
-        undefined,
-        `${entry.label}: no certificate exists before successful settlement`
-      );
-    }
-  } finally {
+        duration: 100n,
+        scheduledStartTime: 100,
+        scheduledEndTime: 200,
+      },
+    },
+    {
+      label: 'inactive row without an end',
+      epoch: {
+        id: '8',
+        epochNumber: 8n,
+        startBlock: BigInt(LEADERBOARD_START_BLOCK),
+        startTime: 100,
+        endBlock: undefined,
+        endTime: undefined,
+        isActive: false,
+        duration: undefined,
+        scheduledStartTime: 100,
+        scheduledEndTime: 0,
+      },
+    },
+    {
+      label: 'zero end time',
+      epoch: {
+        id: '8',
+        epochNumber: 8n,
+        startBlock: BigInt(LEADERBOARD_START_BLOCK),
+        startTime: 0,
+        endBlock: BigInt(LEADERBOARD_START_BLOCK + 1),
+        endTime: 0,
+        isActive: false,
+        duration: 0n,
+        scheduledStartTime: 0,
+        scheduledEndTime: 0,
+      },
+    },
+    {
+      label: 'end before start',
+      epoch: {
+        id: '8',
+        epochNumber: 8n,
+        startBlock: BigInt(LEADERBOARD_START_BLOCK),
+        startTime: 200,
+        endBlock: BigInt(LEADERBOARD_START_BLOCK + 1),
+        endTime: 100,
+        isActive: false,
+        duration: undefined,
+        scheduledStartTime: 200,
+        scheduledEndTime: 100,
+      },
+    },
+  ];
+
+  for (const [index, entry] of invalidEpochs.entries()) {
+    let mockDb = TestHelpers.MockDb.createMockDb().entities.LeaderboardState.set({
+      id: 'current',
+      currentEpochNumber: 8n,
+      isActive: false,
+    });
+    if (entry.epoch) mockDb = mockDb.entities.LeaderboardEpoch.set(entry.epoch);
+    const timestamp = 300 + index;
+    const event = TestHelpers.LeaderboardKeeper.UserSettled.createMockEvent({
+      user: KEEPER_PHASE.unifiedUser,
+      timestamp: BigInt(timestamp),
+      ...createEventDataFactory()(KEEPER_TEST_BLOCK + 400 + index, timestamp, ADDRESSES.keeper),
+    });
+    await assert.rejects(
+      () => TestHelpers.LeaderboardKeeper.UserSettled.processEvent({ event, mockDb }),
+      /closed LeaderboardEpoch/,
+      entry.label
+    );
+    assert.equal(
+      mockDb.entities.UserEpochFinalization.get(`${KEEPER_PHASE.unifiedUser}:8`),
+      undefined,
+      `${entry.label}: no certificate exists before successful settlement`
+    );
   }
 });
 
 test('keeper user settled: pure-VP user still settles for a closed past epoch (gate does not drop VP decay tail)', async () => {
-  try {
-    const TestHelpers = loadTestHelpers();
-    let mockDb = TestHelpers.MockDb.createMockDb();
-    const eventData = createEventDataFactory();
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
 
-    // epoch 2 (< live 5), active (mid-epoch) -> gate would skip a reserve user
-    mockDb = mockDb.entities.LeaderboardState.set({
-      id: 'current',
-      currentEpochNumber: 2n,
-      isActive: true,
-    });
-    mockDb = mockDb.entities.LeaderboardEpoch.set({
-      id: '2',
-      epochNumber: 2n,
-      startBlock: 0n,
-      startTime: 0,
-      endBlock: undefined,
-      endTime: undefined,
-      isActive: true,
-      duration: undefined,
-      scheduledStartTime: 0,
-      scheduledEndTime: 0,
-    });
-    // a VP rate so VP points actually accrue
-    mockDb = mockDb.entities.LeaderboardConfig.set({
-      id: 'global',
-      depositRateBps: 0n,
-      borrowRateBps: 0n,
-      vpRateBps: 10000n,
-      lpRateBps: 0n,
-      supplyDailyBonus: 0,
-      borrowDailyBonus: 0,
-      repayDailyBonus: 0,
-      withdrawDailyBonus: 0,
-      cooldownSeconds: 0,
-      minDailyBonusUsd: 0,
-      lastUpdate: 0,
-    });
+  // epoch 2 (< live 5), active (mid-epoch) -> gate would skip a reserve user
+  mockDb = mockDb.entities.LeaderboardState.set({
+    id: 'current',
+    currentEpochNumber: 2n,
+    isActive: true,
+  });
+  mockDb = mockDb.entities.LeaderboardEpoch.set({
+    id: '2',
+    epochNumber: 2n,
+    startBlock: 0n,
+    startTime: 0,
+    endBlock: undefined,
+    endTime: undefined,
+    isActive: true,
+    duration: undefined,
+    scheduledStartTime: 0,
+    scheduledEndTime: 0,
+  });
+  // a VP rate so VP points actually accrue
+  mockDb = mockDb.entities.LeaderboardConfig.set({
+    id: 'global',
+    depositRateBps: 0n,
+    borrowRateBps: 0n,
+    vpRateBps: 10000n,
+    lpRateBps: 0n,
+    supplyDailyBonus: 0,
+    borrowDailyBonus: 0,
+    repayDailyBonus: 0,
+    withdrawDailyBonus: 0,
+    cooldownSeconds: 0,
+    minDailyBonusUsd: 0,
+    lastUpdate: 0,
+  });
 
-    // Pure-VP user: a permanent veDUST lock, NO reserves. Permanent => flat VP.
-    const tokenId = 7000n;
-    mockDb = mockDb.entities.DustLockToken.set({
-      id: tokenId.toString(),
-      owner: ADDRESSES.user,
-      lockedAmount: 1_000_000_000_000_000_000_000n, // 1000 * 1e18
-      end: 0,
-      isPermanent: true,
-      createdAt: 1767000000,
-      updatedAt: 1767000000,
-      lastDepositType: undefined,
-      selfRepayEnabled: false,
-      rewardReceiver: undefined,
-    });
-    mockDb = mockDb.entities.UserTokenList.set({
-      id: ADDRESSES.user,
-      user_id: ADDRESSES.user,
-      tokenIds: [tokenId],
-      lastUpdate: 1767000000,
-    });
+  // Pure-VP user: a permanent veDUST lock, NO reserves. Permanent => flat VP.
+  const tokenId = 7000n;
+  mockDb = mockDb.entities.DustLockToken.set({
+    id: tokenId.toString(),
+    owner: ADDRESSES.user,
+    lockedAmount: 1_000_000_000_000_000_000_000n, // 1000 * 1e18
+    end: 0,
+    isPermanent: true,
+    createdAt: 1767000000,
+    updatedAt: 1767000000,
+    lastDepositType: undefined,
+    selfRepayEnabled: false,
+    rewardReceiver: undefined,
+  });
+  mockDb = mockDb.entities.UserTokenList.set({
+    id: ADDRESSES.user,
+    user_id: ADDRESSES.user,
+    tokenIds: [tokenId],
+    lastUpdate: 1767000000,
+  });
 
-    // first settle establishes the VP accrual cursor at this timestamp
-    const block = Number(LEADERBOARD_START_BLOCK) + 1000;
-    const t0 = 1767000000;
-    const settle0 = TestHelpers.LeaderboardKeeper.UserSettled.createMockEvent({
-      user: ADDRESSES.user,
-      timestamp: BigInt(t0),
-      ...eventData(block, t0, ADDRESSES.keeper),
-    });
-    mockDb = await TestHelpers.LeaderboardKeeper.UserSettled.processEvent({
-      event: settle0,
-      mockDb,
-    });
+  // first settle establishes the VP accrual cursor at this timestamp
+  const block = Number(LEADERBOARD_START_BLOCK) + 1000;
+  const t0 = 1767000000;
+  const settle0 = TestHelpers.LeaderboardKeeper.UserSettled.createMockEvent({
+    user: ADDRESSES.user,
+    timestamp: BigInt(t0),
+    ...eventData(block, t0, ADDRESSES.keeper),
+  });
+  mockDb = await TestHelpers.LeaderboardKeeper.UserSettled.processEvent({
+    event: settle0,
+    mockDb,
+  });
 
-    // a later settle in the same closed epoch: the pure-VP user FALLS THROUGH the
-    // gate and accrues VP points over [t0, t1] (flat permanent VP * vpRate * dt).
-    const t1 = t0 + 86_400; // one day later
-    const settle1 = TestHelpers.LeaderboardKeeper.UserSettled.createMockEvent({
-      user: ADDRESSES.user,
-      timestamp: BigInt(t1),
-      ...eventData(block + 1, t1, ADDRESSES.keeper),
-    });
-    mockDb = await TestHelpers.LeaderboardKeeper.UserSettled.processEvent({
-      event: settle1,
-      mockDb,
-    });
+  // a later settle in the same closed epoch: the pure-VP user FALLS THROUGH the
+  // gate and accrues VP points over [t0, t1] (flat permanent VP * vpRate * dt).
+  const t1 = t0 + 86_400; // one day later
+  const settle1 = TestHelpers.LeaderboardKeeper.UserSettled.createMockEvent({
+    user: ADDRESSES.user,
+    timestamp: BigInt(t1),
+    ...eventData(block + 1, t1, ADDRESSES.keeper),
+  });
+  mockDb = await TestHelpers.LeaderboardKeeper.UserSettled.processEvent({
+    event: settle1,
+    mockDb,
+  });
 
-    const stats = mockDb.entities.UserEpochStats.get(`${ADDRESSES.user}:2`);
-    assert.ok(stats, 'pure-VP user got an epoch stats row despite the gate');
-    assert.ok(
-      stats.vpPointsWithMultiplier > 0n,
-      'pure-VP user accrued VP points for the closed epoch (gate did not drop them)'
-    );
-  } finally {
-  }
+  const stats = mockDb.entities.UserEpochStats.get(`${ADDRESSES.user}:2`);
+  assert.ok(stats, 'pure-VP user got an epoch stats row despite the gate');
+  assert.ok(
+    stats.vpPointsWithMultiplier > 0n,
+    'pure-VP user accrued VP points for the closed epoch (gate did not drop them)'
+  );
 });
 
 test('voting power synced joins capped nft and vp multipliers additively', async () => {

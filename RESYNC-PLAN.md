@@ -219,8 +219,8 @@ references, `currentTotalDebt` (28 refs, computed from stable + variable), 5 han
 `tokenization.ts`, registration + sToken `SubToken` in `config.ts`,
 `abis/lending/StableDebtToken.json`, and 28 test references.
 
-`INDEX_STABLE_DEBT_TOKENS` in `helpers/constants.ts` is the current kill switch and its
-registration site is `c8`-ignored; both go away with the real removal.
+`INDEX_STABLE_DEBT_TOKENS` in `helpers/constants.ts` was the kill switch and its
+registration site was `c8`-ignored; both went away with the real removal.
 
 ### Step 2 — Remove 4 dead Pool events — DONE
 
@@ -352,7 +352,6 @@ This is the step that closes the project.
 1. **Write-only fields left by step 2** — `Reserve.unbacked`, `Reserve.lifetimePortalLPFee`,
    `Reserve.lifetimePortalProtocolFee`, `Pool.bridgeProtocolFee`: keep or drop.
 2. **`block_lag` on v3.6.1** — untested. See §3.3 for the constraint on testing it.
-3. **The 100% coverage gate has not been run** since the prefill and test-environment changes.
 
 ## 7. Survey outputs
 

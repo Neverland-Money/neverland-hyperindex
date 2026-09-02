@@ -106,8 +106,8 @@ Set `ENVIO_LEADERBOARD_LIVE_EPOCH` to the current live Tide for the same replay.
 
 ### Testing
 
-- `pnpm run test:build`: Type-check handlers and tests without emitting files
-- `pnpm run test`: Type-check and run the TypeScript tests directly
+- `pnpm run test:build`: Compile handlers and tests to `dist-test`
+- `pnpm run test`: Compile, then run the compiled tests from `dist-test`
 - `pnpm run test:coverage`: Generate coverage report
 - `pnpm run test:coverage:check`: Enforce 100% lines/functions/branches/statements
 
@@ -144,7 +144,6 @@ neverland-hyperindex/
 │   │   ├── uniswapV3.ts            # Uniswap V3 math helpers
 │   │   └── viem.ts                 # Viem utilities
 │   └── types/                      # TypeScript type definitions
-│       ├── envio.ts                # V3 schema entity/context aliases
 │       └── shims.d.ts              # Type shims
 ├── .env.example                    # Environment variables template
 ├── .gitignore                      # Git ignore file

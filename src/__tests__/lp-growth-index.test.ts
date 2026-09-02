@@ -550,36 +550,6 @@ test('missing, inactive, frozen, and pre-boundary state are deterministic no-ops
     frozenAt: 300,
     lastUpdate: 300,
   });
-  const scalarContext = buildContext();
-  scalarContext.stores.LeaderboardState.set({
-    id: 'current',
-    currentEpochNumber: 1n,
-    isActive: true,
-  });
-  scalarContext.stores.LeaderboardEpoch.set({
-    id: '1',
-    epochNumber: 1n,
-    startBlock: 1n,
-    startTime: 100,
-    endBlock: undefined,
-    endTime: undefined,
-    isActive: true,
-    duration: undefined,
-    scheduledStartTime: 100,
-    scheduledEndTime: 300,
-  });
-  scalarContext.stores.LPPoolConfig.set({ ...config, isActive: true, enabledAtTimestamp: 100 });
-  scalarContext.stores.LPPoolState.set({
-    id: POOL,
-    pool: POOL,
-    currentTick: 0,
-    sqrtPriceX96: 0n,
-    token0Price: 0n,
-    token1Price: 0n,
-    feeProtocol0: 0,
-    feeProtocol1: 0,
-    lastUpdate: 100,
-  });
   await freezeLPGrowthForEpoch(buildContext().context, 1n, 300);
   const emptyRegistry = buildContext();
   emptyRegistry.stores.LPPoolRegistry.set({ id: 'global', poolIds: [], lastUpdate: 0 });

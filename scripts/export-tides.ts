@@ -171,7 +171,28 @@ export function encodeDocument(tide: number, epoch: Row, stats: Row[], exportedA
 }
 
 /** Field-level differences between a freshly read set of rows and a file already on disk. */
-export function diffRows(fresh: Row[], stored: Row[]): string[] {
+/**
+ * One epoch record as comparable text. The database side arrives from `COPY ... csv` (booleans
+ * as `t`/`f`, NULL as empty, numerics as digit strings); the file side arrives from
+ * `parseTideDocument` (booleans, numbers, quoted BigInts, null). Both collapse to the same
+ * strings here so `diffRows` can compare them field for field.
+ */
+export function normalizeEpochRow(row: Record<string, unknown>): Row {
+  const flat: Row = {};
+  for (const f of EPOCH_FIELDS) {
+    const v = row[f];
+    if (v === null || v === undefined || v === '') flat[f] = '';
+    else if (f === 'isActive') flat[f] = v === true || v === 't' || v === 'true' ? 'true' : 'false';
+    else flat[f] = String(v);
+  }
+  return flat;
+}
+
+export function diffRows(
+  fresh: Row[],
+  stored: Row[],
+  fields: readonly string[] = STAT_FIELDS
+): string[] {
   const byId = new Map(stored.map(r => [r.id, r]));
   const out: string[] = [];
   for (const row of fresh) {
@@ -180,7 +201,7 @@ export function diffRows(fresh: Row[], stored: Row[]): string[] {
       out.push(`${row.id}: missing from file`);
       continue;
     }
-    for (const f of STAT_FIELDS) {
+    for (const f of fields) {
       if (String(row[f]) !== String(other[f])) {
         out.push(`${row.id}.${f}: db=${row[f]} file=${other[f]}`);
       }
@@ -267,16 +288,26 @@ function main(): void {
       // into doubles, which reports spurious differences for every value above 2^53 -- the
       // precise defect this exporter exists to prevent.
       const stored = parseTideDocument(text) as unknown as {
+        epoch: Record<string, unknown>;
         userEpochStats: Row[];
       };
-      const diffs = diffRows(
-        stats,
-        stored.userEpochStats.map(r => {
-          const flat: Row = {};
-          for (const f of STAT_FIELDS) flat[f] = String((r as Record<string, unknown>)[f] ?? '');
-          return flat;
-        })
-      );
+      // The epoch record is load-bearing (prefill writes it and reads its endTime as the
+      // coverage bound), so verify covers it field for field, not only the stats rows.
+      const diffs = [
+        ...diffRows(
+          [normalizeEpochRow(epochRows[0])],
+          [normalizeEpochRow(stored.epoch)],
+          EPOCH_FIELDS
+        ).map(d => `epoch ${d}`),
+        ...diffRows(
+          stats,
+          stored.userEpochStats.map(r => {
+            const flat: Row = {};
+            for (const f of STAT_FIELDS) flat[f] = String((r as Record<string, unknown>)[f] ?? '');
+            return flat;
+          })
+        ),
+      ];
       if (diffs.length) {
         failures++;
         console.error(`tide ${tide}: ${diffs.length} differences`);
