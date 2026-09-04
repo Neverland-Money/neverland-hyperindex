@@ -51,7 +51,7 @@ services:
       - hyperindex-staging
 
   indexer-staging:
-    image: node:22-alpine
+    image: node:22-slim
     container_name: neverland-indexer-staging
     restart: unless-stopped
     working_dir: /app
@@ -82,6 +82,9 @@ services:
       # Defer head wake-ups by N ms so one query spans many blocks; 0 = stock behavior.
       # Recommended 3000 (cuts head requests ~74%). See .env.example for measurements.
       - ENVIO_HEAD_DEBOUNCE_MS=${ENVIO_HEAD_DEBOUNCE_MS:-0}
+      # Advance the head frontier in whole steps of N blocks so a partition at the frontier
+      # batches N blocks into one query instead of querying every block. 0/1 = stock.
+      - ENVIO_HEAD_BLOCK_QUANTUM=${ENVIO_HEAD_BLOCK_QUANTUM:-0}
       - ENVIO_ENABLE_EXTERNAL_CALLS=${ENVIO_ENABLE_EXTERNAL_CALLS:-false}
       - ENVIO_ENABLE_ETH_CALLS=${ENVIO_ENABLE_ETH_CALLS:-false}
       - ENVIO_ENABLE_NFT_CHAIN_SYNC=${ENVIO_ENABLE_NFT_CHAIN_SYNC:-false}
@@ -105,7 +108,7 @@ services:
         condition: service_healthy
     command: >
       sh -c "
-        apk add --no-cache curl &&
+        apt-get update -qq && apt-get install -y -qq --no-install-recommends curl &&
         npm install -g pnpm@10 &&
         pnpm install --frozen-lockfile &&
         pnpm run codegen &&

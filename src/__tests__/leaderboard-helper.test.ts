@@ -21,9 +21,8 @@ import type {
   ScoreBucket,
   UserIndex,
   UserLeaderboardState,
-  handlerContext,
-} from '../../generated';
-
+  EvmOnEventContext as handlerContext,
+} from 'envio';
 type Entity = { readonly id: string };
 
 function createStore<T extends Entity>(initial: readonly T[] = []) {

@@ -46,12 +46,14 @@ import {
   updateLifetimePoints,
   updateUserVotingPower,
   updateUserTokenList,
+  loadLPGrowthModule,
+  loadLPModule,
 } from '../handlers/shared';
 import type {
   DustLockToken,
   LPPoolConfig,
   LPPoolRegistry,
-  leaderboardConfig as LeaderboardConfig,
+  LeaderboardConfig,
   LeaderboardEpoch,
   LeaderboardState,
   NFTMultiplierConfig,
@@ -73,9 +75,8 @@ import type {
   UserTokenList,
   UserVotingPowerHistory,
   VotingPowerTier,
-  handlerContext,
-} from '../../generated';
-
+  EvmOnEventContext as handlerContext,
+} from 'envio';
 type UserPointsMaybeEpochs = Omit<UserPoints, 'epochsParticipated' | 'lifetimeEpochsIncluded'> & {
   epochsParticipated?: bigint[];
   lifetimeEpochsIncluded?: bigint[];
@@ -1731,4 +1732,20 @@ test('vp tier helpers break on lower tiers', async () => {
   assert.equal(multiplier, 15000n);
   const tierIndex = await findVPTierIndex(context, 500n);
   assert.equal(tierIndex, 0n);
+});
+
+test('the lazy lp module loaders memoize, so the cycle is broken once per process', async () => {
+  // lp and lpGrowth import shared, so shared loads them lazily inside the call. The promise is
+  // cached: a second call must hand back the same one rather than re-evaluating the module.
+  const first = loadLPModule();
+  const second = loadLPModule();
+  assert.equal(first, second, 'loadLPModule must return the memoized promise');
+
+  const firstGrowth = loadLPGrowthModule();
+  const secondGrowth = loadLPGrowthModule();
+  assert.equal(firstGrowth, secondGrowth, 'loadLPGrowthModule must return the memoized promise');
+
+  // and they resolve to the real modules
+  assert.equal(typeof (await first).settleLPPosition, 'function');
+  assert.equal(typeof (await firstGrowth).advanceLPPoolGrowth, 'function');
 });

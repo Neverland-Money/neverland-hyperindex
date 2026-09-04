@@ -7,8 +7,7 @@ import {
   normalizeAddress,
 } from '../helpers/constants';
 
-import type { handlerContext } from '../../generated';
-
+import type { EvmOnEventContext as handlerContext } from 'envio';
 export function isFungibleLPPoolConfig(config: { pool: string; positionManager: string }): boolean {
   return normalizeAddress(config.positionManager) === normalizeAddress(config.pool);
 }

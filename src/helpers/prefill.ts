@@ -18,8 +18,7 @@ import zlib from 'node:zlib';
 
 import { EPOCH_DATES_OVERRIDES } from './constants';
 
-import type { handlerContext, UserEpochStats } from '../../generated';
-
+import type { EvmOnEventContext as handlerContext, UserEpochStats } from 'envio';
 /** Read at call time, not module load, so a deployment (or a test) can flip it. */
 export function isPrefillEnabled(): boolean {
   return process.env.PREFILL_HISTORIC_EPOCHS === 'true';

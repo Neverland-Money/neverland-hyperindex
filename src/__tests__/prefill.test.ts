@@ -21,8 +21,7 @@ import {
 
 import { TestHelpers } from './v3-test-helpers';
 
-import type { handlerContext } from '../../generated';
-
+import type { EvmOnEventContext as handlerContext } from 'envio';
 /** Past every fixture tide's endTime, so the boundary write is due. Prefill now applies
  *  at the boundary -- the first event at or after the first non-prefilled Tide -- so a
  *  timestamp inside the prefilled span writes nothing. */
@@ -527,9 +526,10 @@ test('prefillDataDir resolves the override, then cwd/data, then the parent data/
     // cwd holds data/ (the repo root).
     assert.equal(prefillDataDir(), repoData);
 
-    // cwd is generated/, the directory `envio start` runs from: no data/ here, but the parent
-    // has it. This is the production case the fallback exists for.
-    process.chdir(path.resolve(prevCwd, 'generated'));
+    // cwd is a repo subdirectory with no data/ of its own, so the parent's data/ is used.
+    // Under v2 this was `generated/`, the directory `envio start` ran from; v3 has no such
+    // subproject and runs from the repo root, which cwd/data already covers.
+    process.chdir(path.resolve(prevCwd, 'src'));
     assert.equal(prefillDataDir(), repoData);
 
     // Neither cwd nor its parent has data/: the cwd form is returned so the caller's error

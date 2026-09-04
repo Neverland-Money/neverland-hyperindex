@@ -554,7 +554,10 @@ test('offline parity evaluator enforces every Task 8 rollout blocker and exit ve
 });
 
 test('offline snapshot adapter reports every LP-bearing field and exact closed-Tide score', async () => {
-  const comparator = require('../../scripts/compare-leaderboard-parity') as Record<string, unknown>;
+  const comparator = (await import('../../scripts/compare-leaderboard-parity')) as Record<
+    string,
+    unknown
+  >;
   const buildMaterial = comparator.buildUserEpochParityMaterial;
   assert.equal(
     typeof buildMaterial,
@@ -599,7 +602,10 @@ test('offline snapshot adapter reports every LP-bearing field and exact closed-T
 });
 
 test('Task 8 parity manifest reconciles every published field in the three score entities', async () => {
-  const comparator = require('../../scripts/compare-leaderboard-parity') as Record<string, unknown>;
+  const comparator = (await import('../../scripts/compare-leaderboard-parity')) as Record<
+    string,
+    unknown
+  >;
   const manifest = comparator.LEADERBOARD_PARITY_FIELD_MANIFEST as
     | Record<
         string,
@@ -640,7 +646,10 @@ test('Task 8 parity manifest reconciles every published field in the three score
 });
 
 test('full snapshot adapter blocks every exact field and surfaces every LP-bearing field', async t => {
-  const comparator = require('../../scripts/compare-leaderboard-parity') as Record<string, unknown>;
+  const comparator = (await import('../../scripts/compare-leaderboard-parity')) as Record<
+    string,
+    unknown
+  >;
   const buildMaterial = comparator.buildLeaderboardParityMaterial as
     | ((
         baseline: {
@@ -996,7 +1005,7 @@ test('runtime validation rejects malformed, duplicate, and non-contiguous parity
   });
 
   await t.test('classification JSON rejects invalid and duplicate keys', async () => {
-    const comparator = require('../../scripts/compare-leaderboard-parity') as Record<
+    const comparator = (await import('../../scripts/compare-leaderboard-parity')) as Record<
       string,
       unknown
     >;
@@ -1032,7 +1041,7 @@ test('runtime validation rejects malformed, duplicate, and non-contiguous parity
   });
 
   await t.test('archived manifest JSON rejects malformed and duplicate material', async () => {
-    const comparator = require('../../scripts/compare-leaderboard-parity') as Record<
+    const comparator = (await import('../../scripts/compare-leaderboard-parity')) as Record<
       string,
       unknown
     >;
@@ -1092,7 +1101,7 @@ test('runtime validation rejects malformed, duplicate, and non-contiguous parity
   });
 
   await t.test('duplicate normalized endpoint identities block before comparison', async () => {
-    const comparator = require('../../scripts/compare-leaderboard-parity') as Record<
+    const comparator = (await import('../../scripts/compare-leaderboard-parity')) as Record<
       string,
       unknown
     >;

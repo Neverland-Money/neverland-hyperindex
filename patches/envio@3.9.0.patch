@@ -1,0 +1,224 @@
+diff --git a/src/ChainState.res b/src/ChainState.res
+index 645d6d162626166d480d57d2936d3cd39a1571c1..e7755d57ac49714b0887216355afa01ca93dc7b4 100644
+--- a/src/ChainState.res
++++ b/src/ChainState.res
+@@ -539,9 +539,20 @@ let densityBlendWindow = 100.
+ // back the tip), or endBlock when it's below that head. Matching isFetchingAtHead's
+ // definition of the head is what lets a chain parked at its lagged head read
+ // 100% progress instead of looking behind against blocks it can't fetch.
++// catalyst <catanet@pm.me>
++// ENVIO_HEAD_BLOCK_QUANTUM: advance the head frontier in N-block steps so one query spans N blocks.
++let headBlockQuantum = %raw(`Number(process.env.ENVIO_HEAD_BLOCK_QUANTUM) || 0`)
++
+ let fetchCeiling = (cs: t) => {
+   let fetchState = cs.fetchState
+-  let head = Pervasives.max(0, fetchState.knownHeight - fetchState.blockLag)
++  let rawHead = Pervasives.max(0, fetchState.knownHeight - fetchState.blockLag)
++  let head = if (
++    headBlockQuantum > 1 && fetchState.endBlock->Option.isNone && rawHead > headBlockQuantum
++  ) {
++    rawHead - mod(rawHead, headBlockQuantum)
++  } else {
++    rawHead
++  }
+   switch fetchState.endBlock {
+   | Some(endBlock) => Pervasives.min(endBlock, head)
+   | None => head
+diff --git a/src/ChainState.res.mjs b/src/ChainState.res.mjs
+index 1aedd11c48ab3d314be121d4da29bdd6768e64dd..d565c3dc6a3b1ee3fb4c5820c2a1aaa0ffb70872 100644
+--- a/src/ChainState.res.mjs
++++ b/src/ChainState.res.mjs
+@@ -345,10 +345,17 @@ function isReady(cs) {
+   return cs.timestampCaughtUpToHeadOrEndblock !== undefined;
+ }
+ 
++// catalyst <catanet@pm.me>
++// ENVIO_HEAD_BLOCK_QUANTUM: advance the head frontier in N-block steps so one query spans N blocks.
++let headBlockQuantum = Number(process.env.ENVIO_HEAD_BLOCK_QUANTUM) || 0;
++
+ function fetchCeiling(cs) {
+   let fetchState = cs.fetchState;
+   let head = Primitive_int.max(0, fetchState.knownHeight - fetchState.blockLag | 0);
+   let endBlock = fetchState.endBlock;
++  if (headBlockQuantum > 1 && endBlock === undefined && head > headBlockQuantum) {
++    head = head - head % headBlockQuantum | 0;
++  }
+   if (endBlock !== undefined) {
+     return Primitive_int.min(endBlock, head);
+   } else {
+diff --git a/src/FetchState.res b/src/FetchState.res
+index 7c9026d97c619102f97b3672567a34f961c491dc..57e1591fd86c75e26cab5b40aed2cc5a999096ac 100644
+--- a/src/FetchState.res
++++ b/src/FetchState.res
+@@ -2390,12 +2390,23 @@ let acceptCandidates = (
+ // sized to the events its range to the target is expected to hold —
+ // rangeTargetDensity × (chainTargetBlock − fromBlock + 1) / inRangeCount — so
+ // unknown-density partitions probe in parallel within one budget.
++// catalyst <catanet@pm.me>
++// ENVIO_HEAD_BLOCK_QUANTUM: advance the head frontier in N-block steps so one query spans N blocks.
++let headBlockQuantum = %raw(`Number(process.env.ENVIO_HEAD_BLOCK_QUANTUM) || 0`)
++
+ let getNextQuery = (
+   {optimizedPartitions, blockLag, latestOnBlockBlockNumber, knownHeight, endBlock}: t,
+   ~chainTargetBlock: int,
+   ~chainTargetItems: float,
+ ) => {
+-  let headBlockNumber = knownHeight - blockLag
++  let rawHeadBlockNumber = knownHeight - blockLag
++  let headBlockNumber = if (
++    headBlockQuantum > 1 && endBlock->Option.isNone && rawHeadBlockNumber > headBlockQuantum
++  ) {
++    rawHeadBlockNumber - mod(rawHeadBlockNumber, headBlockQuantum)
++  } else {
++    rawHeadBlockNumber
++  }
+   if headBlockNumber <= 0 {
+     WaitingForNewBlock
+   } else {
+diff --git a/src/FetchState.res.mjs b/src/FetchState.res.mjs
+index bdfd558cd08184b1b4178f8b70e7cf31dced8c44..dd44074cf8c3fdd41ed09491607ae294638fd605 100644
+--- a/src/FetchState.res.mjs
++++ b/src/FetchState.res.mjs
+@@ -1593,11 +1593,18 @@ function acceptCandidates(candidates, reservations, chainTargetItems, partitionI
+   };
+ }
+ 
++// catalyst <catanet@pm.me>
++// ENVIO_HEAD_BLOCK_QUANTUM: advance the head frontier in N-block steps so one query spans N blocks.
++let headBlockQuantum = Number(process.env.ENVIO_HEAD_BLOCK_QUANTUM) || 0;
++
+ function getNextQuery(param, chainTargetBlock, chainTargetItems) {
+   let blockLag = param.blockLag;
+   let endBlock = param.endBlock;
+   let optimizedPartitions = param.optimizedPartitions;
+   let headBlockNumber = param.knownHeight - blockLag | 0;
++  if (headBlockQuantum > 1 && endBlock === undefined && headBlockNumber > headBlockQuantum) {
++    headBlockNumber = headBlockNumber - headBlockNumber % headBlockQuantum | 0;
++  }
+   if (headBlockNumber <= 0) {
+     return "WaitingForNewBlock";
+   }
+diff --git a/src/sources/SourceManager.res b/src/sources/SourceManager.res
+index 6e2e18fb1549cdeedaf4ba4683f5151d804dcfbb..6ac33656d4d8b149c48fcccddda36ba1c5257b7c 100644
+--- a/src/sources/SourceManager.res
++++ b/src/sources/SourceManager.res
+@@ -17,6 +17,10 @@ type sourceState = {
+   requestStats: dict<requestStatAgg>,
+ }
+ 
++// catalyst <catanet@pm.me>
++// ENVIO_HEAD_DEBOUNCE_MS: withhold new chain heights for N ms so one query spans many blocks.
++let headDebounceMs = %raw(`Number(process.env.ENVIO_HEAD_DEBOUNCE_MS) || 0`)
++
+ let recordRequestStats = (sourceState: sourceState, requestStats: array<Source.requestStat>) => {
+   requestStats->Array.forEach(({method, seconds}) => {
+     switch sourceState.requestStats->Utils.Dict.dangerouslyGetNonOption(method) {
+@@ -498,16 +502,39 @@ let getSourceNewHeight = async (
+           // create subscription instead of polling
+           switch source.createHeightSubscription {
+           | Some(createSubscription) if isRealtime =>
++            let pendingHeight = ref(0)
++            let debounceScheduled = ref(false)
++            let publishAndRelease = () => {
++              debounceScheduled := false
++              let height = pendingHeight.contents
++              pendingHeight := 0
++              if height > sourceState.knownHeight {
++                sourceState.knownHeight = height
++                let resolvers = sourceState.pendingHeightResolvers
++                sourceState.pendingHeightResolvers = []
++                resolvers->Array.forEach(resolve => resolve(height))
++              }
++            }
+             let unsubscribe = createSubscription(~onHeight=newHeight => {
+               // Ignore non-increasing heights. The height stream re-emits the current
+               // head on every (re)connect; waking the wait loop on a height we already
+               // know spins it and leaks fallback pollers (#1270).
+-              if newHeight > sourceState.knownHeight {
++              if newHeight > sourceState.knownHeight && newHeight > pendingHeight.contents {
+                 sourceState->recordRequestStats([{Source.method: "heightPush", seconds: 0.}])
+-                sourceState.knownHeight = newHeight
+-                let resolvers = sourceState.pendingHeightResolvers
+-                sourceState.pendingHeightResolvers = []
+-                resolvers->Array.forEach(resolve => resolve(newHeight))
++                if headDebounceMs <= 0 {
++                  sourceState.knownHeight = newHeight
++                  let resolvers = sourceState.pendingHeightResolvers
++                  sourceState.pendingHeightResolvers = []
++                  resolvers->Array.forEach(resolve => resolve(newHeight))
++                } else {
++                  pendingHeight := newHeight
++                  if !debounceScheduled.contents {
++                    debounceScheduled := true
++                    Utils.delay(headDebounceMs)
++                    ->Promise.thenResolve(() => publishAndRelease())
++                    ->ignore
++                  }
++                }
+               } else {
+                 sourceState->recordRequestStats([{Source.method: "heightPushIgnored", seconds: 0.}])
+               }
+diff --git a/src/sources/SourceManager.res.mjs b/src/sources/SourceManager.res.mjs
+index 3db4eb3b5eab83e852113bb269a158b5dc2dbeb7..8909b1de5bfa5f59dac912ccaec98d49eef391dd 100644
+--- a/src/sources/SourceManager.res.mjs
++++ b/src/sources/SourceManager.res.mjs
+@@ -13,6 +13,10 @@ import * as Primitive_float from "@rescript/runtime/lib/es6/Primitive_float.js";
+ import * as Primitive_option from "@rescript/runtime/lib/es6/Primitive_option.js";
+ import * as Primitive_exceptions from "@rescript/runtime/lib/es6/Primitive_exceptions.js";
+ 
++// catalyst <catanet@pm.me>
++// ENVIO_HEAD_DEBOUNCE_MS: withhold new chain heights for N ms so one query spans many blocks.
++let headDebounceMs = Number(process.env.ENVIO_HEAD_DEBOUNCE_MS) || 0;
++
+ function recordRequestStats(sourceState, requestStats) {
+   requestStats.forEach(param => {
+     let seconds = param.seconds;
+@@ -415,8 +419,22 @@ async function getSourceNewHeight(sourceManager, sourceState, knownHeight, stall
+           let createSubscription = source.createHeightSubscription;
+           let exit = 0;
+           if (createSubscription !== undefined && isRealtime) {
++            let pendingHeight = 0;
++            let debounceTimer;
++            let publishAndRelease = () => {
++              debounceTimer = undefined;
++              let height = pendingHeight;
++              pendingHeight = 0;
++              if (height <= sourceState.knownHeight) {
++                return;
++              }
++              sourceState.knownHeight = height;
++              let resolvers = sourceState.pendingHeightResolvers;
++              sourceState.pendingHeightResolvers = [];
++              resolvers.forEach(resolve => resolve(height));
++            };
+             let unsubscribe = createSubscription(newHeight => {
+-              if (newHeight <= sourceState.knownHeight) {
++              if (newHeight <= sourceState.knownHeight || newHeight <= pendingHeight) {
+                 return recordRequestStats(sourceState, [{
+                     method: "heightPushIgnored",
+                     seconds: 0
+@@ -426,10 +444,20 @@ async function getSourceNewHeight(sourceManager, sourceState, knownHeight, stall
+                   method: "heightPush",
+                   seconds: 0
+                 }]);
+-              sourceState.knownHeight = newHeight;
+-              let resolvers = sourceState.pendingHeightResolvers;
+-              sourceState.pendingHeightResolvers = [];
+-              resolvers.forEach(resolve => resolve(newHeight));
++              if (headDebounceMs <= 0) {
++                sourceState.knownHeight = newHeight;
++                let resolvers = sourceState.pendingHeightResolvers;
++                sourceState.pendingHeightResolvers = [];
++                resolvers.forEach(resolve => resolve(newHeight));
++                return;
++              }
++              pendingHeight = newHeight;
++              if (debounceTimer === undefined) {
++                debounceTimer = setTimeout(publishAndRelease, headDebounceMs);
++                if (debounceTimer.unref !== undefined) {
++                  debounceTimer.unref();
++                }
++              }
+             });
+             sourceState.unsubscribe = unsubscribe;
+           } else {

@@ -6,7 +6,6 @@
  * receipt reads or historic chain calls.
  */
 
-import { NeverlandProfileItemsSeller } from '../../generated';
 import {
   CATEGORY_CONSUMABLE,
   CATEGORY_PERMANENT,
@@ -16,8 +15,8 @@ import {
 } from '../helpers/constants';
 import { getOrCreateUser, recordProtocolTransaction } from './shared';
 
-import type { handlerContext } from '../../generated';
-
+import type { EvmOnEventContext as handlerContext } from 'envio';
+import { indexer } from './registry';
 function normalizeBytes32(value: string): string {
   return value.toLowerCase();
 }
@@ -245,362 +244,386 @@ async function updateUserStats(
   });
 }
 
-NeverlandProfileItemsSeller.ItemConfigured.handler(async ({ event, context }) => {
-  const timestamp = Number(event.block.timestamp);
-  const blockNumber = BigInt(event.block.number);
-  await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
+indexer.onEvent(
+  { contract: 'NeverlandProfileItemsSeller', event: 'ItemConfigured' },
+  async ({ event, context }) => {
+    const timestamp = Number(event.block.timestamp);
+    const blockNumber = BigInt(event.block.number);
+    await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
 
-  const seller = sellerAddress(event);
-  const slugHash = normalizeBytes32(event.params.itemSlugHash);
-  const category = categoryName(event.params.category);
-  const [current, state] = await Promise.all([
-    context.ProfileShopItem.get(itemId(seller, slugHash)),
-    getOrCreateShopState(context, seller, timestamp),
-  ]);
-  const isNewConfiguredItem = !current?.configured;
+    const seller = sellerAddress(event);
+    const slugHash = normalizeBytes32(event.params.itemSlugHash);
+    const category = categoryName(event.params.category);
+    const [current, state] = await Promise.all([
+      context.ProfileShopItem.get(itemId(seller, slugHash)),
+      getOrCreateShopState(context, seller, timestamp),
+    ]);
+    const isNewConfiguredItem = !current?.configured;
 
-  context.ProfileShopItem.set({
-    id: itemId(seller, slugHash),
-    seller,
-    itemSlugHash: slugHash,
-    itemSlug: event.params.itemSlug,
-    price: event.params.newPrice,
-    category,
-    available: event.params.available,
-    configured: true,
-    configCount: (current?.configCount ?? 0n) + 1n,
-    totalQuantityPurchased: current?.totalQuantityPurchased ?? 0n,
-    totalPurchaseLines: current?.totalPurchaseLines ?? 0n,
-    totalRevenueDust: current?.totalRevenueDust ?? 0n,
-    firstConfiguredAt: current?.firstConfiguredAt ?? timestamp,
-    lastConfiguredAt: timestamp,
-    firstPurchasedAt: current?.firstPurchasedAt,
-    lastPurchasedAt: current?.lastPurchasedAt,
-  });
+    context.ProfileShopItem.set({
+      id: itemId(seller, slugHash),
+      seller,
+      itemSlugHash: slugHash,
+      itemSlug: event.params.itemSlug,
+      price: event.params.newPrice,
+      category,
+      available: event.params.available,
+      configured: true,
+      configCount: (current?.configCount ?? 0n) + 1n,
+      totalQuantityPurchased: current?.totalQuantityPurchased ?? 0n,
+      totalPurchaseLines: current?.totalPurchaseLines ?? 0n,
+      totalRevenueDust: current?.totalRevenueDust ?? 0n,
+      firstConfiguredAt: current?.firstConfiguredAt ?? timestamp,
+      lastConfiguredAt: timestamp,
+      firstPurchasedAt: current?.firstPurchasedAt,
+      lastPurchasedAt: current?.lastPurchasedAt,
+    });
 
-  context.ProfileShopItemConfigHistory.set({
-    id: eventId(event),
-    seller,
-    itemSlugHash: slugHash,
-    itemSlug: event.params.itemSlug,
-    oldPrice: event.params.oldPrice,
-    newPrice: event.params.newPrice,
-    category,
-    available: event.params.available,
-    timestamp,
-    blockNumber,
-    txHash: event.transaction.hash,
-    logIndex: Number(event.logIndex),
-  });
+    context.ProfileShopItemConfigHistory.set({
+      id: eventId(event),
+      seller,
+      itemSlugHash: slugHash,
+      itemSlug: event.params.itemSlug,
+      oldPrice: event.params.oldPrice,
+      newPrice: event.params.newPrice,
+      category,
+      available: event.params.available,
+      timestamp,
+      blockNumber,
+      txHash: event.transaction.hash,
+      logIndex: Number(event.logIndex),
+    });
 
-  context.ProfileShopState.set({
-    ...state,
-    itemCount: state.itemCount + (isNewConfiguredItem ? 1n : 0n),
-    firstEventAt: firstTimestamp(state.firstEventAt, timestamp),
-    lastUpdate: timestamp,
-  });
-});
+    context.ProfileShopState.set({
+      ...state,
+      itemCount: state.itemCount + (isNewConfiguredItem ? 1n : 0n),
+      firstEventAt: firstTimestamp(state.firstEventAt, timestamp),
+      lastUpdate: timestamp,
+    });
+  }
+);
 
-NeverlandProfileItemsSeller.ItemPurchased.handler(async ({ event, context }) => {
-  const timestamp = Number(event.block.timestamp);
-  const blockNumber = BigInt(event.block.number);
-  await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
+indexer.onEvent(
+  { contract: 'NeverlandProfileItemsSeller', event: 'ItemPurchased' },
+  async ({ event, context }) => {
+    const timestamp = Number(event.block.timestamp);
+    const blockNumber = BigInt(event.block.number);
+    await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
 
-  const seller = sellerAddress(event);
-  const lineId = eventId(event);
-  const existingLine = await context.ProfileShopPurchaseLine.get(lineId);
-  if (existingLine) return;
+    const seller = sellerAddress(event);
+    const lineId = eventId(event);
+    const existingLine = await context.ProfileShopPurchaseLine.get(lineId);
+    if (existingLine) return;
 
-  const buyer = normalizeAddress(event.params.buyer);
-  const recipient = normalizeAddress(event.params.recipient);
-  const slugHash = normalizeBytes32(event.params.itemSlugHash);
-  const category = categoryName(event.params.category);
-  const permanent = isPermanentCategory(category);
-  const purchaseEntityId = purchaseId(seller, event.params.purchaseId);
-  const [purchase, shopItem, userItem, state] = await Promise.all([
-    context.ProfileShopPurchase.get(purchaseEntityId),
-    getOrCreateShopItem(
+    const buyer = normalizeAddress(event.params.buyer);
+    const recipient = normalizeAddress(event.params.recipient);
+    const slugHash = normalizeBytes32(event.params.itemSlugHash);
+    const category = categoryName(event.params.category);
+    const permanent = isPermanentCategory(category);
+    const purchaseEntityId = purchaseId(seller, event.params.purchaseId);
+    const [purchase, shopItem, userItem, state] = await Promise.all([
+      context.ProfileShopPurchase.get(purchaseEntityId),
+      getOrCreateShopItem(
+        context,
+        seller,
+        slugHash,
+        event.params.itemSlug,
+        category,
+        event.params.unitPrice
+      ),
+      getOrCreateUserItem(context, seller, recipient, slugHash, event.params.itemSlug, category),
+      getOrCreateShopState(context, seller, timestamp),
+    ]);
+    const isNewPurchase = !purchase;
+    const lineIndex = purchase ? Number(purchase.lineCount) : 0;
+    const isGift = buyer !== recipient;
+
+    context.ProfileShopPurchaseLine.set({
+      id: lineId,
+      seller,
+      purchase_id: purchaseEntityId,
+      purchaseId: event.params.purchaseId,
+      lineIndex,
+      buyer,
+      recipient,
+      isGift,
+      itemSlugHash: slugHash,
+      itemSlug: event.params.itemSlug,
+      category,
+      quantity: event.params.quantity,
+      unitPrice: event.params.unitPrice,
+      totalPrice: event.params.totalPrice,
+      timestamp,
+      blockNumber,
+      txHash: event.transaction.hash,
+      logIndex: Number(event.logIndex),
+    });
+
+    context.ProfileShopPurchase.set(
+      purchase
+        ? {
+            ...purchase,
+            lineCount: purchase.lineCount + 1n,
+            totalPrice: purchase.totalPrice + event.params.totalPrice,
+            lineIds: [...purchase.lineIds, lineId],
+            lastLogIndex: Number(event.logIndex),
+          }
+        : {
+            id: purchaseEntityId,
+            seller,
+            purchaseId: event.params.purchaseId,
+            buyer,
+            recipient,
+            isGift,
+            lineCount: 1n,
+            totalPrice: event.params.totalPrice,
+            lineIds: [lineId],
+            timestamp,
+            blockNumber,
+            txHash: event.transaction.hash,
+            firstLogIndex: Number(event.logIndex),
+            lastLogIndex: Number(event.logIndex),
+          }
+    );
+
+    context.ProfileShopItem.set({
+      ...shopItem,
+      itemSlug: event.params.itemSlug,
+      price: shopItem.configured ? shopItem.price : event.params.unitPrice,
+      category,
+      totalQuantityPurchased: shopItem.totalQuantityPurchased + event.params.quantity,
+      totalPurchaseLines: shopItem.totalPurchaseLines + 1n,
+      totalRevenueDust: shopItem.totalRevenueDust + event.params.totalPrice,
+      firstPurchasedAt: firstTimestamp(shopItem.firstPurchasedAt, timestamp),
+      lastPurchasedAt: timestamp,
+    });
+
+    const permanentOwnedDelta = permanent && !userItem.permanentOwned ? 1n : 0n;
+    const consumableQuantityDelta = permanent ? 0n : event.params.quantity;
+    context.ProfileShopUserItem.set({
+      ...userItem,
+      itemSlug: event.params.itemSlug,
+      category,
+      permanentOwned: userItem.permanentOwned || permanent,
+      consumableQuantity: userItem.consumableQuantity + consumableQuantityDelta,
+      totalQuantityReceived: userItem.totalQuantityReceived + event.params.quantity,
+      totalValueReceivedDust: userItem.totalValueReceivedDust + event.params.totalPrice,
+      firstPurchasedAt: firstTimestamp(userItem.firstPurchasedAt, timestamp),
+      lastPurchasedAt: timestamp,
+      lastPurchaseTxHash: event.transaction.hash,
+    });
+
+    await updateUserStats(
       context,
       seller,
-      slugHash,
-      event.params.itemSlug,
-      category,
-      event.params.unitPrice
-    ),
-    getOrCreateUserItem(context, seller, recipient, slugHash, event.params.itemSlug, category),
-    getOrCreateShopState(context, seller, timestamp),
-  ]);
-  const isNewPurchase = !purchase;
-  const lineIndex = purchase ? Number(purchase.lineCount) : 0;
-  const isGift = buyer !== recipient;
+      buyer,
+      recipient,
+      isNewPurchase,
+      event.params.quantity,
+      event.params.totalPrice,
+      permanentOwnedDelta,
+      consumableQuantityDelta,
+      timestamp
+    );
 
-  context.ProfileShopPurchaseLine.set({
-    id: lineId,
-    seller,
-    purchase_id: purchaseEntityId,
-    purchaseId: event.params.purchaseId,
-    lineIndex,
-    buyer,
-    recipient,
-    isGift,
-    itemSlugHash: slugHash,
-    itemSlug: event.params.itemSlug,
-    category,
-    quantity: event.params.quantity,
-    unitPrice: event.params.unitPrice,
-    totalPrice: event.params.totalPrice,
-    timestamp,
-    blockNumber,
-    txHash: event.transaction.hash,
-    logIndex: Number(event.logIndex),
-  });
+    context.ProfileShopState.set({
+      ...state,
+      purchaseCount: state.purchaseCount + (isNewPurchase ? 1n : 0n),
+      purchaseLineCount: state.purchaseLineCount + 1n,
+      totalQuantitySold: state.totalQuantitySold + event.params.quantity,
+      totalRevenueDust: state.totalRevenueDust + event.params.totalPrice,
+      lastPurchaseId:
+        event.params.purchaseId > state.lastPurchaseId
+          ? event.params.purchaseId
+          : state.lastPurchaseId,
+      firstEventAt: firstTimestamp(state.firstEventAt, timestamp),
+      lastUpdate: timestamp,
+    });
+  }
+);
 
-  context.ProfileShopPurchase.set(
-    purchase
-      ? {
-          ...purchase,
-          lineCount: purchase.lineCount + 1n,
-          totalPrice: purchase.totalPrice + event.params.totalPrice,
-          lineIds: [...purchase.lineIds, lineId],
-          lastLogIndex: Number(event.logIndex),
-        }
-      : {
-          id: purchaseEntityId,
-          seller,
-          purchaseId: event.params.purchaseId,
-          buyer,
-          recipient,
-          isGift,
-          lineCount: 1n,
-          totalPrice: event.params.totalPrice,
-          lineIds: [lineId],
-          timestamp,
-          blockNumber,
-          txHash: event.transaction.hash,
-          firstLogIndex: Number(event.logIndex),
-          lastLogIndex: Number(event.logIndex),
-        }
-  );
+indexer.onEvent(
+  { contract: 'NeverlandProfileItemsSeller', event: 'FundsRecipientUpdated' },
+  async ({ event, context }) => {
+    const timestamp = Number(event.block.timestamp);
+    const blockNumber = BigInt(event.block.number);
+    await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
 
-  context.ProfileShopItem.set({
-    ...shopItem,
-    itemSlug: event.params.itemSlug,
-    price: shopItem.configured ? shopItem.price : event.params.unitPrice,
-    category,
-    totalQuantityPurchased: shopItem.totalQuantityPurchased + event.params.quantity,
-    totalPurchaseLines: shopItem.totalPurchaseLines + 1n,
-    totalRevenueDust: shopItem.totalRevenueDust + event.params.totalPrice,
-    firstPurchasedAt: firstTimestamp(shopItem.firstPurchasedAt, timestamp),
-    lastPurchasedAt: timestamp,
-  });
+    const seller = sellerAddress(event);
+    const state = await getOrCreateShopState(context, seller, timestamp);
+    const newFundsRecipient = normalizeAddress(event.params.newFundsRecipient);
 
-  const permanentOwnedDelta = permanent && !userItem.permanentOwned ? 1n : 0n;
-  const consumableQuantityDelta = permanent ? 0n : event.params.quantity;
-  context.ProfileShopUserItem.set({
-    ...userItem,
-    itemSlug: event.params.itemSlug,
-    category,
-    permanentOwned: userItem.permanentOwned || permanent,
-    consumableQuantity: userItem.consumableQuantity + consumableQuantityDelta,
-    totalQuantityReceived: userItem.totalQuantityReceived + event.params.quantity,
-    totalValueReceivedDust: userItem.totalValueReceivedDust + event.params.totalPrice,
-    firstPurchasedAt: firstTimestamp(userItem.firstPurchasedAt, timestamp),
-    lastPurchasedAt: timestamp,
-    lastPurchaseTxHash: event.transaction.hash,
-  });
+    context.ProfileShopState.set({
+      ...state,
+      fundsRecipient: newFundsRecipient,
+      firstEventAt: firstTimestamp(state.firstEventAt, timestamp),
+      lastUpdate: timestamp,
+    });
 
-  await updateUserStats(
-    context,
-    seller,
-    buyer,
-    recipient,
-    isNewPurchase,
-    event.params.quantity,
-    event.params.totalPrice,
-    permanentOwnedDelta,
-    consumableQuantityDelta,
-    timestamp
-  );
+    context.ProfileShopFundsRecipientUpdate.set({
+      id: eventId(event),
+      seller,
+      oldFundsRecipient: normalizeAddress(event.params.oldFundsRecipient),
+      newFundsRecipient,
+      timestamp,
+      blockNumber,
+      txHash: event.transaction.hash,
+      logIndex: Number(event.logIndex),
+    });
+  }
+);
 
-  context.ProfileShopState.set({
-    ...state,
-    purchaseCount: state.purchaseCount + (isNewPurchase ? 1n : 0n),
-    purchaseLineCount: state.purchaseLineCount + 1n,
-    totalQuantitySold: state.totalQuantitySold + event.params.quantity,
-    totalRevenueDust: state.totalRevenueDust + event.params.totalPrice,
-    lastPurchaseId:
-      event.params.purchaseId > state.lastPurchaseId
-        ? event.params.purchaseId
-        : state.lastPurchaseId,
-    firstEventAt: firstTimestamp(state.firstEventAt, timestamp),
-    lastUpdate: timestamp,
-  });
-});
+indexer.onEvent(
+  { contract: 'NeverlandProfileItemsSeller', event: 'OwnershipTransferStarted' },
+  async ({ event, context }) => {
+    const timestamp = Number(event.block.timestamp);
+    const blockNumber = BigInt(event.block.number);
+    await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
 
-NeverlandProfileItemsSeller.FundsRecipientUpdated.handler(async ({ event, context }) => {
-  const timestamp = Number(event.block.timestamp);
-  const blockNumber = BigInt(event.block.number);
-  await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
+    const seller = sellerAddress(event);
+    const state = await getOrCreateShopState(context, seller, timestamp);
+    const newOwner = normalizeAddress(event.params.newOwner);
 
-  const seller = sellerAddress(event);
-  const state = await getOrCreateShopState(context, seller, timestamp);
-  const newFundsRecipient = normalizeAddress(event.params.newFundsRecipient);
+    context.ProfileShopState.set({
+      ...state,
+      pendingOwner: newOwner,
+      firstEventAt: firstTimestamp(state.firstEventAt, timestamp),
+      lastUpdate: timestamp,
+    });
 
-  context.ProfileShopState.set({
-    ...state,
-    fundsRecipient: newFundsRecipient,
-    firstEventAt: firstTimestamp(state.firstEventAt, timestamp),
-    lastUpdate: timestamp,
-  });
+    context.ProfileShopOwnershipEvent.set({
+      id: eventId(event),
+      seller,
+      eventType: OWNERSHIP_TRANSFER_STARTED,
+      previousOwner: normalizeAddress(event.params.previousOwner),
+      newOwner,
+      timestamp,
+      blockNumber,
+      txHash: event.transaction.hash,
+      logIndex: Number(event.logIndex),
+    });
+  }
+);
 
-  context.ProfileShopFundsRecipientUpdate.set({
-    id: eventId(event),
-    seller,
-    oldFundsRecipient: normalizeAddress(event.params.oldFundsRecipient),
-    newFundsRecipient,
-    timestamp,
-    blockNumber,
-    txHash: event.transaction.hash,
-    logIndex: Number(event.logIndex),
-  });
-});
+indexer.onEvent(
+  { contract: 'NeverlandProfileItemsSeller', event: 'OwnershipTransferred' },
+  async ({ event, context }) => {
+    const timestamp = Number(event.block.timestamp);
+    const blockNumber = BigInt(event.block.number);
+    await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
 
-NeverlandProfileItemsSeller.OwnershipTransferStarted.handler(async ({ event, context }) => {
-  const timestamp = Number(event.block.timestamp);
-  const blockNumber = BigInt(event.block.number);
-  await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
+    const seller = sellerAddress(event);
+    const state = await getOrCreateShopState(context, seller, timestamp);
+    const newOwner = normalizeAddress(event.params.newOwner);
 
-  const seller = sellerAddress(event);
-  const state = await getOrCreateShopState(context, seller, timestamp);
-  const newOwner = normalizeAddress(event.params.newOwner);
+    context.ProfileShopState.set({
+      ...state,
+      owner: newOwner,
+      pendingOwner: undefined,
+      firstEventAt: firstTimestamp(state.firstEventAt, timestamp),
+      lastUpdate: timestamp,
+    });
 
-  context.ProfileShopState.set({
-    ...state,
-    pendingOwner: newOwner,
-    firstEventAt: firstTimestamp(state.firstEventAt, timestamp),
-    lastUpdate: timestamp,
-  });
+    context.ProfileShopOwnershipEvent.set({
+      id: eventId(event),
+      seller,
+      eventType: OWNERSHIP_TRANSFERRED,
+      previousOwner: normalizeAddress(event.params.previousOwner),
+      newOwner,
+      timestamp,
+      blockNumber,
+      txHash: event.transaction.hash,
+      logIndex: Number(event.logIndex),
+    });
+  }
+);
 
-  context.ProfileShopOwnershipEvent.set({
-    id: eventId(event),
-    seller,
-    eventType: OWNERSHIP_TRANSFER_STARTED,
-    previousOwner: normalizeAddress(event.params.previousOwner),
-    newOwner,
-    timestamp,
-    blockNumber,
-    txHash: event.transaction.hash,
-    logIndex: Number(event.logIndex),
-  });
-});
+indexer.onEvent(
+  { contract: 'NeverlandProfileItemsSeller', event: 'Paused' },
+  async ({ event, context }) => {
+    const timestamp = Number(event.block.timestamp);
+    const blockNumber = BigInt(event.block.number);
+    await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
 
-NeverlandProfileItemsSeller.OwnershipTransferred.handler(async ({ event, context }) => {
-  const timestamp = Number(event.block.timestamp);
-  const blockNumber = BigInt(event.block.number);
-  await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
+    const seller = sellerAddress(event);
+    const state = await getOrCreateShopState(context, seller, timestamp);
 
-  const seller = sellerAddress(event);
-  const state = await getOrCreateShopState(context, seller, timestamp);
-  const newOwner = normalizeAddress(event.params.newOwner);
+    context.ProfileShopState.set({
+      ...state,
+      paused: true,
+      firstEventAt: firstTimestamp(state.firstEventAt, timestamp),
+      lastUpdate: timestamp,
+    });
 
-  context.ProfileShopState.set({
-    ...state,
-    owner: newOwner,
-    pendingOwner: undefined,
-    firstEventAt: firstTimestamp(state.firstEventAt, timestamp),
-    lastUpdate: timestamp,
-  });
+    context.ProfileShopPauseEvent.set({
+      id: eventId(event),
+      seller,
+      account: normalizeAddress(event.params.account),
+      paused: true,
+      timestamp,
+      blockNumber,
+      txHash: event.transaction.hash,
+      logIndex: Number(event.logIndex),
+    });
+  }
+);
 
-  context.ProfileShopOwnershipEvent.set({
-    id: eventId(event),
-    seller,
-    eventType: OWNERSHIP_TRANSFERRED,
-    previousOwner: normalizeAddress(event.params.previousOwner),
-    newOwner,
-    timestamp,
-    blockNumber,
-    txHash: event.transaction.hash,
-    logIndex: Number(event.logIndex),
-  });
-});
+indexer.onEvent(
+  { contract: 'NeverlandProfileItemsSeller', event: 'Unpaused' },
+  async ({ event, context }) => {
+    const timestamp = Number(event.block.timestamp);
+    const blockNumber = BigInt(event.block.number);
+    await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
 
-NeverlandProfileItemsSeller.Paused.handler(async ({ event, context }) => {
-  const timestamp = Number(event.block.timestamp);
-  const blockNumber = BigInt(event.block.number);
-  await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
+    const seller = sellerAddress(event);
+    const state = await getOrCreateShopState(context, seller, timestamp);
 
-  const seller = sellerAddress(event);
-  const state = await getOrCreateShopState(context, seller, timestamp);
+    context.ProfileShopState.set({
+      ...state,
+      paused: false,
+      firstEventAt: firstTimestamp(state.firstEventAt, timestamp),
+      lastUpdate: timestamp,
+    });
 
-  context.ProfileShopState.set({
-    ...state,
-    paused: true,
-    firstEventAt: firstTimestamp(state.firstEventAt, timestamp),
-    lastUpdate: timestamp,
-  });
+    context.ProfileShopPauseEvent.set({
+      id: eventId(event),
+      seller,
+      account: normalizeAddress(event.params.account),
+      paused: false,
+      timestamp,
+      blockNumber,
+      txHash: event.transaction.hash,
+      logIndex: Number(event.logIndex),
+    });
+  }
+);
 
-  context.ProfileShopPauseEvent.set({
-    id: eventId(event),
-    seller,
-    account: normalizeAddress(event.params.account),
-    paused: true,
-    timestamp,
-    blockNumber,
-    txHash: event.transaction.hash,
-    logIndex: Number(event.logIndex),
-  });
-});
+indexer.onEvent(
+  { contract: 'NeverlandProfileItemsSeller', event: 'Initialized' },
+  async ({ event, context }) => {
+    const timestamp = Number(event.block.timestamp);
+    const blockNumber = BigInt(event.block.number);
+    await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
 
-NeverlandProfileItemsSeller.Unpaused.handler(async ({ event, context }) => {
-  const timestamp = Number(event.block.timestamp);
-  const blockNumber = BigInt(event.block.number);
-  await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
+    const seller = sellerAddress(event);
+    const state = await getOrCreateShopState(context, seller, timestamp);
+    const version = Number(event.params.version);
 
-  const seller = sellerAddress(event);
-  const state = await getOrCreateShopState(context, seller, timestamp);
+    context.ProfileShopState.set({
+      ...state,
+      initializedVersion: version,
+      firstEventAt: firstTimestamp(state.firstEventAt, timestamp),
+      lastUpdate: timestamp,
+    });
 
-  context.ProfileShopState.set({
-    ...state,
-    paused: false,
-    firstEventAt: firstTimestamp(state.firstEventAt, timestamp),
-    lastUpdate: timestamp,
-  });
-
-  context.ProfileShopPauseEvent.set({
-    id: eventId(event),
-    seller,
-    account: normalizeAddress(event.params.account),
-    paused: false,
-    timestamp,
-    blockNumber,
-    txHash: event.transaction.hash,
-    logIndex: Number(event.logIndex),
-  });
-});
-
-NeverlandProfileItemsSeller.Initialized.handler(async ({ event, context }) => {
-  const timestamp = Number(event.block.timestamp);
-  const blockNumber = BigInt(event.block.number);
-  await recordProtocolTransaction(context, event.transaction.hash, timestamp, blockNumber);
-
-  const seller = sellerAddress(event);
-  const state = await getOrCreateShopState(context, seller, timestamp);
-  const version = Number(event.params.version);
-
-  context.ProfileShopState.set({
-    ...state,
-    initializedVersion: version,
-    firstEventAt: firstTimestamp(state.firstEventAt, timestamp),
-    lastUpdate: timestamp,
-  });
-
-  context.ProfileShopInitialized.set({
-    id: eventId(event),
-    seller,
-    version,
-    timestamp,
-    blockNumber,
-    txHash: event.transaction.hash,
-    logIndex: Number(event.logIndex),
-  });
-});
+    context.ProfileShopInitialized.set({
+      id: eventId(event),
+      seller,
+      version,
+      timestamp,
+      blockNumber,
+      txHash: event.transaction.hash,
+      logIndex: Number(event.logIndex),
+    });
+  }
+);

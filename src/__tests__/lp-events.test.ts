@@ -4393,13 +4393,16 @@ test('static-era hard-stop guards follow chronology in every affected registered
     })),
   ];
 
-  // v2 registers as `<Contract>.<Event>.handler(async ({ event, context }) => {`, with the
-  // arrow sometimes wrapped onto the next line. A body ends where the next top-level
-  // registration begins.
-  const nextRegistrationPattern = /\n[A-Za-z0-9_]+\.[A-Za-z0-9_]+\.(?:handler|contractRegister)\(/g;
+  // v3 registers as `indexer.onEvent({ contract: 'C', event: 'E' }, async ({ event, context })
+  // => {`. The selector is sometimes spread over several lines and may carry a `where`
+  // callback whose own braces rule out a simple `[^}]*`, so the span up to the handler arrow
+  // is matched lazily with a bound. A body ends where the next top-level registration begins.
+  const nextRegistrationPattern = /\nindexer\.(?:onEvent|contractRegister)\(/g;
   for (const family of families) {
     const registrationPattern = new RegExp(
-      `\\n${family.contract}\\.${family.event}\\.handler\\(\\s*async \\(\\{ event, context \\}\\) => \\{`
+      `\\nindexer\\.onEvent\\([\\s\\S]{0,200}?contract: '${family.contract}',` +
+        `[\\s\\S]{0,200}?event: '${family.event}'` +
+        `[\\s\\S]{0,300}?async \\(\\{ event, context \\}\\) => \\{`
     );
     const registration = registrationPattern.exec(source);
     assert.ok(registration, `${family.contract}.${family.event} registration`);

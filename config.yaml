@@ -2,20 +2,14 @@
 name: neverland-indexer
 description: Neverland Protocol Indexer
 
-# Two-phase preload optimization: handlers run twice — once concurrently to
-# discover & batch DB reads (writes are no-op), then sequentially with
-# in-memory data. Required for unbatched hot reads (User, UserReward,
-# UserReserve, DustLockToken, etc.) to hit ~100% batched.
-preload_handlers: true
-
-# `from` is read by lp.ts when attributing a mint with no pending owner. v2 has no
-# per-event field_selection, so it is requested for every event here.
+# `from` is read by lp.ts when attributing a mint with no pending owner. It is
+# requested for every event here rather than per event.
 field_selection:
   transaction_fields:
     - hash
     - from
 
-networks:
+chains:
   - id: 143 # Monad mainnet
     start_block: 32587107
     contracts:

@@ -6,7 +6,6 @@
  * events; app timestamps are intentionally not used for scoring.
  */
 
-import { SpecialEditionRegistry } from '../../generated';
 import {
   SPECIAL_EDITION_TRANSFER_IN,
   SPECIAL_EDITION_TRANSFER_OUT,
@@ -20,8 +19,8 @@ import {
   settlePointsForUser,
 } from './shared';
 
-import type { handlerContext } from '../../generated';
-
+import type { EvmOnEventContext as handlerContext } from 'envio';
+import { indexer } from './registry';
 type SpecialEditionConfigInput = Parameters<handlerContext['SpecialEditionConfig']['set']>[0];
 
 function asBigInt(value: bigint | number | string): bigint {
@@ -231,208 +230,229 @@ export async function handleDustLockSpecialEditionTransfer(
   }
 }
 
-SpecialEditionRegistry.EditionCreated.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
+indexer.onEvent(
+  { contract: 'SpecialEditionRegistry', event: 'EditionCreated' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
 
-  const editionId = asBigInt(event.params.editionId);
-  const timestamp = eventTimestamp(event.params.timestamp, Number(event.block.timestamp));
-  const registry = await getOrCreateSpecialEditionRegistryState(context, timestamp);
-  const editionIds = registry.editionIds.some(id => id === editionId)
-    ? registry.editionIds
-    : [...registry.editionIds, editionId].sort((a, b) => Number(a - b));
+    const editionId = asBigInt(event.params.editionId);
+    const timestamp = eventTimestamp(event.params.timestamp, Number(event.block.timestamp));
+    const registry = await getOrCreateSpecialEditionRegistryState(context, timestamp);
+    const editionIds = registry.editionIds.some(id => id === editionId)
+      ? registry.editionIds
+      : [...registry.editionIds, editionId].sort((a, b) => Number(a - b));
 
-  context.SpecialEditionRegistryState.set({
-    ...registry,
-    editionIds,
-    lastUpdate: timestamp,
-  });
-
-  const nextConfig = {
-    id: editionConfigId(editionId),
-    editionId,
-    key: event.params.key,
-    name: event.params.name,
-    perTokenBoostBps: event.params.perTokenBoostBps,
-    enabled: event.params.enabled,
-    exists: true,
-    createdAt: timestamp,
-    updatedAt: timestamp,
-    changeTimestamps: [timestamp],
-    boostBpsHistory: [event.params.perTokenBoostBps],
-    enabledHistory: [event.params.enabled ? 1n : 0n],
-  } satisfies SpecialEditionConfigInput;
-  context.SpecialEditionConfig.set(nextConfig);
-
-  writeConfigSnapshot(
-    context,
-    nextConfig,
-    timestamp,
-    event.transaction.hash,
-    eventLogIndex(event.logIndex),
-    'EDITION_CREATED'
-  );
-});
-
-SpecialEditionRegistry.EditionConfigured.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-
-  const editionId = asBigInt(event.params.editionId);
-  const timestamp = eventTimestamp(event.params.timestamp, Number(event.block.timestamp));
-  const id = editionConfigId(editionId);
-  const existing = await context.SpecialEditionConfig.get(id);
-
-  const nextConfig = {
-    id,
-    editionId,
-    key: existing?.key ?? '',
-    name: event.params.name,
-    perTokenBoostBps: event.params.newPerTokenBoostBps,
-    enabled: existing?.enabled ?? true,
-    exists: true,
-    createdAt: existing?.createdAt ?? timestamp,
-    updatedAt: timestamp,
-    changeTimestamps: [...(existing?.changeTimestamps ?? []), timestamp],
-    boostBpsHistory: [...(existing?.boostBpsHistory ?? []), event.params.newPerTokenBoostBps],
-    enabledHistory: [...(existing?.enabledHistory ?? []), (existing?.enabled ?? true) ? 1n : 0n],
-  } satisfies SpecialEditionConfigInput;
-  context.SpecialEditionConfig.set(nextConfig);
-
-  const registry = await getOrCreateSpecialEditionRegistryState(context, timestamp);
-  if (!registry.editionIds.some(current => current === editionId)) {
     context.SpecialEditionRegistryState.set({
       ...registry,
-      editionIds: [...registry.editionIds, editionId].sort((a, b) => Number(a - b)),
+      editionIds,
       lastUpdate: timestamp,
     });
+
+    const nextConfig = {
+      id: editionConfigId(editionId),
+      editionId,
+      key: event.params.key,
+      name: event.params.name,
+      perTokenBoostBps: event.params.perTokenBoostBps,
+      enabled: event.params.enabled,
+      exists: true,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      changeTimestamps: [timestamp],
+      boostBpsHistory: [event.params.perTokenBoostBps],
+      enabledHistory: [event.params.enabled ? 1n : 0n],
+    } satisfies SpecialEditionConfigInput;
+    context.SpecialEditionConfig.set(nextConfig);
+
+    writeConfigSnapshot(
+      context,
+      nextConfig,
+      timestamp,
+      event.transaction.hash,
+      eventLogIndex(event.logIndex),
+      'EDITION_CREATED'
+    );
   }
+);
 
-  writeConfigSnapshot(
-    context,
-    nextConfig,
-    timestamp,
-    event.transaction.hash,
-    eventLogIndex(event.logIndex),
-    'EDITION_CONFIGURED'
-  );
-});
+indexer.onEvent(
+  { contract: 'SpecialEditionRegistry', event: 'EditionConfigured' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
 
-SpecialEditionRegistry.EditionEnabledUpdated.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
+    const editionId = asBigInt(event.params.editionId);
+    const timestamp = eventTimestamp(event.params.timestamp, Number(event.block.timestamp));
+    const id = editionConfigId(editionId);
+    const existing = await context.SpecialEditionConfig.get(id);
 
-  const editionId = asBigInt(event.params.editionId);
-  const timestamp = eventTimestamp(event.params.timestamp, Number(event.block.timestamp));
-  const id = editionConfigId(editionId);
-  const existing = await context.SpecialEditionConfig.get(id);
+    const nextConfig = {
+      id,
+      editionId,
+      key: existing?.key ?? '',
+      name: event.params.name,
+      perTokenBoostBps: event.params.newPerTokenBoostBps,
+      enabled: existing?.enabled ?? true,
+      exists: true,
+      createdAt: existing?.createdAt ?? timestamp,
+      updatedAt: timestamp,
+      changeTimestamps: [...(existing?.changeTimestamps ?? []), timestamp],
+      boostBpsHistory: [...(existing?.boostBpsHistory ?? []), event.params.newPerTokenBoostBps],
+      enabledHistory: [...(existing?.enabledHistory ?? []), (existing?.enabled ?? true) ? 1n : 0n],
+    } satisfies SpecialEditionConfigInput;
+    context.SpecialEditionConfig.set(nextConfig);
 
-  const nextConfig = {
-    id,
-    editionId,
-    key: existing?.key ?? '',
-    name: existing?.name ?? '',
-    perTokenBoostBps: existing?.perTokenBoostBps ?? 0n,
-    enabled: event.params.newEnabled,
-    exists: true,
-    createdAt: existing?.createdAt ?? timestamp,
-    updatedAt: timestamp,
-    changeTimestamps: [...(existing?.changeTimestamps ?? []), timestamp],
-    boostBpsHistory: [...(existing?.boostBpsHistory ?? []), existing?.perTokenBoostBps ?? 0n],
-    enabledHistory: [...(existing?.enabledHistory ?? []), event.params.newEnabled ? 1n : 0n],
-  } satisfies SpecialEditionConfigInput;
-  context.SpecialEditionConfig.set(nextConfig);
+    const registry = await getOrCreateSpecialEditionRegistryState(context, timestamp);
+    if (!registry.editionIds.some(current => current === editionId)) {
+      context.SpecialEditionRegistryState.set({
+        ...registry,
+        editionIds: [...registry.editionIds, editionId].sort((a, b) => Number(a - b)),
+        lastUpdate: timestamp,
+      });
+    }
 
-  const registry = await getOrCreateSpecialEditionRegistryState(context, timestamp);
-  if (!registry.editionIds.some(current => current === editionId)) {
-    context.SpecialEditionRegistryState.set({
-      ...registry,
-      editionIds: [...registry.editionIds, editionId].sort((a, b) => Number(a - b)),
-      lastUpdate: timestamp,
-    });
+    writeConfigSnapshot(
+      context,
+      nextConfig,
+      timestamp,
+      event.transaction.hash,
+      eventLogIndex(event.logIndex),
+      'EDITION_CONFIGURED'
+    );
   }
+);
 
-  writeConfigSnapshot(
-    context,
-    nextConfig,
-    timestamp,
-    event.transaction.hash,
-    eventLogIndex(event.logIndex),
-    'EDITION_ENABLED_UPDATED'
-  );
-});
+indexer.onEvent(
+  { contract: 'SpecialEditionRegistry', event: 'EditionEnabledUpdated' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
 
-SpecialEditionRegistry.SpecialEditionRegistered.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
+    const editionId = asBigInt(event.params.editionId);
+    const timestamp = eventTimestamp(event.params.timestamp, Number(event.block.timestamp));
+    const id = editionConfigId(editionId);
+    const existing = await context.SpecialEditionConfig.get(id);
 
-  await applyMembershipChange(
-    context,
-    event.params.tokenId,
-    asBigInt(event.params.editionId),
-    true,
-    event.params.sourceHash,
-    eventTimestamp(event.params.timestamp, Number(event.block.timestamp)),
-    BigInt(event.block.number),
-    event.transaction.hash,
-    eventLogIndex(event.logIndex),
-    'REGISTERED',
-    event.params.tokenEditionBitmap
-  );
-});
+    const nextConfig = {
+      id,
+      editionId,
+      key: existing?.key ?? '',
+      name: existing?.name ?? '',
+      perTokenBoostBps: existing?.perTokenBoostBps ?? 0n,
+      enabled: event.params.newEnabled,
+      exists: true,
+      createdAt: existing?.createdAt ?? timestamp,
+      updatedAt: timestamp,
+      changeTimestamps: [...(existing?.changeTimestamps ?? []), timestamp],
+      boostBpsHistory: [...(existing?.boostBpsHistory ?? []), existing?.perTokenBoostBps ?? 0n],
+      enabledHistory: [...(existing?.enabledHistory ?? []), event.params.newEnabled ? 1n : 0n],
+    } satisfies SpecialEditionConfigInput;
+    context.SpecialEditionConfig.set(nextConfig);
 
-SpecialEditionRegistry.MembershipCorrected.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
+    const registry = await getOrCreateSpecialEditionRegistryState(context, timestamp);
+    if (!registry.editionIds.some(current => current === editionId)) {
+      context.SpecialEditionRegistryState.set({
+        ...registry,
+        editionIds: [...registry.editionIds, editionId].sort((a, b) => Number(a - b)),
+        lastUpdate: timestamp,
+      });
+    }
 
-  await applyMembershipChange(
-    context,
-    event.params.tokenId,
-    asBigInt(event.params.editionId),
-    event.params.newMember,
-    event.params.sourceHash,
-    eventTimestamp(event.params.timestamp, Number(event.block.timestamp)),
-    BigInt(event.block.number),
-    event.transaction.hash,
-    eventLogIndex(event.logIndex),
-    `CORRECTION:${event.params.reason}`
-  );
-});
+    writeConfigSnapshot(
+      context,
+      nextConfig,
+      timestamp,
+      event.transaction.hash,
+      eventLogIndex(event.logIndex),
+      'EDITION_ENABLED_UPDATED'
+    );
+  }
+);
 
-SpecialEditionRegistry.SpecialEditionRegistrationBatch.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-});
+indexer.onEvent(
+  { contract: 'SpecialEditionRegistry', event: 'SpecialEditionRegistered' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
 
-SpecialEditionRegistry.PublisherUpdated.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-});
+    await applyMembershipChange(
+      context,
+      event.params.tokenId,
+      asBigInt(event.params.editionId),
+      true,
+      event.params.sourceHash,
+      eventTimestamp(event.params.timestamp, Number(event.block.timestamp)),
+      BigInt(event.block.number),
+      event.transaction.hash,
+      eventLogIndex(event.logIndex),
+      'REGISTERED',
+      event.params.tokenEditionBitmap
+    );
+  }
+);
+
+indexer.onEvent(
+  { contract: 'SpecialEditionRegistry', event: 'MembershipCorrected' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+
+    await applyMembershipChange(
+      context,
+      event.params.tokenId,
+      asBigInt(event.params.editionId),
+      event.params.newMember,
+      event.params.sourceHash,
+      eventTimestamp(event.params.timestamp, Number(event.block.timestamp)),
+      BigInt(event.block.number),
+      event.transaction.hash,
+      eventLogIndex(event.logIndex),
+      `CORRECTION:${event.params.reason}`
+    );
+  }
+);
+
+indexer.onEvent(
+  { contract: 'SpecialEditionRegistry', event: 'SpecialEditionRegistrationBatch' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+  }
+);
+
+indexer.onEvent(
+  { contract: 'SpecialEditionRegistry', event: 'PublisherUpdated' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+  }
+);

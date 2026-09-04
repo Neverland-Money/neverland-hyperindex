@@ -1,10 +1,9 @@
 packages:
   - .
-  - generated
 
 onlyBuiltDependencies:
   - esbuild
   - rescript
 
 patchedDependencies:
-  envio@2.32.12: patches/envio@2.32.12.patch
+  envio@3.9.0: patches/envio@3.9.0.patch

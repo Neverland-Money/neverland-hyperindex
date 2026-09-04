@@ -20,8 +20,7 @@ import {
   settlePointsForUser,
 } from '../handlers/shared';
 
-import type { handlerContext } from '../../generated';
-
+import type { EvmOnEventContext as handlerContext } from 'envio';
 // A Foundation multisig, and one of the tide-draw entries.
 const MULTISIG = '0x49a18e0ffeb2a1254922675a854a0818b46446e2';
 const DRAW = '0x909b176220b7e782c0f3ceccab4b19d2c433c6bb';

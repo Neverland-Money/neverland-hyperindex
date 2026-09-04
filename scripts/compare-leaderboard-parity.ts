@@ -29,6 +29,7 @@
  */
 
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 type Endpoint = { name: string; url: string; secret: string };
 type LiveRuntime = {
@@ -2414,7 +2415,7 @@ function renderExecutionError(error: unknown): string {
   return rendered;
 }
 
-if (require.main === module) {
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
   main().catch(error => {
     console.error('parity check failed:', renderExecutionError(error));
     process.exitCode = 2;

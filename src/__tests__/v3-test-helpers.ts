@@ -1,90 +1,87 @@
-// Envio V2 (envio ^2.32) DOES generate a native TestHelpers package (unlike V3).
-// This module is the single compatibility seam: it loads the native generated
-// TestHelpers at runtime and re-exports it under the same name the test suite
-// already imports (`import { TestHelpers } from './v3-test-helpers'`), so the
-// individual test files need no per-file TestHelpers changes.
-//
-// The native TestHelpers API used by the tests:
-//   TestHelpers.MockDb.createMockDb()
-//   TestHelpers.<Contract>.<Event>.createMockEvent({ ...params, mockEventData })
-//   TestHelpers.<Contract>.<Event>.processEvent({ event, mockDb }) -> Promise<MockDb>
-//   mockDb.entities.<Entity>.get(id) / .set(entity) / .getAll()
-//
-// Everything here loads lazily through `require`. A static `import ... from
-// '../../generated'` would be emitted as a top-of-file require and run BEFORE
-// the dist-test/generated symlink below exists.
-//
-// Routing note: v2 binds the handler explicitly per `processEvent` call
-// (`mockEventRegisters.set(event, register)`), never by `srcAddress`. Synthetic
-// addresses therefore reach their handlers without any wildcard shim.
-/* eslint-disable @typescript-eslint/no-explicit-any */
+/**
+ * Compatibility seam between the suite and envio v3's test API.
+ *
+ * v3 replaced the immutable `MockDb` with a mutable `createTestIndexer()` whose reads are
+ * async. The suite is written against the v2 shape (`createMockEvent` -> `processEvent`,
+ * threading a db that is copied on every `set`), so rather than rewrite ~630 call sites this
+ * module reimplements that shape on top of v3:
+ *
+ *   - a `MockDb` is a plain snapshot (`entityName -> id -> row`); `set`/`delete` copy it, so
+ *     the immutable threading the tests rely on still holds;
+ *   - `processEvent` builds a fresh test indexer, seeds it from the snapshot, simulates the
+ *     one event, and reads the result back into a new snapshot. Reads stay synchronous
+ *     because they hit the snapshot, not the indexer.
+ *
+ * Handlers register themselves by side effect when their module is first imported, and
+ * `handlers/registry.ts` records each registration so a handler can be looked up by contract
+ * and event.
+ */
+// Mirrors `test-env-preload.ts`: a test file that imports this seam but is run without the
+// runner `--import` preload must still get the safe operator settings, because the handler
+// modules imported below pull in `helpers/prefill.ts`. Assigned, never deleted, so envio's
+// dotenv import cannot repopulate them from the repo `.env`.
+process.env.PREFILL_HISTORIC_EPOCHS ??= 'false';
+// Must match TEST_PREFILL_DIR_SENTINEL in src/helpers/prefill.ts.
+process.env.PREFILL_DATA_DIR ??= '__NEVERLAND_TEST_PREFILL_DIR_MUST_BE_OVERRIDDEN__';
+process.env.NEVERLAND_TEST_ENV ??= '1';
+
 import fs from 'node:fs';
 import path from 'node:path';
 
-// Operator-only backfill gate (ENVIO_LEADERBOARD_LIVE_EPOCH) must be OFF during
-// tests so a populated .env can never gate mid-epoch keeper settlements. The
-// gate-specific tests set it explicitly.
-process.env.ENVIO_LEADERBOARD_LIVE_EPOCH = '';
+import { lookupContractRegister, lookupHandler } from '../handlers/registry';
 
-// Operator settings must never leak into tests. `src/__tests__/test-env-preload.ts` is the
-// authoritative copy and runs for the whole suite; these lines repeat it for a direct
-// single-file invocation. Assign, never delete: dotenv repopulates absent keys.
-process.env.PREFILL_HISTORIC_EPOCHS = 'false';
-process.env.PREFILL_DATA_DIR = '__NEVERLAND_TEST_PREFILL_DIR_MUST_BE_OVERRIDDEN__';
-process.env.NEVERLAND_TEST_ENV = '1';
+// Side-effect imports: each module's top-level `indexer.onEvent(...)` calls run on first
+// import, and `registry.ts` records them. Without these the lookup table is empty.
+import '../handlers/config';
+import '../handlers/dustlock';
+import '../handlers/leaderboard';
+import '../handlers/leaderboardKeeper';
+import '../handlers/lp';
+import '../handlers/nft';
+import '../handlers/pool';
+import '../handlers/profileShop';
+import '../handlers/rewards';
+import '../handlers/specialEditions';
+import '../handlers/tokenization';
 
-const CHAIN_START_BLOCK = 32_587_107;
+export const CHAIN_ID = 143;
+const DEFAULT_ADDRESS = '0x1111111111111111111111111111111111111111';
+const CHAIN_START_BLOCK = 32587107;
 
-// Handler modules whose `Contract.Event.handler(...)` registrations must run
-// before any processEvent call. They are required (post-symlink) inside the
-// loader so their `'../../generated'` imports resolve against the symlink.
-const HANDLER_MODULES = [
-  'config',
-  'dustlock',
-  'leaderboard',
-  'leaderboardKeeper',
-  'lp',
-  'nft',
-  'pool',
-  'profileShop',
-  'rewards',
-  'specialEditions',
-  'tokenization',
-];
+export type EntityRow = { readonly id: string } & Record<string, any>;
+type Snapshot = Map<string, Map<string, EntityRow>>;
 
-function loadNativeTestHelpers(): any {
-  const cwd = process.cwd();
-  const distTestRoot = path.join(cwd, 'dist-test');
-  const generatedLink = path.join(distTestRoot, 'generated');
+// ---------------------------------------------------------------------------
+// Handler registry
+// ---------------------------------------------------------------------------
 
-  // Compiled handler/test JS imports `'../../generated'`, which resolves to
-  // dist-test/generated — symlink it to the real ./generated before requiring.
-  if (!fs.existsSync(path.join(generatedLink, 'index.js'))) {
-    if (fs.existsSync(generatedLink)) {
-      fs.rmSync(generatedLink, { recursive: true, force: true });
-    }
-    fs.symlinkSync(path.join(cwd, 'generated'), generatedLink, 'dir');
-  }
+type AnyHandler = (args: { event: any; context: any }) => Promise<void> | void;
+// Every `indexer.onEvent` handler in this codebase is async, so the lookup narrows the return
+// to a promise; `assert.rejects` on a handler call needs a thenable, not `void | Promise`.
+type EventHandler = (args: { event: any; context: any }) => Promise<void>;
 
-  for (const handler of HANDLER_MODULES) {
-    require(path.join(distTestRoot, 'src', 'handlers', `${handler}.js`));
-  }
-
-  return require(path.join(cwd, 'generated', 'src', 'TestHelpers.res.js'));
+/** Look a handler up by contract/event so a test can drive it with its own context. */
+export async function getRegisteredEventHandler(contractName: string, eventName: string) {
+  const handler = lookupHandler(contractName, eventName);
+  if (!handler) throw new Error(`missing registered handler for ${contractName}.${eventName}`);
+  return handler as EventHandler;
 }
 
-export const TestHelpers: any = loadNativeTestHelpers();
+/** The `contractRegister` callback for an event, for tests that observe dynamic registration. */
+export async function getRegisteredContractRegister(contractName: string, eventName: string) {
+  const register = lookupContractRegister(contractName, eventName);
+  if (!register) throw new Error(`missing contractRegister for ${contractName}.${eventName}`);
+  return register as AnyHandler;
+}
 
-// Loose alias preserved for the few tests that annotate `: MockDb`. The native
-// MockDb is structurally a proxy with `.entities.<Entity>.{get,set,getAll}` and
-// is threaded immutably through processEvent.
-export type MockDb = any;
+// ---------------------------------------------------------------------------
+// Block numbers
+// ---------------------------------------------------------------------------
 
 function loadContractStartBlocks(): Map<string, number> {
   const starts = new Map<string, number>();
   const config = fs.readFileSync(path.join(process.cwd(), 'config.yaml'), 'utf8');
   let currentContract: string | undefined;
-
   for (const line of config.split('\n')) {
     const contract = line.match(/^ {6}- name:\s*(\S+)\s*$/);
     if (contract) {
@@ -100,6 +97,60 @@ function loadContractStartBlocks(): Map<string, number> {
 
 const CONTRACT_START_BLOCKS = loadContractStartBlocks();
 
+// ---------------------------------------------------------------------------
+// Event parameter defaults
+// ---------------------------------------------------------------------------
+//
+// v2's `createMockEvent` filled every ABI parameter a case did not mention, so handlers could
+// read fields the case had no opinion about. Cases rely on that: the aToken ones set only the
+// metadata fields and still reach a handler that reads `params.treasury`. The signatures in
+// config.yaml carry the parameter names and types, which is enough to rebuild those defaults.
+
+const ZERO_ADDR = '0x0000000000000000000000000000000000000000';
+
+function defaultForType(type: string): unknown {
+  if (type.endsWith(']')) return [];
+  if (type === 'address') return ZERO_ADDR;
+  if (type === 'bool') return false;
+  if (type === 'string') return '';
+  if (type.startsWith('bytes')) return '0x';
+  if (type.startsWith('uint') || type.startsWith('int')) return 0n;
+  return undefined;
+}
+
+function loadEventParamDefaults(): Map<string, Record<string, unknown>> {
+  const out = new Map<string, Record<string, unknown>>();
+  const config = fs.readFileSync(path.join(process.cwd(), 'config.yaml'), 'utf8');
+  let currentContract: string | undefined;
+  for (const line of config.split('\n')) {
+    const contract = line.match(/^ {6}- name:\s*(\S+)\s*$/);
+    if (contract) {
+      currentContract = contract[1];
+      continue;
+    }
+    const event = line.match(/^\s+- event:\s*([A-Za-z0-9_]+)\((.*)\)\s*$/);
+    if (!event || !currentContract) continue;
+    const defaults: Record<string, unknown> = {};
+    for (const raw of event[2].split(',')) {
+      const parts = raw
+        .trim()
+        .split(/\s+/)
+        .filter(w => w !== 'indexed');
+      if (parts.length < 2) continue;
+      const value = defaultForType(parts[0]);
+      if (value !== undefined) defaults[parts[parts.length - 1]] = value;
+    }
+    out.set(`${currentContract}.${event[1]}`, defaults);
+  }
+  return out;
+}
+
+const EVENT_PARAM_DEFAULTS = loadEventParamDefaults();
+
+/**
+ * An event below its contract's `start_block` is filtered out before reaching the handler, so
+ * a small literal block number in a test is rebased above that floor rather than dropped.
+ */
 export function normalizeTestBlockNumber(
   blockNumber: number | undefined,
   contractName?: string
@@ -111,79 +162,266 @@ export function normalizeTestBlockNumber(
   return blockNumber < startBlock ? startBlock + blockNumber : blockNumber;
 }
 
+// ---------------------------------------------------------------------------
+// MockDb
+// ---------------------------------------------------------------------------
+
+function copy(snapshot: Snapshot): Snapshot {
+  const out: Snapshot = new Map();
+  for (const [name, rows] of snapshot) out.set(name, new Map(rows));
+  return out;
+}
+
+export class MockDb {
+  readonly __snapshot: Snapshot;
+  readonly entities: Record<string, EntityOps>;
+
+  constructor(snapshot: Snapshot = new Map()) {
+    this.__snapshot = snapshot;
+    const self = this;
+    this.entities = new Proxy({} as Record<string, EntityOps>, {
+      get: (_target, prop: string) => new EntityOps(self, prop),
+      has: () => true,
+      ownKeys: () => [...self.__snapshot.keys()],
+      getOwnPropertyDescriptor: () => ({ enumerable: true, configurable: true }),
+    });
+  }
+}
+
+class EntityOps {
+  constructor(
+    private readonly db: MockDb,
+    private readonly name: string
+  ) {}
+
+  get(id: string): EntityRow | undefined {
+    return this.db.__snapshot.get(this.name)?.get(id);
+  }
+
+  getAll(): EntityRow[] {
+    return [...(this.db.__snapshot.get(this.name)?.values() ?? [])];
+  }
+
+  set(row: EntityRow): MockDb {
+    const next = copy(this.db.__snapshot);
+    if (!next.has(this.name)) next.set(this.name, new Map());
+    next.get(this.name)!.set(row.id, row);
+    return new MockDb(next);
+  }
+
+  delete(id: string): MockDb {
+    const next = copy(this.db.__snapshot);
+    next.get(this.name)?.delete(id);
+    return new MockDb(next);
+  }
+
+  deleteUnsafe(id: string): MockDb {
+    return this.delete(id);
+  }
+}
+
+export type MockEvent = {
+  contract: string;
+  event: string;
+  params: Record<string, unknown>;
+  srcAddress?: string;
+  logIndex?: number;
+  block?: Record<string, unknown>;
+  transaction?: Record<string, unknown>;
+};
+
+/** Snapshot of every entity store as `Map<entityName, Map<id, row>>`. */
+export function entityStores(mockDb: MockDb): Snapshot {
+  return copy(mockDb.__snapshot);
+}
+
+// ---------------------------------------------------------------------------
+// Processing
+// ---------------------------------------------------------------------------
+//
+// Events are dispatched straight to the registered handler with a context built over the
+// snapshot, rather than through `indexer.process({ simulate })`.
+//
+// v3's simulate path routes an event only if its `srcAddress` is an indexed address for that
+// contract. The suite predates that rule and uses synthetic addresses (0x...9001) precisely so
+// that markets sharing an asset can be told apart, and several cases assert on ids derived
+// from those addresses. Routing them through simulate would mean rewriting the fixtures to the
+// real deployed addresses and losing the distinctions the cases exist to make, so the seam
+// keeps v2's "the handler receives exactly the event you built" contract instead.
+
+type Ctx = Record<string, unknown>;
+
+function makeContext(snapshot: Snapshot, isPreload = false): Ctx {
+  const entityOps = (name: string) => ({
+    get: async (id: string) => snapshot.get(name)?.get(id),
+    getOrThrow: async (id: string, message?: string) => {
+      const row = snapshot.get(name)?.get(id);
+      if (!row) throw new Error(message ?? `${name} ${id} not found`);
+      return row;
+    },
+    getOrCreate: async (row: EntityRow) => snapshot.get(name)?.get(row.id) ?? row,
+    getWhere: async (filter: Record<string, { _eq?: unknown }>) =>
+      [...(snapshot.get(name)?.values() ?? [])].filter(row =>
+        Object.entries(filter).every(
+          ([field, op]) => op?._eq === undefined || (row as any)[field] === op._eq
+        )
+      ),
+    set: (row: EntityRow) => {
+      if (isPreload) return; // writes are no-ops in the preload pass, as in production
+      if (!snapshot.has(name)) snapshot.set(name, new Map());
+      snapshot.get(name)!.set(row.id, row);
+    },
+    deleteUnsafe: (id: string) => {
+      if (isPreload) return;
+      snapshot.get(name)?.delete(id);
+    },
+  });
+
+  const cache = new Map<string, ReturnType<typeof entityOps>>();
+  const base: Ctx = {
+    isPreload,
+    chain: { id: CHAIN_ID, isRealtime: false },
+    log: {
+      debug: () => {},
+      info: () => {},
+      warn: () => {},
+      error: () => {},
+    },
+  };
+
+  return new Proxy(base, {
+    get: (target, prop: string) => {
+      if (prop in target) return target[prop];
+      let ops = cache.get(prop);
+      if (!ops) {
+        ops = entityOps(prop);
+        cache.set(prop, ops);
+      }
+      return ops;
+    },
+    has: () => true,
+  });
+}
+
+function makeEvent(event: MockEvent) {
+  return {
+    params: event.params,
+    srcAddress: event.srcAddress ?? DEFAULT_ADDRESS,
+    logIndex: event.logIndex ?? 0,
+    chainId: CHAIN_ID,
+    block: { timestamp: 0, hash: '0x', number: 0, ...(event.block ?? {}) },
+    transaction: { hash: '0x', from: undefined, ...(event.transaction ?? {}) },
+  };
+}
+
+/**
+ * Context for a `contractRegister` callback: `chain.<Contract>.add(address)` and nothing else.
+ * Addresses are collected rather than acted on, since a simulated run has no fetch state to
+ * register them against.
+ */
+function makeRegisterContext(added: string[]) {
+  const chain = new Proxy(
+    { id: CHAIN_ID },
+    {
+      get: (target, prop: string) =>
+        prop in target
+          ? (target as Record<string, unknown>)[prop]
+          : { add: (address: string) => added.push(address) },
+      has: () => true,
+    }
+  );
+  return { chain, log: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} } };
+}
+
+async function runSimulation(events: readonly MockEvent[], mockDb: MockDb): Promise<MockDb> {
+  const snapshot = copy(mockDb.__snapshot);
+  const context = makeContext(snapshot);
+  const preloadContext = makeContext(snapshot, true);
+  for (const raw of events) {
+    const handler = lookupHandler(raw.contract, raw.event);
+    if (!handler) {
+      throw new Error(`no handler registered for ${raw.contract}.${raw.event}`);
+    }
+    const event = makeEvent(raw);
+    // An event with both a registration and a handler runs the registration first, the way
+    // the indexer does: the addresses a block discovers are added before its events are
+    // processed. Cases that assert on what was registered drive the callback themselves via
+    // `getRegisteredContractRegister`, so what it returns here is intentionally discarded.
+    const register = lookupContractRegister(raw.contract, raw.event);
+    if (register) {
+      await register({ event, context: makeRegisterContext([]) });
+    }
+    // Production runs every handler twice: a concurrent preload pass that only reads (writes
+    // are no-ops), then the sequential pass that writes. Cases assert on the result of the
+    // second, but the first is what exercises the `isPreload` guards.
+    await handler({ event, context: preloadContext });
+    await handler({ event, context });
+  }
+  return new MockDb(snapshot);
+}
+
 export type ProcessEventsResult = {
   mockDb: MockDb;
   changes: readonly Record<string, any>[];
 };
 
-/**
- * Batch form. v2's MockDb processes a list natively and returns only the next db, so the
- * per-event change records the suite sums for `eventsProcessed` are synthesized here: every
- * event in the list is processed, one record each.
- */
+/** Batch form: every event is simulated in order against one indexer. */
 export async function processEvents({
   events,
   mockDb,
 }: {
-  events: readonly any[];
+  events: readonly MockEvent[];
   mockDb: MockDb;
 }): Promise<ProcessEventsResult> {
-  const next = await (mockDb as any).processEvents(events);
+  const next = await runSimulation(events, mockDb);
   return { mockDb: next, changes: events.map(() => ({ eventsProcessed: 1 })) };
 }
 
-/**
- * Look a handler up by contract/event so a test can drive it with its own context.
- *
- * v2 stores each handler on the event's own register the moment the handler module calls
- * `Contract.Event.handler(...)`, and `loadNativeTestHelpers()` above has already loaded the
- * compiled handler modules, so the function is read straight from `Types`. Do NOT route this
- * through `Generated.registerAllHandlers()`: that re-requires every handler from its
- * `config.yaml` path (`src/handlers/*.ts`), which Node 22.18's native type stripping loads under
- * ESM resolution rules, and the handlers' `import ... from '../../generated'` directory import
- * then throws ERR_UNSUPPORTED_DIR_IMPORT. Production never hits this because `envio start`
- * runs under ts-node.
- */
-export async function getRegisteredEventHandler(contractName: string, eventName: string) {
-  const types = require(path.join(process.cwd(), 'generated', 'src', 'Types.res.js'));
-  const handler = types?.[contractName]?.[eventName]?.handlerRegister?.handler;
-  if (typeof handler !== 'function') {
-    throw new Error(`missing registered handler for ${contractName}.${eventName}`);
-  }
-  return handler as (args: { event: any; context: any }) => Promise<void>;
-}
+// ---------------------------------------------------------------------------
+// TestHelpers facade
+// ---------------------------------------------------------------------------
 
 /**
- * The `contractRegister` callback for an event, from the same per-event register. Dynamic
- * registration never runs through `processEvent`, so a test that wants to observe what a
- * registration event would add to the indexer drives this directly with its own context.
+ * `TestHelpers.<Contract>.<Event>.createMockEvent(...)` / `.processEvent(...)`, plus
+ * `TestHelpers.MockDb.createMockDb()`, resolved lazily so any contract/event name in
+ * `config.yaml` works without enumerating them here.
  */
-export async function getRegisteredContractRegister(contractName: string, eventName: string) {
-  const types = require(path.join(process.cwd(), 'generated', 'src', 'Types.res.js'));
-  const register = types?.[contractName]?.[eventName]?.handlerRegister?.contractRegister;
-  if (typeof register !== 'function') {
-    throw new Error(`missing contractRegister for ${contractName}.${eventName}`);
+export const TestHelpers: any = new Proxy(
+  {},
+  {
+    get: (_target, contract: string) => {
+      if (contract === 'MockDb') return { createMockDb: () => new MockDb() };
+      if (contract === 'Addresses') {
+        return {
+          defaultAddress: DEFAULT_ADDRESS,
+          mockAddresses: Array.from(
+            { length: 20 },
+            (_, i) => `0x${(i + 1).toString(16).padStart(40, '0')}`
+          ),
+        };
+      }
+      return new Proxy(
+        {},
+        {
+          get: (_t, event: string) => ({
+            createMockEvent: (args: Record<string, any> = {}): MockEvent => {
+              const { mockEventData, ...params } = args;
+              const meta = (mockEventData ?? {}) as Record<string, any>;
+              return {
+                contract,
+                event,
+                params: { ...(EVENT_PARAM_DEFAULTS.get(`${contract}.${event}`) ?? {}), ...params },
+                srcAddress: meta.srcAddress,
+                logIndex: meta.logIndex,
+                block: meta.block,
+                transaction: meta.transaction,
+              };
+            },
+            processEvent: async ({ event, mockDb }: { event: MockEvent; mockDb: MockDb }) =>
+              runSimulation([event], mockDb),
+          }),
+        }
+      );
+    },
   }
-  return register as (args: { event: any; context: any }) => Promise<void> | void;
-}
-
-export type EntityRow = { readonly id: string } & Record<string, any>;
-
-/**
- * Snapshot of every entity store as `Map<entityName, Map<id, row>>`.
- *
- * v2's MockDb exposes per-entity `get`/`getAll`/`set` rather than a raw store map, so tests
- * that used to read the seam's internal `__stores` build the same shape from `getAll()`.
- */
-export function entityStores(mockDb: MockDb): Map<string, Map<string, EntityRow>> {
-  const out = new Map<string, Map<string, EntityRow>>();
-  const entities = (mockDb as any).entities ?? {};
-  for (const name of Object.keys(entities)) {
-    const ops = entities[name];
-    if (!ops || typeof ops.getAll !== 'function') continue;
-    const rows = new Map<string, EntityRow>();
-    for (const row of ops.getAll() as EntityRow[]) rows.set(row.id, row);
-    out.set(name, rows);
-  }
-  return out;
-}
+);

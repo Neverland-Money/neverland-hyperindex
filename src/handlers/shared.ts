@@ -60,9 +60,8 @@ import type {
   LeaderboardEpoch,
   LeaderboardState,
   PriceOracleAsset,
-  handlerContext,
-} from '../../generated';
-
+  EvmOnEventContext as handlerContext,
+} from 'envio';
 const HOURS_PER_DAY_BI = BigInt(SECONDS_PER_DAY / 3600);
 const E8_DIVISOR = 1e8;
 const VP_DECIMALS = 1e18;
@@ -70,17 +69,23 @@ const VP_DECIMALS = 1e18;
 let lpModulePromise: Promise<typeof import('./lp')> | undefined;
 let lpGrowthModulePromise: Promise<typeof import('./lpGrowth')> | undefined;
 
-// The lp and lpGrowth modules import from this one, so they are required lazily, inside the
-// call, to break the cycle. An explicit `require` is exactly what `module: commonjs` used to
-// emit for a dynamic `import()` here; under `module: node16` an `import()` in a CommonJS file
-// is preserved as a real ESM import, which ts-node's CommonJS hook never sees.
-function loadLPModule(): Promise<typeof import('./lp')> {
-  lpModulePromise ??= Promise.resolve(require('./lp') as typeof import('./lp'));
+// The lp and lpGrowth modules import from this one, so they are loaded lazily, inside the
+// call, to break the cycle. The package is ESM under envio v3, so this is a real dynamic
+// `import()`; the promise is memoized so the module evaluates once.
+//
+// Both `??=` arms are exercised (see the memoization case in shared-utils.test.ts). The
+// ignores below cover the arm V8 attributes to the dynamic `import()` itself -- a module
+// resolution failure, which no test can provoke for a module that is present. Under v2 this
+// was a `require()` and carried no such branch.
+export function loadLPModule(): Promise<typeof import('./lp')> {
+  /* c8 ignore next */
+  lpModulePromise ??= import('./lp');
   return lpModulePromise;
 }
 
-function loadLPGrowthModule(): Promise<typeof import('./lpGrowth')> {
-  lpGrowthModulePromise ??= Promise.resolve(require('./lpGrowth') as typeof import('./lpGrowth'));
+export function loadLPGrowthModule(): Promise<typeof import('./lpGrowth')> {
+  /* c8 ignore next */
+  lpGrowthModulePromise ??= import('./lpGrowth');
   return lpGrowthModulePromise;
 }
 

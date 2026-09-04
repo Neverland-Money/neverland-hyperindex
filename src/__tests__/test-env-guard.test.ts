@@ -21,8 +21,9 @@ import {
   resetPrefillCache,
 } from '../helpers/prefill';
 
-// The scripts run the compiled suite from dist-test, so the flag names the compiled preload.
-const PRELOAD_FLAG = '--import ./dist-test/src/__tests__/test-env-preload.js';
+// envio v3 is ESM and the suite runs the TypeScript directly under tsx, so the flag names
+// the source preload rather than a compiled copy.
+const PRELOAD_FLAG = '--import ./src/__tests__/test-env-preload.ts';
 const CONCURRENCY_FLAG = '--test-concurrency=2';
 const TEST_SCRIPTS = ['test', 'test:coverage', 'test:coverage:check'];
 

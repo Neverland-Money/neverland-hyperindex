@@ -15,8 +15,7 @@ import {
   calculateSpecialEditionMultiplierFromUser,
 } from '../handlers/shared';
 
-import type { handlerContext } from '../../generated';
-
+import type { EvmOnEventContext as handlerContext } from 'envio';
 type Row = { id: string } & Record<string, unknown>;
 
 function store(initial: readonly Row[] = []) {

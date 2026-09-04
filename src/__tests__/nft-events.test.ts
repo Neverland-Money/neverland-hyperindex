@@ -1311,7 +1311,7 @@ test('a partnership for a statically configured collection is not registered dyn
   // dynamic PartnerNFT too would dispatch every Transfer twice and double-count balances.
   // The guard lives in the contractRegister callback, so it is driven directly here.
   const added: string[] = [];
-  const context = { addPartnerNFT: (address: string) => added.push(address) };
+  const context = { chain: { PartnerNFT: { add: (address: string) => added.push(address) } } };
   for (const eventName of ['PartnershipAdded', 'PartnershipAddedLegacy']) {
     const register = await getRegisteredContractRegister('NFTPartnershipRegistry', eventName);
     // Upper-cased on purpose: the guard must match on the normalized address.

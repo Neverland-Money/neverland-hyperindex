@@ -1,15 +1,7 @@
 {
   "all": true,
   "include": ["src/**/*.ts"],
-  "exclude": [
-    "src/__tests__/**",
-    "**/handlers/lp.ts",
-    "generated/**",
-    "dist/**",
-    "dist-test/**",
-    "**/*.d.ts",
-    "types/**"
-  ],
+  "exclude": ["src/__tests__/**", "**/handlers/lp.ts", "dist/**", "**/*.d.ts", "types/**"],
   "exclude-after-remap": true,
   "reporter": ["text", "lcov", "html"]
 }

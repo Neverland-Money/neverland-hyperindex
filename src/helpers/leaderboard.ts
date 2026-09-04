@@ -15,8 +15,7 @@ import { getOrCreateUserLeaderboardState } from '../handlers/shared';
 
 import { ALL_TIME_EPOCH_NUMBER, MAX_BUCKETS } from './constants';
 
-import type { handlerContext } from '../../generated';
-
+import type { EvmOnEventContext as handlerContext } from 'envio';
 function normalizePoints(points: number): number {
   if (!Number.isFinite(points) || points < 0) {
     return 0;

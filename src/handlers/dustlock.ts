@@ -2,7 +2,6 @@
  * DustLock (veNFT) Event Handlers
  */
 
-import { DustLock } from '../../generated';
 import {
   recalculateUserTotalVP,
   recordProtocolTransaction,
@@ -20,8 +19,8 @@ import {
 } from '../helpers/constants';
 import { handleDustLockSpecialEditionTransfer } from './specialEditions';
 
-import type { handlerContext } from '../../generated';
-
+import type { EvmOnEventContext as handlerContext } from 'envio';
+import { indexer } from './registry';
 function shouldUpdateVotingPower(blockNumber: number): boolean {
   return blockNumber >= DUST_LOCK_START_BLOCK;
 }
@@ -74,7 +73,7 @@ function createAdminEventId(event: any): string {
   return `${event.transaction.hash}-${event.logIndex}`;
 }
 
-DustLock.Deposit.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'DustLock', event: 'Deposit' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -137,7 +136,7 @@ DustLock.Deposit.handler(async ({ event, context }) => {
   }
 });
 
-DustLock.Withdraw.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'DustLock', event: 'Withdraw' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -193,7 +192,7 @@ DustLock.Withdraw.handler(async ({ event, context }) => {
   }
 });
 
-DustLock.EarlyWithdraw.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'DustLock', event: 'EarlyWithdraw' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -251,7 +250,7 @@ DustLock.EarlyWithdraw.handler(async ({ event, context }) => {
   }
 });
 
-DustLock.LockPermanent.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'DustLock', event: 'LockPermanent' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -302,7 +301,7 @@ DustLock.LockPermanent.handler(async ({ event, context }) => {
   }
 });
 
-DustLock.UnlockPermanent.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'DustLock', event: 'UnlockPermanent' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -355,7 +354,7 @@ DustLock.UnlockPermanent.handler(async ({ event, context }) => {
   }
 });
 
-DustLock.Supply.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'DustLock', event: 'Supply' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -373,7 +372,7 @@ DustLock.Supply.handler(async ({ event, context }) => {
   });
 });
 
-DustLock.Merge.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'DustLock', event: 'Merge' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -437,7 +436,7 @@ DustLock.Merge.handler(async ({ event, context }) => {
   }
 });
 
-DustLock.Split.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'DustLock', event: 'Split' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -509,7 +508,7 @@ DustLock.Split.handler(async ({ event, context }) => {
   }
 });
 
-DustLock.Transfer.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'DustLock', event: 'Transfer' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -599,127 +598,142 @@ DustLock.Transfer.handler(async ({ event, context }) => {
   }
 });
 
-DustLock.EarlyWithdrawPenaltyUpdated.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const id = createAdminEventId(event);
-  context.DustLockAdminEvent.set({
-    id,
-    eventType: 'EarlyWithdrawPenaltyUpdated',
-    addressOne: undefined,
-    addressTwo: undefined,
-    oldValue: event.params.oldPenalty,
-    newValue: event.params.newPenalty,
-    boolValue: undefined,
-    tokenId: undefined,
-    stringOne: undefined,
-    stringTwo: undefined,
-    timestamp: Number(event.block.timestamp),
-    txHash: event.transaction.hash,
-  });
-});
+indexer.onEvent(
+  { contract: 'DustLock', event: 'EarlyWithdrawPenaltyUpdated' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const id = createAdminEventId(event);
+    context.DustLockAdminEvent.set({
+      id,
+      eventType: 'EarlyWithdrawPenaltyUpdated',
+      addressOne: undefined,
+      addressTwo: undefined,
+      oldValue: event.params.oldPenalty,
+      newValue: event.params.newPenalty,
+      boolValue: undefined,
+      tokenId: undefined,
+      stringOne: undefined,
+      stringTwo: undefined,
+      timestamp: Number(event.block.timestamp),
+      txHash: event.transaction.hash,
+    });
+  }
+);
 
-DustLock.EarlyWithdrawTreasuryUpdated.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const id = createAdminEventId(event);
-  context.DustLockAdminEvent.set({
-    id,
-    eventType: 'EarlyWithdrawTreasuryUpdated',
-    addressOne: normalizeAddress(event.params.oldTreasury),
-    addressTwo: normalizeAddress(event.params.newTreasury),
-    oldValue: undefined,
-    newValue: undefined,
-    boolValue: undefined,
-    tokenId: undefined,
-    stringOne: undefined,
-    stringTwo: undefined,
-    timestamp: Number(event.block.timestamp),
-    txHash: event.transaction.hash,
-  });
-});
+indexer.onEvent(
+  { contract: 'DustLock', event: 'EarlyWithdrawTreasuryUpdated' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const id = createAdminEventId(event);
+    context.DustLockAdminEvent.set({
+      id,
+      eventType: 'EarlyWithdrawTreasuryUpdated',
+      addressOne: normalizeAddress(event.params.oldTreasury),
+      addressTwo: normalizeAddress(event.params.newTreasury),
+      oldValue: undefined,
+      newValue: undefined,
+      boolValue: undefined,
+      tokenId: undefined,
+      stringOne: undefined,
+      stringTwo: undefined,
+      timestamp: Number(event.block.timestamp),
+      txHash: event.transaction.hash,
+    });
+  }
+);
 
-DustLock.MinLockAmountUpdated.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const id = createAdminEventId(event);
-  context.DustLockAdminEvent.set({
-    id,
-    eventType: 'MinLockAmountUpdated',
-    addressOne: undefined,
-    addressTwo: undefined,
-    oldValue: event.params.oldAmount,
-    newValue: event.params.newAmount,
-    boolValue: undefined,
-    tokenId: undefined,
-    stringOne: undefined,
-    stringTwo: undefined,
-    timestamp: Number(event.block.timestamp),
-    txHash: event.transaction.hash,
-  });
-});
+indexer.onEvent(
+  { contract: 'DustLock', event: 'MinLockAmountUpdated' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const id = createAdminEventId(event);
+    context.DustLockAdminEvent.set({
+      id,
+      eventType: 'MinLockAmountUpdated',
+      addressOne: undefined,
+      addressTwo: undefined,
+      oldValue: event.params.oldAmount,
+      newValue: event.params.newAmount,
+      boolValue: undefined,
+      tokenId: undefined,
+      stringOne: undefined,
+      stringTwo: undefined,
+      timestamp: Number(event.block.timestamp),
+      txHash: event.transaction.hash,
+    });
+  }
+);
 
-DustLock.RevenueRewardUpdated.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const id = createAdminEventId(event);
-  context.DustLockAdminEvent.set({
-    id,
-    eventType: 'RevenueRewardUpdated',
-    addressOne: normalizeAddress(event.params.oldReward),
-    addressTwo: normalizeAddress(event.params.newReward),
-    oldValue: undefined,
-    newValue: undefined,
-    boolValue: undefined,
-    tokenId: undefined,
-    stringOne: undefined,
-    stringTwo: undefined,
-    timestamp: Number(event.block.timestamp),
-    txHash: event.transaction.hash,
-  });
-});
+indexer.onEvent(
+  { contract: 'DustLock', event: 'RevenueRewardUpdated' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const id = createAdminEventId(event);
+    context.DustLockAdminEvent.set({
+      id,
+      eventType: 'RevenueRewardUpdated',
+      addressOne: normalizeAddress(event.params.oldReward),
+      addressTwo: normalizeAddress(event.params.newReward),
+      oldValue: undefined,
+      newValue: undefined,
+      boolValue: undefined,
+      tokenId: undefined,
+      stringOne: undefined,
+      stringTwo: undefined,
+      timestamp: Number(event.block.timestamp),
+      txHash: event.transaction.hash,
+    });
+  }
+);
 
-DustLock.SplitPermissionUpdated.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const id = createAdminEventId(event);
-  context.DustLockAdminEvent.set({
-    id,
-    eventType: 'SplitPermissionUpdated',
-    addressOne: normalizeAddress(event.params.account),
-    addressTwo: undefined,
-    oldValue: undefined,
-    newValue: undefined,
-    boolValue: event.params.allowed,
-    tokenId: undefined,
-    stringOne: undefined,
-    stringTwo: undefined,
-    timestamp: Number(event.block.timestamp),
-    txHash: event.transaction.hash,
-  });
-});
+indexer.onEvent(
+  { contract: 'DustLock', event: 'SplitPermissionUpdated' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const id = createAdminEventId(event);
+    context.DustLockAdminEvent.set({
+      id,
+      eventType: 'SplitPermissionUpdated',
+      addressOne: normalizeAddress(event.params.account),
+      addressTwo: undefined,
+      oldValue: undefined,
+      newValue: undefined,
+      boolValue: event.params.allowed,
+      tokenId: undefined,
+      stringOne: undefined,
+      stringTwo: undefined,
+      timestamp: Number(event.block.timestamp),
+      txHash: event.transaction.hash,
+    });
+  }
+);
 
-DustLock.TeamProposed.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'DustLock', event: 'TeamProposed' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -743,7 +757,7 @@ DustLock.TeamProposed.handler(async ({ event, context }) => {
   });
 });
 
-DustLock.TeamAccepted.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'DustLock', event: 'TeamAccepted' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -767,31 +781,34 @@ DustLock.TeamAccepted.handler(async ({ event, context }) => {
   });
 });
 
-DustLock.TeamProposalCancelled.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const id = createAdminEventId(event);
-  context.DustLockAdminEvent.set({
-    id,
-    eventType: 'TeamProposalCancelled',
-    addressOne: normalizeAddress(event.params.currentTeam),
-    addressTwo: normalizeAddress(event.params.cancelledTeam),
-    oldValue: undefined,
-    newValue: undefined,
-    boolValue: undefined,
-    tokenId: undefined,
-    stringOne: undefined,
-    stringTwo: undefined,
-    timestamp: Number(event.block.timestamp),
-    txHash: event.transaction.hash,
-  });
-});
+indexer.onEvent(
+  { contract: 'DustLock', event: 'TeamProposalCancelled' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const id = createAdminEventId(event);
+    context.DustLockAdminEvent.set({
+      id,
+      eventType: 'TeamProposalCancelled',
+      addressOne: normalizeAddress(event.params.currentTeam),
+      addressTwo: normalizeAddress(event.params.cancelledTeam),
+      oldValue: undefined,
+      newValue: undefined,
+      boolValue: undefined,
+      tokenId: undefined,
+      stringOne: undefined,
+      stringTwo: undefined,
+      timestamp: Number(event.block.timestamp),
+      txHash: event.transaction.hash,
+    });
+  }
+);
 
-DustLock.BaseURIUpdated.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'DustLock', event: 'BaseURIUpdated' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -815,7 +832,7 @@ DustLock.BaseURIUpdated.handler(async ({ event, context }) => {
   });
 });
 
-DustLock.MetadataUpdate.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'DustLock', event: 'MetadataUpdate' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,

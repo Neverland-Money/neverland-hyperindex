@@ -47,8 +47,8 @@ docker ps --format '{{.Names}}' | grep -qx "$HASURA" || docker start "$HASURA" >
 cd "$REPO"
 set -a; . "$REPO/.env"; set +a
 export ENVIO_PG_HOST=127.0.0.1 ENVIO_PG_PORT=$PGPORT ENVIO_PG_DATABASE=envio \
-       ENVIO_PG_USER=postgres ENVIO_PG_PASSWORD="$PGPASS" ENVIO_PG_PUBLIC_SCHEMA=public \
-       ENVIO_INDEXER_PORT=$INDEXERPORT ENVIO_HASURA=false TUI_OFF=true
+       ENVIO_PG_USER=postgres ENVIO_PG_PASSWORD="$PGPASS" ENVIO_PG_SCHEMA=public \
+       ENVIO_INDEXER_PORT=$INDEXERPORT ENVIO_HASURA=false ENVIO_TUI=false
 
 # Everything else -- PREFILL_HISTORIC_EPOCHS included -- comes from .env, so what runs here
 # is exactly what a deployment with the same .env would run.

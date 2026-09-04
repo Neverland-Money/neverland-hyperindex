@@ -51,7 +51,7 @@ import type {
   LPPoolStats,
   LPPoolV2State,
   LPPoolVolumeBucket,
-  leaderboardConfig as LeaderboardConfig,
+  LeaderboardConfig,
   LeaderboardEpoch,
   LeaderboardState,
   LeaderboardTotals,
@@ -69,9 +69,8 @@ import type {
   UserTokenList,
   VotingPowerTier,
   VotingPowerTierIndex,
-  handlerContext,
-} from '../../generated';
-
+  EvmOnEventContext as handlerContext,
+} from 'envio';
 installViemMock();
 
 type Store<T extends { readonly id: string }> = {

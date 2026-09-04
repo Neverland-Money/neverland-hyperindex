@@ -9,8 +9,7 @@ import {
   type EntityRow,
 } from './v3-test-helpers';
 
-import type { handlerContext } from '../../generated';
-
+import type { EvmOnEventContext as handlerContext } from 'envio';
 process.env.ENVIO_DISABLE_BOOTSTRAP = 'true';
 
 const REGISTRY = '0x000000000000000000000000000000000000e001';

@@ -28,9 +28,8 @@ import type {
   LeaderboardEpoch,
   LeaderboardKeeperUserSettled,
   UserEpochFinalization,
-  handlerContext,
-} from '../../generated';
-
+  EvmOnEventContext as handlerContext,
+} from 'envio';
 process.env.ENVIO_ENABLE_EXTERNAL_CALLS = 'false';
 process.env.ENVIO_ENABLE_ETH_CALLS = 'false';
 

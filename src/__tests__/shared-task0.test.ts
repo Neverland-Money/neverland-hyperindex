@@ -21,8 +21,7 @@ import {
   updateUserVotingPower,
 } from '../handlers/shared';
 
-import type { UserLeaderboardState, handlerContext } from '../../generated';
-
+import type { UserLeaderboardState, EvmOnEventContext as handlerContext } from 'envio';
 process.env.ENVIO_DISABLE_BOOTSTRAP = 'true';
 
 type Row = { id: string } & Record<string, unknown>;

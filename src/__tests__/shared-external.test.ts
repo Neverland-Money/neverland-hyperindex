@@ -24,7 +24,7 @@ import type {
   LPPoolPositionIndex,
   LPPoolRegistry,
   LPPoolState,
-  leaderboardConfig as LeaderboardConfig,
+  LeaderboardConfig,
   LeaderboardEpoch,
   LeaderboardState,
   NFTMultiplierConfig,
@@ -41,9 +41,8 @@ import type {
   UserReserveList,
   UserTokenList,
   VotingPowerTier,
-  handlerContext,
-} from '../../generated';
-
+  EvmOnEventContext as handlerContext,
+} from 'envio';
 const ADDRESSES = {
   user: '0x000000000000000000000000000000000000e001',
   pool: '0x000000000000000000000000000000000000e002',

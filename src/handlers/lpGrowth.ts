@@ -6,9 +6,8 @@ import type {
   LPPoolEpochGrowth,
   UserLPEpochCursor,
   UserLPPosition,
-  handlerContext,
-} from '../../generated';
-
+  EvmOnEventContext as handlerContext,
+} from 'envio';
 export type LPPositionGrowthSettlement = {
   epochNumber: bigint;
   growthBaselineX128: bigint;

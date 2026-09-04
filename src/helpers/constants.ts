@@ -539,6 +539,12 @@ export const SPECIAL_EDITION_TRANSFER_IN = 'SPECIAL_EDITION_TRANSFER_IN';
                             HELPERS
 //////////////////////////////////////////////////////////////*/
 
-export function normalizeAddress(address: string): string {
-  return address.toLowerCase() as string;
+/**
+ * Lowercases an address and brands it as envio's `Address` (`0x${string}`), which is what
+ * `context.chain.<C>.add` and event `where` filters accept in v3. The single cast lives here
+ * rather than at each of the ~430 call sites; entity id fields stay plain `string`, which
+ * accepts the branded type without further widening.
+ */
+export function normalizeAddress(address: string): `0x${string}` {
+  return address.toLowerCase() as `0x${string}`;
 }

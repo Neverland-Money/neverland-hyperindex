@@ -9,8 +9,7 @@ import {
 } from '../helpers/protocolAggregation';
 import { TestHelpers, type MockDb } from './v3-test-helpers';
 
-import type { handlerContext } from '../../generated';
-
+import type { EvmOnEventContext as handlerContext } from 'envio';
 process.env.ENVIO_ENABLE_EXTERNAL_CALLS = 'false';
 process.env.ENVIO_ENABLE_ETH_CALLS = 'false';
 

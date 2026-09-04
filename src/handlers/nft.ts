@@ -39,14 +39,6 @@
  */
 
 import {
-  LilStars,
-  NFTPartnershipRegistry,
-  Overnads,
-  PartnerNFT,
-  RealNads,
-  The10kSquad,
-} from '../../generated';
-import {
   getOrCreateUserLeaderboardState,
   createMultiplierSnapshot,
   ZERO_ADDRESS,
@@ -59,8 +51,8 @@ import {
   writeNFTRegistryState,
 } from './shared';
 import { normalizeAddress, isStaticNftCollection } from '../helpers/constants';
-import type { handlerContext } from '../../generated';
-
+import type { EvmOnEventContext as handlerContext } from 'envio';
+import { indexer } from './registry';
 async function getOrCreateRegistryState(context: handlerContext, timestamp: number) {
   let state = await context.NFTPartnershipRegistryState.get('current');
   if (!state) {
@@ -166,7 +158,7 @@ async function handleNFTPartnershipAdded(
 }
 
 function registerPartnerNFTCollection(
-  registration: (address: string) => void,
+  registration: (address: `0x${string}`) => void,
   rawCollection: string
 ): void {
   const collection = normalizeAddress(rawCollection);
@@ -182,104 +174,129 @@ function registerPartnerNFTCollection(
 // NFTPartnershipRegistry Handlers
 // ============================================
 
-NFTPartnershipRegistry.PartnershipAdded.contractRegister(async ({ event, context }) => {
-  registerPartnerNFTCollection((a: string) => context.addPartnerNFT(a), event.params.collection);
-});
+indexer.contractRegister(
+  { contract: 'NFTPartnershipRegistry', event: 'PartnershipAdded' },
+  async ({ event, context }) => {
+    registerPartnerNFTCollection(a => context.chain.PartnerNFT.add(a), event.params.collection);
+  }
+);
 
-NFTPartnershipRegistry.PartnershipAddedLegacy.contractRegister(async ({ event, context }) => {
-  registerPartnerNFTCollection((a: string) => context.addPartnerNFT(a), event.params.collection);
-});
+indexer.contractRegister(
+  { contract: 'NFTPartnershipRegistry', event: 'PartnershipAddedLegacy' },
+  async ({ event, context }) => {
+    registerPartnerNFTCollection(a => context.chain.PartnerNFT.add(a), event.params.collection);
+  }
+);
 
-NFTPartnershipRegistry.PartnershipAdded.handler(async ({ event, context }) => {
-  await handleNFTPartnershipAdded(context, event, event.params.staticBoostBps);
-});
+indexer.onEvent(
+  { contract: 'NFTPartnershipRegistry', event: 'PartnershipAdded' },
+  async ({ event, context }) => {
+    await handleNFTPartnershipAdded(context, event, event.params.staticBoostBps);
+  }
+);
 
-NFTPartnershipRegistry.PartnershipAddedLegacy.handler(async ({ event, context }) => {
-  await handleNFTPartnershipAdded(context, event, undefined);
-});
+indexer.onEvent(
+  { contract: 'NFTPartnershipRegistry', event: 'PartnershipAddedLegacy' },
+  async ({ event, context }) => {
+    await handleNFTPartnershipAdded(context, event, undefined);
+  }
+);
 
-NFTPartnershipRegistry.PartnershipUpdated.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const id = normalizeAddress(event.params.collection);
+indexer.onEvent(
+  { contract: 'NFTPartnershipRegistry', event: 'PartnershipUpdated' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const id = normalizeAddress(event.params.collection);
 
-  const partnership = await context.NFTPartnership.get(id);
-  if (partnership) {
-    writeNFTPartnership(context, {
-      ...partnership,
-      name: event.params.name,
-      active: event.params.active,
-      // PartnershipUpdated has no staticBoostBps input, so the spread preserves it.
-      startTimestamp: Number(event.params.startTimestamp),
-      endTimestamp: event.params.endTimestamp > 0n ? Number(event.params.endTimestamp) : undefined,
-      lastUpdate: Number(event.block.timestamp),
+    const partnership = await context.NFTPartnership.get(id);
+    if (partnership) {
+      writeNFTPartnership(context, {
+        ...partnership,
+        name: event.params.name,
+        active: event.params.active,
+        // PartnershipUpdated has no staticBoostBps input, so the spread preserves it.
+        startTimestamp: Number(event.params.startTimestamp),
+        endTimestamp:
+          event.params.endTimestamp > 0n ? Number(event.params.endTimestamp) : undefined,
+        lastUpdate: Number(event.block.timestamp),
+      });
+    }
+
+    await updateActiveCollections(context, id, event.params.active, Number(event.block.timestamp));
+  }
+);
+
+indexer.onEvent(
+  { contract: 'NFTPartnershipRegistry', event: 'PartnershipRemoved' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const id = normalizeAddress(event.params.collection);
+    const timestamp = Number(event.block.timestamp);
+
+    const partnership = await context.NFTPartnership.get(id);
+    if (partnership) {
+      writeNFTPartnership(context, {
+        ...partnership,
+        active: false,
+        lastUpdate: timestamp,
+      });
+    }
+
+    await updateActiveCollections(context, id, false, timestamp);
+  }
+);
+
+indexer.onEvent(
+  { contract: 'NFTPartnershipRegistry', event: 'MultiplierParamsUpdated' },
+  async ({ event, context }) => {
+    await recordProtocolTransaction(
+      context,
+      event.transaction.hash,
+      Number(event.block.timestamp),
+      BigInt(event.block.number)
+    );
+    const id = event.params.timestamp.toString();
+
+    context.NFTMultiplierSnapshot.set({
+      id,
+      firstBonus: event.params.newFirstBonus,
+      decayRatio: event.params.newDecayRatio,
+      activePartnershipCount: event.params.totalActivePartnerships,
+      timestamp: Number(event.params.timestamp),
+      txHash: event.transaction.hash,
+    });
+
+    writeNFTMultiplierConfig(context, {
+      id: 'current',
+      firstBonus: event.params.newFirstBonus,
+      decayRatio: event.params.newDecayRatio,
+      lastUpdate: Number(event.params.timestamp),
     });
   }
-
-  await updateActiveCollections(context, id, event.params.active, Number(event.block.timestamp));
-});
-
-NFTPartnershipRegistry.PartnershipRemoved.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const id = normalizeAddress(event.params.collection);
-  const timestamp = Number(event.block.timestamp);
-
-  const partnership = await context.NFTPartnership.get(id);
-  if (partnership) {
-    writeNFTPartnership(context, {
-      ...partnership,
-      active: false,
-      lastUpdate: timestamp,
-    });
-  }
-
-  await updateActiveCollections(context, id, false, timestamp);
-});
-
-NFTPartnershipRegistry.MultiplierParamsUpdated.handler(async ({ event, context }) => {
-  await recordProtocolTransaction(
-    context,
-    event.transaction.hash,
-    Number(event.block.timestamp),
-    BigInt(event.block.number)
-  );
-  const id = event.params.timestamp.toString();
-
-  context.NFTMultiplierSnapshot.set({
-    id,
-    firstBonus: event.params.newFirstBonus,
-    decayRatio: event.params.newDecayRatio,
-    activePartnershipCount: event.params.totalActivePartnerships,
-    timestamp: Number(event.params.timestamp),
-    txHash: event.transaction.hash,
-  });
-
-  writeNFTMultiplierConfig(context, {
-    id: 'current',
-    firstBonus: event.params.newFirstBonus,
-    decayRatio: event.params.newDecayRatio,
-    lastUpdate: Number(event.params.timestamp),
-  });
-});
+);
 
 // ============================================
 // PartnerNFT Handlers
 // ============================================
 
-PartnerNFT.Transfer.contractRegister(async ({ event, context }) => {
-  context.addPartnerNFT(normalizeAddress(event.srcAddress));
-});
+indexer.contractRegister(
+  { contract: 'PartnerNFT', event: 'Transfer' },
+  async ({ event, context }) => {
+    context.chain.PartnerNFT.add(normalizeAddress(event.srcAddress));
+  }
+);
 
-PartnerNFT.Transfer.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'PartnerNFT', event: 'Transfer' }, async ({ event, context }) => {
   await recordProtocolTransaction(
     context,
     event.transaction.hash,
@@ -425,23 +442,23 @@ PartnerNFT.Transfer.handler(async ({ event, context }) => {
 // ============================================
 
 // The10kSquad uses same handler as PartnerNFT
-The10kSquad.Transfer.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'The10kSquad', event: 'Transfer' }, async ({ event, context }) => {
   // Forward to PartnerNFT handler logic - same event structure
   await handleNFTTransfer(event, context);
 });
 
 // Overnads uses same handler as PartnerNFT
-Overnads.Transfer.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'Overnads', event: 'Transfer' }, async ({ event, context }) => {
   await handleNFTTransfer(event, context);
 });
 
 // LilStars uses same handler as PartnerNFT
-LilStars.Transfer.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'LilStars', event: 'Transfer' }, async ({ event, context }) => {
   await handleNFTTransfer(event, context);
 });
 
 // RealNads uses same handler as PartnerNFT
-RealNads.Transfer.handler(async ({ event, context }) => {
+indexer.onEvent({ contract: 'RealNads', event: 'Transfer' }, async ({ event, context }) => {
   await handleNFTTransfer(event, context);
 });
 
