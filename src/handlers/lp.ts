@@ -88,7 +88,7 @@ import {
 } from './lpGrowth';
 
 import type { LPStaticTransitionRecord } from '../helpers/constants';
-import type { LPPoolConfig, UserLPPosition, handlerContext } from '../../generated';
+import type { LPPoolConfig, LPPoolState, UserLPPosition, handlerContext } from '../../generated';
 
 const WAD = 10n ** 18n;
 // Loop-invariant: a 193-bit exponentiation that was rebuilt on every price update.
@@ -1290,6 +1290,35 @@ function calculateSwapVolumeUsd(
   return (value0 + value1) / 2n;
 }
 
+// TVL of a fungible-share pool (UniswapV2 pair, Balancer AutoRange) is reserves x
+// prices -- Uniswap's own `reserveUSD` -- and both inputs are already kept current
+// by the Sync handler, which runs before Swap in the same tx. This is the O(1)
+// replacement for the per-holder position walk the two-engine refactor removed
+// from the fungible path; without it feeAprBps divides by a missing LPPoolStats
+// row and reports 0.
+async function getFungiblePoolTvlUsd(
+  context: handlerContext,
+  poolConfig: LPPoolConfig,
+  poolState: LPPoolState | undefined,
+  timestamp: number
+): Promise<bigint> {
+  const poolV2State = await context.LPPoolV2State.get(normalizeAddress(poolConfig.pool));
+  if (!poolState || !poolV2State) return 0n;
+  const { token0Decimals, token1Decimals } = await getPoolTokenDecimals(
+    context,
+    poolConfig,
+    timestamp
+  );
+  return calculatePositionValueUsd(
+    poolV2State.reserve0,
+    poolV2State.reserve1,
+    poolState.token0Price,
+    poolState.token1Price,
+    token0Decimals,
+    token1Decimals
+  );
+}
+
 async function updatePoolFeeStats(
   context: handlerContext,
   poolConfig: LPPoolConfig,
@@ -1372,8 +1401,11 @@ async function updatePoolFeeStats(
     feesUsd24h = (feesUsd24h * lpFeeFraction) / totalFraction;
   }
 
-  const poolStats = await poolStatsStore?.get?.(poolId);
-  const tvlUsd = poolStats?.totalValueUsd ?? 0n;
+  // Fungible-share pools have no LPPoolStats row (only the V3 NFT-position handlers
+  // maintain one), so their TVL is read straight off the reserves instead.
+  const tvlUsd = isV2PoolConfig(poolConfig)
+    ? await getFungiblePoolTvlUsd(context, poolConfig, poolState, timestamp)
+    : ((await poolStatsStore?.get?.(poolId))?.totalValueUsd ?? 0n);
   const feeAprBps =
     feesUsd24h > 0n && tvlUsd > 0n ? (feesUsd24h * DAYS_PER_YEAR * BASIS_POINTS) / tvlUsd : 0n;
 
