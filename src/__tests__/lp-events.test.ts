@@ -3560,13 +3560,16 @@ test('uniswap v2 transfer creates a synthetic position while sync leaves it lazy
   assert.equal(v2State?.reserve1, 500_000n * 10n ** 18n);
 });
 
+// The fee APR denominator for a fungible pool is reserves x prices, both written by
+// the Sync that precedes every Swap in the same tx. No LPPoolStats row is seeded:
+// the fungible engine never writes one, and seeding it here is exactly what hid
+// the production feeAprBps = 0 regression.
 test('uniswap v2 swap updates fee apr stats', async () => {
   const TestHelpers = loadTestHelpers();
   let mockDb = TestHelpers.MockDb.createMockDb();
   const eventData = createEventDataFactory();
 
   const v2Pool = '0x000000000000000000000000000000000000b201';
-  const tvlUsd = 1_000n * 10n ** 8n;
 
   mockDb = mockDb.entities.LPPoolConfig.set({
     id: v2Pool,
@@ -3588,19 +3591,87 @@ test('uniswap v2 swap updates fee apr stats', async () => {
     pool: v2Pool,
     currentTick: 0,
     sqrtPriceX96: 0n,
-    token0Price: PRICE_E8,
-    token1Price: PRICE_E8,
+    token0Price: 0n,
+    token1Price: 0n,
     feeProtocol0: 0,
     feeProtocol1: 0,
     lastUpdate: 0,
   });
-  mockDb = mockDb.entities.LPPoolStats.set({
+  mockDb = mockDb.entities.TokenInfo.set({
+    id: USDC_ADDRESS,
+    address: USDC_ADDRESS,
+    decimals: DECIMALS,
+    symbol: 'USDC',
+    name: 'USD Coin',
+    lastUpdate: 0,
+  });
+  mockDb = mockDb.entities.TokenInfo.set({
+    id: ADDRESSES.token0,
+    address: ADDRESSES.token0,
+    decimals: DECIMALS,
+    symbol: 'TK0',
+    name: 'Token0',
+    lastUpdate: 0,
+  });
+
+  // 500 USDC + 500 TK0 (6 decimals each) at a 1:1 reserve ratio: token0 is stable so
+  // the Sync derives token1 = $1, giving TVL = $1,000 (1_000 * 1e8).
+  const sync = TestHelpers.UniswapV2Pair.Sync.createMockEvent({
+    reserve0: 500_000_000n,
+    reserve1: 500_000_000n,
+    ...eventData(200, 4000, v2Pool),
+  });
+  mockDb = await TestHelpers.UniswapV2Pair.Sync.processEvent({
+    event: sync,
+    mockDb,
+  });
+  assert.equal(mockDb.entities.LPPoolStats.get(v2Pool), undefined);
+
+  const swap = TestHelpers.UniswapV2Pair.Swap.createMockEvent({
+    sender: ADDRESSES.user,
+    amount0In: 1_000_000n,
+    amount1In: 0n,
+    amount0Out: 0n,
+    amount1Out: 2_000_000n,
+    to: ADDRESSES.user,
+    ...eventData(200, 4000, v2Pool),
+  });
+  mockDb = await TestHelpers.UniswapV2Pair.Swap.processEvent({
+    event: swap,
+    mockDb,
+  });
+
+  const feeStats = mockDb.entities.LPPoolFeeStats.get(v2Pool);
+  assert.ok(feeStats);
+  assert.equal(feeStats?.volumeUsd24h, 150000000n);
+  assert.equal(feeStats?.feesUsd24h, 450000n);
+  // 450000 * 365 * 10000 / (1_000 * 1e8) = 16.4 -> 16 bps
+  assert.equal(feeStats?.feeAprBps, 16n);
+});
+
+// A fungible pool that has swapped before its first Sync was observed has no
+// reserves to value, so the APR is 0 rather than a division against a missing
+// LPPoolStats row.
+test('uniswap v2 swap reports zero fee apr until reserves are known', async () => {
+  const TestHelpers = loadTestHelpers();
+  let mockDb = TestHelpers.MockDb.createMockDb();
+  const eventData = createEventDataFactory();
+
+  const v2Pool = '0x000000000000000000000000000000000000b202';
+
+  mockDb = mockDb.entities.LPPoolConfig.set({
     id: v2Pool,
     pool: v2Pool,
-    totalPositions: 1,
-    inRangePositions: 1,
-    totalValueUsd: tvlUsd,
-    inRangeValueUsd: tvlUsd,
+    positionManager: v2Pool,
+    token0: USDC_ADDRESS,
+    token1: ADDRESSES.token0,
+    fee: 3000,
+    lpRateBps: 0n,
+    isActive: true,
+    enabledAtEpoch: 1n,
+    enabledAtTimestamp: 0,
+    disabledAtEpoch: undefined,
+    disabledAtTimestamp: undefined,
     lastUpdate: 0,
   });
   mockDb = mockDb.entities.TokenInfo.set({
@@ -3636,9 +3707,10 @@ test('uniswap v2 swap updates fee apr stats', async () => {
 
   const feeStats = mockDb.entities.LPPoolFeeStats.get(v2Pool);
   assert.ok(feeStats);
-  assert.equal(feeStats?.volumeUsd24h, 150000000n);
-  assert.equal(feeStats?.feesUsd24h, 450000n);
-  assert.equal(feeStats?.feeAprBps, 16n);
+  // token1 has no price yet, so only the stable leg is valued: (1e8 + 0) / 2.
+  assert.equal(feeStats?.volumeUsd24h, 50000000n);
+  assert.equal(feeStats?.feesUsd24h, 150000n);
+  assert.equal(feeStats?.feeAprBps, 0n);
 });
 
 test('legacy uniswap v3 swap hardstops after cutover', async () => {
@@ -4688,7 +4760,6 @@ test('uniswap v2 swap uses stablecoin fallback pricing when pool prices are zero
   const eventData = createEventDataFactory();
 
   const v2Pool = '0x000000000000000000000000000000000000b203';
-  const tvlUsd = 1_000n * 10n ** 8n;
 
   mockDb = mockDb.entities.LPPoolConfig.set({
     id: v2Pool,
@@ -4714,15 +4785,6 @@ test('uniswap v2 swap uses stablecoin fallback pricing when pool prices are zero
     token1Price: 0n,
     feeProtocol0: 0,
     feeProtocol1: 0,
-    lastUpdate: 0,
-  });
-  mockDb = mockDb.entities.LPPoolStats.set({
-    id: v2Pool,
-    pool: v2Pool,
-    totalPositions: 1,
-    inRangePositions: 1,
-    totalValueUsd: tvlUsd,
-    inRangeValueUsd: tvlUsd,
     lastUpdate: 0,
   });
   mockDb = mockDb.entities.TokenInfo.set({
@@ -4758,9 +4820,12 @@ test('uniswap v2 swap uses stablecoin fallback pricing when pool prices are zero
 
   const feeStats = mockDb.entities.LPPoolFeeStats.get(v2Pool);
   assert.ok(feeStats);
+  // Both legs priced at $1 through the stablecoin fallback, so the swap is counted
+  // in full even though the pool has never published prices.
   assert.equal(feeStats?.volumeUsd24h, 100000000n);
   assert.equal(feeStats?.feesUsd24h, 300000n);
-  assert.equal(feeStats?.feeAprBps, 10n);
+  // No Sync has been observed, so there are no reserves to value: APR stays 0.
+  assert.equal(feeStats?.feeAprBps, 0n);
 });
 
 test('uniswap v2 sync with no positions leaves pool stats absent', async () => {
@@ -7005,7 +7070,7 @@ test('all four fungible market families have identical complete traces for one v
   }
   assert.deepEqual(traceSummary, [
     { name: 'UniswapV2Pair.Sync', preload: 43, ordered: 42 },
-    { name: 'BalancerVault.Swap', preload: 82, ordered: 80 },
+    { name: 'BalancerVault.Swap', preload: 84, ordered: 82 },
     { name: 'BalancerVault.LiquidityAdded', preload: 51, ordered: 49 },
     { name: 'BalancerVault.LiquidityRemoved', preload: 51, ordered: 49 },
   ]);
